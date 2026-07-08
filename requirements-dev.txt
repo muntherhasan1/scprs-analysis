@@ -1,0 +1,8 @@
+# Dev + security tooling. Install with: pip install -r requirements-dev.txt
+-r requirements.txt
+
+ruff>=0.6          # lint + format
+bandit>=1.7        # Python SAST (finds insecure code patterns)
+pip-audit>=2.7     # scans dependencies for known CVEs
+pre-commit>=3.8    # runs local hooks before each commit
+pytest>=8.0

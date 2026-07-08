@@ -1,0 +1,38 @@
+# Local guardrails — run before every commit. Install once with:
+#   pip install pre-commit && pre-commit install
+# Run manually against all files with: pre-commit run --all-files
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.6.0
+    hooks:
+      - id: detect-private-key        # blocks committed private keys
+      - id: check-added-large-files   # blocks accidental data dumps
+        args: ["--maxkb=5000"]
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+      - id: check-merge-conflict
+
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.18.4
+    hooks:
+      - id: gitleaks                  # scans staged changes for secrets
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.6.9
+    hooks:
+      - id: ruff                      # lint
+      - id: ruff-format               # format
+
+  # Bandit runs as a local hook (python -m) rather than in an isolated
+  # pre-commit environment: on Windows, Smart App Control / WDAC blocks the
+  # unsigned .exe shims pre-commit generates (WinError 4551). Using the
+  # installed interpreter sidesteps that. Requires `pip install bandit[toml]`
+  # (included in requirements-dev.txt).
+  - repo: local
+    hooks:
+      - id: bandit
+        name: bandit (SAST)
+        entry: python -m bandit -c pyproject.toml
+        language: system
+        types: [python]
+        exclude: ^tests/

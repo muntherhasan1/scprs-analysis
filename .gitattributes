@@ -1,0 +1,10 @@
+# Normalize line endings to LF in the repo (checked out as-is on Windows).
+# Keeps diffs clean and avoids CRLF warnings across contributors/CI.
+* text=auto eol=lf
+
+# Binary/data types: never touch line endings.
+*.csv binary
+*.parquet binary
+*.xlsx binary
+*.db binary
+*.sqlite binary

@@ -1,0 +1,17 @@
+version: 2
+updates:
+  # Keep Python dependencies patched against known CVEs.
+  - package-ecosystem: pip
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 10
+    groups:
+      python-deps:
+        patterns: ["*"]
+
+  # Keep GitHub Actions pinned to current, non-vulnerable versions.
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly

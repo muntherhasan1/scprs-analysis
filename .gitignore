@@ -1,0 +1,51 @@
+# ---- Secrets & credentials (NEVER commit) ----
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+credentials.json
+service-account*.json
+secrets/
+.secrets/
+
+# ---- Data (SCPRS extracts may be sensitive; keep out of git) ----
+# Ignore data/ contents but keep the (empty) directory via .gitkeep.
+data/*
+!data/.gitkeep
+*.csv
+*.parquet
+*.xlsx
+*.db
+*.sqlite
+
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+env/
+.python-version
+
+# ---- Tooling / caches ----
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.coverage
+htmlcov/
+.ipynb_checkpoints/
+
+# ---- OS / editor ----
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# ---- Claude Code (local, machine-specific) ----
+.claude/settings.local.json
