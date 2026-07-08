@@ -1,3 +1,8 @@
 # Runtime dependencies. Pin versions for reproducible, auditable deploys.
 pandas>=2.2
 python-dotenv>=1.0
+
+# --- Web scraping / CSV downloads ---
+requests>=2.32
+beautifulsoup4>=4.12
+lxml>=5.2          # fast, robust HTML parser backend for BeautifulSoup

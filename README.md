@@ -17,14 +17,30 @@ pre-commit install          # enable local secret/lint/SAST hooks
 cp .env.example .env        # then fill in real values (never commit .env)
 ```
 
+Activating the venv puts `ruff`, `pytest`, `bandit`, and `pre-commit` on your
+PATH, so you can call them directly (no `python -m` prefix needed).
+
 ## Layout
 
 ```
-src/            application + analysis code (src/config.py loads secrets safely)
+src/config.py   safe secrets loading (env-based, fails loudly)
+src/scraper.py  starter web scraper: finds + downloads CSVs into data/
 tests/          pytest suite
 data/           local datasets — git-ignored, never committed
-.github/        hardened CI + Dependabot
+.github/        hardened CI + Dependabot (dormant until a GitHub remote exists)
 ```
+
+## Scraping CSVs
+
+```bash
+# Download every .csv linked from a page into data/ (sanitized filenames):
+python -m src.scraper https://example.gov/scprs/reports
+```
+
+`src/scraper.py` is a starting point — adjust the link-finding to match your
+target page. It enforces request timeouts, keeps TLS verification on, and
+sanitizes output filenames to prevent path traversal. Check a site's
+robots.txt / terms before scraping it.
 
 ## Security
 
