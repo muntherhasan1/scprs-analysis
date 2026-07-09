@@ -552,6 +552,46 @@ def _build_marts(con):
             WHERE f.unit_price > 0
             GROUP BY u.unspsc, u.unspsc_description
             HAVING COUNT(DISTINCT f.supplier_key) >= 2""",
+        # -- supplier category profiles (what each vendor actually supplies) -- #
+        # Supplier x UNSPSC footprint with the category's share of the supplier's
+        # enriched line spend (needs drill-down lines, so grows with enrichment).
+        "gold_supplier_unspsc_profile": """
+            WITH sc AS (
+              SELECT f.supplier_key, u.unspsc, u.unspsc_description,
+                     COUNT(*) AS line_count, SUM(f.line_amount) AS category_value
+              FROM fact_line f JOIN dim_unspsc u ON u.unspsc_key = f.unspsc_key
+              GROUP BY f.supplier_key, u.unspsc, u.unspsc_description)
+            SELECT s.supplier_id, s.supplier_name, sc.unspsc, sc.unspsc_description,
+                   sc.line_count, ROUND(sc.category_value, 0) AS category_value,
+                   ROUND(100.0 * sc.category_value
+                         / NULLIF(SUM(sc.category_value) OVER (PARTITION BY sc.supplier_key), 0), 1)
+                         AS pct_of_supplier
+            FROM sc JOIN dim_supplier s ON s.supplier_key = sc.supplier_key""",
+        # One row per supplier: category breadth, primary category, specialization.
+        "gold_supplier_specialization": """
+            WITH sc AS (
+              SELECT f.supplier_key, u.unspsc_description AS category, SUM(f.line_amount) AS val
+              FROM fact_line f JOIN dim_unspsc u ON u.unspsc_key = f.unspsc_key
+              GROUP BY f.supplier_key, u.unspsc_description),
+            ranked AS (
+              SELECT supplier_key, category, val,
+                     SUM(val) OVER (PARTITION BY supplier_key) AS total,
+                     COUNT(*) OVER (PARTITION BY supplier_key) AS category_count,
+                     ROW_NUMBER() OVER (PARTITION BY supplier_key ORDER BY val DESC) AS rn
+              FROM sc)
+            SELECT s.supplier_id, s.supplier_name, r.category_count,
+                   r.category AS primary_category, ROUND(r.total, 0) AS enriched_line_value,
+                   ROUND(100.0 * r.val / NULLIF(r.total, 0), 1) AS primary_category_pct
+            FROM ranked r JOIN dim_supplier s ON s.supplier_key = r.supplier_key
+            WHERE r.rn = 1""",
+        # Broad-coverage version from document-level acquisition type (all docs).
+        "gold_supplier_acquisition_profile": """
+            SELECT s.supplier_id, s.supplier_name, a.acquisition_type,
+                   COUNT(*) AS document_count, ROUND(SUM(f.grand_total), 0) AS total_value
+            FROM fact_document f
+            JOIN dim_supplier s ON s.supplier_key = f.supplier_key
+            JOIN dim_acquisition a ON a.acq_key = f.acq_key
+            GROUP BY s.supplier_id, s.supplier_name, a.acquisition_type""",
     }
     for name, sql in marts.items():
         con.execute(f"DROP VIEW IF EXISTS {name}")

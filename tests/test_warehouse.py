@@ -153,6 +153,13 @@ def test_warehouse_build(tmp_path):
             ).fetchone()[0]
             >= 1
         )
+        # supplier category profile: S2's two enriched lines span two UNSPSC categories
+        assert (
+            con.execute(
+                "SELECT category_count FROM gold_supplier_specialization WHERE supplier_id='S2'"
+            ).fetchone()[0]
+            == 2
+        )
     finally:
         con.close()
 
