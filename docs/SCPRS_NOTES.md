@@ -18,9 +18,12 @@ Reverse-engineering findings for the California FI$Cal SCPRS search:
 Other available filters: Supplier ID/Name, Purchase Document #, Description,
 Acquisition Type/Method (useful for splitting oversized result sets — see below).
 
-> **Department list is partial.** The lookup returns only the first ~300 codes
-> (last is `6780`). Higher codes still work when entered directly — e.g. `8660`
-> (Public Utilities Commission) returns data fine despite not being listed.
+> **Enumerating all departments.** The lookup only returns the first ~300 rows
+> of any single search. To get the complete list, `fetch_departments()` runs the
+> Business Unit criteria "**begins with**" each digit `0`-`9` (operator field
+> `ZZ_PO_BU_CLSVW_BUSINESS_UNIT$op = 1`) and merges the buckets — 437 codes total
+> (`references/departments.csv`), including e.g. `8660` Public Utilities
+> Commission, which a single unfiltered lookup misses.
 
 ## Why a headless browser is required
 Two behaviors defeat a plain `requests` scrape:

@@ -191,42 +191,62 @@ def download_range(
     return df, warnings
 
 
-def fetch_departments() -> list[tuple[str, str]]:
-    """Return (code, name) for every valid Department via the site's lookup.
+# Fields on the Business Unit lookup (prompt) page.
+_LK_CRITERIA = "ZZ_PO_BU_CLSVW_BUSINESS_UNIT"
+_LK_OPERATOR = _LK_CRITERIA + "$op"  # "1" = "begins with"
 
-    Uses a plain HTTP request (no browser needed for the lookup) by driving the
-    PeopleSoft prompt action on the Business Unit field.
-    """
-    import re
 
-    import requests
-    from bs4 import BeautifulSoup
-
-    s = requests.Session()
-    s.headers.update({"User-Agent": "scprs-analysis/0.1 (+muntherhasan1@gmail.com)"})
-    form = BeautifulSoup(s.get(SEARCH_URL, timeout=45).text, "lxml").find("form", {"name": "win0"})
-    data = {
+def _form_fields(soup):
+    form = soup.find("form", {"name": "win0"})
+    return {
         i.get("name"): (i.get("value", "") or "")
         for i in form.find_all(["input", "select", "textarea"])
         if i.get("name")
     }
-    data["ICAction"] = "ZZ_SCPRS_SP_WRK_BUSINESS_UNIT$prompt"
-    data["ICStateNum"] = "1"
-    soup = BeautifulSoup(s.post(SEARCH_URL, data=data, timeout=90).text, "lxml")
 
-    out: list[tuple[str, str]] = []
-    seen: set[str] = set()
+
+def _parse_lookup_rows(soup):
+    import re
+
     for a in soup.find_all("a"):
         code = a.get_text(strip=True)
-        if re.fullmatch(r"\d{4,5}", code) and code not in seen:
+        if re.fullmatch(r"\d{4,5}", code):
             tr = a.find_parent("tr")
             texts = [c.get_text(strip=True) for c in tr.find_all(["td", "a", "span"])] if tr else []
             name = max(
                 (t for t in texts if t and not re.fullmatch(r"\d{4,5}", t)), key=len, default=""
             )
-            out.append((code, name))
-            seen.add(code)
-    return out
+            yield code, name
+
+
+def fetch_departments() -> list[tuple[str, str]]:
+    """Return (code, name) for every valid Department via the site's lookup.
+
+    Uses plain HTTP (no browser). The lookup only returns the first ~300 rows
+    per search, so we iterate the Business Unit criteria "begins with" each
+    digit 0-9 (each bucket is well under the cap) and merge the results.
+    """
+    import requests
+    from bs4 import BeautifulSoup
+
+    s = requests.Session()
+    s.headers.update({"User-Agent": "scprs-analysis/0.1 (+muntherhasan1@gmail.com)"})
+    # Open the Department lookup (prompt) once.
+    data = _form_fields(BeautifulSoup(s.get(SEARCH_URL, timeout=45).text, "lxml"))
+    data["ICAction"] = "ZZ_SCPRS_SP_WRK_BUSINESS_UNIT$prompt"
+    data["ICStateNum"] = "1"
+    soup = BeautifulSoup(s.post(SEARCH_URL, data=data, timeout=90).text, "lxml")
+
+    found: dict[str, str] = {}
+    for digit in "0123456789":
+        d = _form_fields(soup)  # reuse latest state (ICSID/ICStateNum)
+        d[_LK_CRITERIA] = digit
+        d[_LK_OPERATOR] = "1"  # begins with
+        d["ICAction"] = "#ICSearch"
+        soup = BeautifulSoup(s.post(SEARCH_URL, data=d, timeout=90).text, "lxml")
+        for code, name in _parse_lookup_rows(soup):
+            found.setdefault(code, name)
+    return sorted(found.items())
 
 
 def load_extract(path: Path):
