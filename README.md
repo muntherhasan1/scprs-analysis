@@ -158,7 +158,23 @@ python -m src.model enrich  8660 01/01/2016 07/08/2026 --limit 50   # a chunk at
 ```
 
 A day that errors is left unrecorded and retried on the next run; `--force`
-re-processes days already done.
+re-processes days already done. `--newest-first` drills the most recent days
+first (recent-data priority).
+
+To target a subset, `--acq-type` narrows the run to days that have at least one
+document of a given acquisition type (a SQL `LIKE` pattern):
+
+```bash
+# Only drill days with an IT Services document (FY2021 onward, newest first):
+python -m src.model enrich 8660 07/01/2021 06/30/2028 \
+    --acq-type "IT Services%" --newest-first
+```
+
+The drill still loads **every** document on each selected day (the SCPRS search
+grid can't filter by acquisition type) — the flag only chooses which days to
+visit, cutting a targeted pass from every active day down to the days that
+matter. Day completion is recorded per business unit, so filtered and unfiltered
+runs share the same `details_progress` and never re-drill a finished day.
 
 ### Run it a little every day (Windows Task Scheduler)
 
