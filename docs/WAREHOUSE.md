@@ -65,12 +65,28 @@ member.
   vendor supplies and how specialized.
 - `gold_supplier_acquisition_profile` — broad (all-document) category footprint.
 
+**Canonical vendor (master data):** SCPRS issues a `supplier_id` per *registration*,
+so one company can appear under several ids (NORTH RIDGE CONSULTING has two; BETA
+ALPHA PSI four), splitting rollups and enrichment. `src/supplier_master.py` resolves
+identities to a canonical entity via a curated, version-controlled crosswalk
+(`references/supplier_master.csv`: `supplier_id → canonical_id/canonical_name`, plus
+an optional `parent_name`). `build` adds `canonical_id`/`canonical_name`/`parent_name`
+to `dim_supplier` (a supplier defaults to being its own canonical entity), enabling:
+- `gold_canonical_supplier_spend` — spend rolled up to the canonical vendor;
+  `registration_count > 1` flags a deduplicated vendor.
+- `gold_supplier_master` — canonical vendor scorecard (deduped metrics + parent +
+  web firmographics, matched by canonical name).
+
+Seed/curate the crosswalk with `python -m src.supplier_master suggest [--write]`
+(it proposes ids that share a normalized name, canonical = highest-spend id).
+
 **Supplier enrichment:** web-researched firmographic profiles (org type, HQ,
 certifications, ownership) with **source provenance + a confidence score** live
 in a separate store `data/supplier_enrichment.db` (`src/supplier_research.py`).
 The warehouse snapshots them to `bronze_supplier_web` and joins them to the
-vendor scorecard in **`gold_supplier_enriched`** (internal metrics + external
-firmographics + confidence, matched by supplier name).
+per-registration scorecard in **`gold_supplier_enriched`** and to the canonical
+scorecard in **`gold_supplier_master`** (internal metrics + external firmographics
++ confidence, matched by supplier name).
 
 ## Control & data quality
 - **`dw_batch`** — one row per build (batch id, start/finish, status, row counts).

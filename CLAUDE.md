@@ -92,12 +92,22 @@ separate; the warehouse ATTACHes the source read-only. Gold is a Kimball star
 schema (surrogate-keyed `dim_*`, `fact_document`/`fact_line`/`fact_associated_po`,
 plus `gold_*` mart views). See `docs/WAREHOUSE.md` for the full layer/grain spec.
 
+**Supplier identity is many-to-one.** SCPRS issues a `supplier_id` per vendor
+*registration*, so one company appears under several ids (NORTH RIDGE CONSULTING
+has two, BETA ALPHA PSI four). `src/supplier_master.py` + the curated crosswalk
+`references/supplier_master.csv` resolve these to a `canonical_id`/`canonical_name`
+(+ optional `parent_name`), which `build` stamps onto `dim_supplier`. Prefer the
+canonical marts (`gold_canonical_supplier_spend`, `gold_supplier_master`) for
+vendor rollups; the per-`supplier_id` marts double-count split vendors. Web
+enrichment joins to gold **by name**, so it attaches to the canonical entity.
+
 ## Security & conventions
 
 - Secrets load only through `src/config.py` (`require()` fails loudly on a missing
   var) from a git-ignored `.env` or the platform secret store — never hard-coded.
-- `data/` is git-ignored and never committed; `references/departments.csv` (the
-  300 valid business-unit codes) is the one committed dataset.
+- `data/` is git-ignored and never committed; the committed datasets live in
+  `references/` (`departments.csv`, the 300 valid business-unit codes, and
+  `supplier_master.csv`, the curated canonical-vendor crosswalk).
 - Ruff lint selects `E,F,I,B,S` (incl. flake8-bandit). `warehouse.py` is exempt
   from `S608`/`E501` because it generates DDL from **internal constants only**
   with parameterized values — keep that invariant true (never interpolate user

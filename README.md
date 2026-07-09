@@ -71,6 +71,19 @@ python -m src.warehouse info     # layer row counts + last batch
 
 See [docs/WAREHOUSE.md](docs/WAREHOUSE.md) for the full design.
 
+### Canonical vendors (supplier master data)
+
+SCPRS issues a `supplier_id` per vendor *registration*, so one company can appear
+under several ids. `src/supplier_master.py` resolves them to a canonical entity via
+a curated crosswalk (`references/supplier_master.csv`), which the warehouse stamps
+onto `dim_supplier` and rolls up in `gold_canonical_supplier_spend` /
+`gold_supplier_master` (deduped scorecard + parent + web firmographics).
+
+```bash
+python -m src.supplier_master suggest          # ids that look like one vendor
+python -m src.supplier_master suggest --write  # (re)seed the crosswalk, then curate + commit
+```
+
 ## Deployment (Docker)
 
 The pipeline is containerized (`Dockerfile`) so it can run off a personal machine

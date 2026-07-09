@@ -162,6 +162,20 @@ def test_warehouse_build(tmp_path):
             ).fetchone()[0]
             == 2
         )
+        # canonical layer wired in: unmapped suppliers are their own canonical entity
+        assert (
+            con.execute("SELECT canonical_id FROM dim_supplier WHERE supplier_id='S1'").fetchone()[
+                0
+            ]
+            == "S1"
+        )
+        assert (
+            con.execute(
+                "SELECT registration_count FROM gold_canonical_supplier_spend "
+                "WHERE canonical_name='Acme'"
+            ).fetchone()[0]
+            == 1
+        )
     finally:
         con.close()
 

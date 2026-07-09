@@ -36,7 +36,7 @@ import sqlite3
 from datetime import datetime
 from pathlib import Path
 
-from . import scprs
+from . import scprs, supplier_master
 
 SOURCE_DB = scprs.DATA_DIR / "scprs.db"
 WAREHOUSE_DB = scprs.DATA_DIR / "warehouse.db"
@@ -383,6 +383,7 @@ def build_gold(con: sqlite3.Connection, ts: str) -> dict:
         "SELECT DISTINCT supplier_id, supplier_name FROM silver_document",
         ts,
     )
+    _apply_supplier_master(con)  # canonical entity + parent attributes on dim_supplier
     _build_dim(
         con,
         "dim_buyer",
@@ -494,6 +495,57 @@ def build_gold(con: sqlite3.Connection, ts: str) -> dict:
     }
 
 
+def _apply_supplier_master(con, master: dict | None = None) -> None:
+    """Add canonical-entity attributes to dim_supplier from the curated crosswalk.
+
+    Every supplier defaults to being its own canonical entity; the crosswalk
+    (references/supplier_master.csv) remaps duplicate registrations of one vendor
+    to a shared canonical_id/canonical_name and tags corporate parents. The parent
+    is then propagated to every registration of the same canonical entity so any
+    grouping by canonical_id sees it.
+    """
+    master = supplier_master.load_master() if master is None else master
+    for col in ("canonical_id", "canonical_name", "parent_name"):
+        con.execute(f"ALTER TABLE dim_supplier ADD COLUMN {col} TEXT")  # noqa: S608 - constants
+    con.execute(
+        "UPDATE dim_supplier SET canonical_id = supplier_id, canonical_name = supplier_name"
+    )
+    if not master:
+        return
+    con.execute(
+        "CREATE TEMP TABLE _xref (supplier_id TEXT PRIMARY KEY, canonical_id TEXT, "
+        "canonical_name TEXT, parent_name TEXT)"
+    )
+    con.executemany(
+        "INSERT OR REPLACE INTO _xref VALUES (?, ?, ?, ?)",
+        [
+            (sid, v["canonical_id"], v["canonical_name"] or None, v["parent_name"])
+            for sid, v in master.items()
+        ],
+    )
+    # Remap the registrations named in the crosswalk (values bound; names literal).
+    con.execute(
+        "UPDATE dim_supplier SET "
+        "  canonical_id = COALESCE("
+        "    (SELECT x.canonical_id FROM _xref x WHERE x.supplier_id = dim_supplier.supplier_id),"
+        "    canonical_id), "
+        "  canonical_name = COALESCE("
+        "    (SELECT x.canonical_name FROM _xref x WHERE x.supplier_id = dim_supplier.supplier_id),"
+        "    canonical_name), "
+        "  parent_name = "
+        "    (SELECT x.parent_name FROM _xref x WHERE x.supplier_id = dim_supplier.supplier_id) "
+        "WHERE supplier_id IN (SELECT supplier_id FROM _xref)"
+    )
+    # Propagate a parent to every sibling registration of the same canonical entity.
+    con.execute(
+        "UPDATE dim_supplier SET parent_name = "
+        "  (SELECT MAX(d2.parent_name) FROM dim_supplier d2 "
+        "   WHERE d2.canonical_id = dim_supplier.canonical_id) "
+        "WHERE parent_name IS NULL"
+    )
+    con.execute("DROP TABLE _xref")
+
+
 def _build_dim(con, table, key, natural_cols, distinct_sql, ts):
     con.execute(f"DROP TABLE IF EXISTS {table}")
     cols = ", ".join(natural_cols)
@@ -552,6 +604,36 @@ def _build_marts(con):
             JOIN dim_acquisition a ON a.acq_key = f.acq_key
             LEFT JOIN dim_date dd ON dd.date_key = f.start_date_key
             GROUP BY s.supplier_id, s.supplier_name""",
+        # Spend rolled up to the canonical vendor (merges duplicate supplier_ids).
+        # registration_count > 1 means several SCPRS ids were consolidated here.
+        "gold_canonical_supplier_spend": """
+            SELECT s.canonical_id, s.canonical_name,
+                   COUNT(DISTINCT s.supplier_id) AS registration_count,
+                   COUNT(*) AS document_count, ROUND(SUM(f.grand_total), 0) AS total_value
+            FROM fact_document f JOIN dim_supplier s ON s.supplier_key = f.supplier_key
+            GROUP BY s.canonical_id, s.canonical_name""",
+        # Canonical vendor scorecard: deduped metrics + parent + web firmographics.
+        "gold_supplier_master": """
+            WITH agg AS (
+              SELECT s.canonical_id, s.canonical_name, MAX(s.parent_name) AS parent_name,
+                     COUNT(DISTINCT s.supplier_id) AS registration_count,
+                     COUNT(*) AS award_count, ROUND(SUM(f.grand_total), 0) AS total_value,
+                     COUNT(DISTINCT f.dept_key) AS department_count,
+                     ROUND(100.0 * SUM(CASE WHEN a.competitive_flag = 'Non-Competitive'
+                           THEN f.grand_total ELSE 0 END) / NULLIF(SUM(f.grand_total), 0), 1)
+                           AS pct_noncompetitive_value
+              FROM fact_document f
+              JOIN dim_supplier s ON s.supplier_key = f.supplier_key
+              JOIN dim_acquisition a ON a.acq_key = f.acq_key
+              GROUP BY s.canonical_id, s.canonical_name)
+            SELECT agg.canonical_id, agg.canonical_name, agg.parent_name,
+                   agg.registration_count, agg.award_count, agg.total_value,
+                   agg.department_count, agg.pct_noncompetitive_value,
+                   w.org_type, w.hq_city, w.hq_state, w.sb_dvbe, w.website,
+                   w.confidence AS profile_confidence
+            FROM agg
+            LEFT JOIN bronze_supplier_web w
+              ON UPPER(w.supplier_name) = UPPER(agg.canonical_name)""",
         # Supplier share of each department's total spend.
         "gold_supplier_share": """
             WITH v AS (
