@@ -342,6 +342,7 @@ def enrich_details(
     force: bool = False,
     limit: int | None = None,
     newest_first: bool = False,
+    acq_type: str | None = None,
     log=print,
 ) -> dict:
     """Drill into PO Details one active day at a time, resuming across runs.
@@ -351,25 +352,39 @@ def enrich_details(
     completed day is recorded in `details_progress`; a re-run skips finished
     days. A day that errors is left unrecorded so it retries next run.
     `newest_first` processes the most recent days first (recent data priority).
+
+    `acq_type` is an optional SQL LIKE pattern (e.g. "IT Services%") that narrows
+    the run to days having at least one document of that acquisition type. Note
+    the drill still loads *every* document on each selected day (the SCPRS search
+    grid can't filter by acquisition type); the filter only chooses which days to
+    visit. Day completion is recorded per business unit regardless of the filter,
+    so a filtered and an unfiltered run share progress consistently.
     """
     con = _connect(db_path)
-    # Two literal statements (not interpolated) keep the SQL parameterized.
-    active_asc = (
-        "SELECT DISTINCT start_date FROM purchases WHERE business_unit = ? "
-        "AND start_date BETWEEN ? AND ? AND start_date IS NOT NULL ORDER BY start_date ASC"
-    )
-    active_desc = (
-        "SELECT DISTINCT start_date FROM purchases WHERE business_unit = ? "
-        "AND start_date BETWEEN ? AND ? AND start_date IS NOT NULL ORDER BY start_date DESC"
-    )
+    # A day qualifies if it has any document of the requested acquisition type.
+    # The pattern is a bound parameter (never interpolated), preserving the
+    # parameterized-SQL invariant; only the ORDER BY direction is a literal.
+    acq_clause = " AND acquisition_type_sub_type LIKE ?" if acq_type is not None else ""
+    params = (business_unit, _iso(from_date), _iso(to_date))
+    if acq_type is not None:
+        params = (*params, acq_type)
+
+    def _active_sql(order: str) -> str:
+        # `order` is a literal ("ASC"/"DESC") and `acq_clause` is a fixed
+        # constant; the only value bound here is the LIKE pattern (a parameter).
+        return (
+            "SELECT DISTINCT start_date FROM purchases WHERE business_unit = ? "  # noqa: S608
+            "AND start_date BETWEEN ? AND ? AND start_date IS NOT NULL"
+            f"{acq_clause} ORDER BY start_date {order}"
+        )
+
     try:
         _ensure_progress_schema(con)
         try:
             active = [
                 r[0]
                 for r in con.execute(
-                    active_desc if newest_first else active_asc,
-                    (business_unit, _iso(from_date), _iso(to_date)),
+                    _active_sql("DESC" if newest_first else "ASC"), params
                 ).fetchall()
             ]
         except sqlite3.OperationalError:
@@ -388,10 +403,9 @@ def enrich_details(
         log(f"  python -m src.model build {business_unit} {from_date} {to_date}")
         return {"days_total": 0, "days_processed": 0, "days_remaining": 0}
 
-    todo = active if force else [d for d in active if d not in done]
-    log(f"{len(active)} active day(s); {len(active) - len(todo)} done; {len(todo)} to process")
-    if limit is not None:
-        todo = todo[:limit]
+    pending = active if force else [d for d in active if d not in done]
+    log(f"{len(active)} active day(s); {len(active) - len(pending)} done; {len(pending)} pending")
+    todo = pending[:limit] if limit is not None else pending
 
     processed = 0
     for iso_day in todo:
@@ -424,7 +438,7 @@ def enrich_details(
     return {
         "days_total": len(active),
         "days_processed": processed,
-        "days_remaining": len(active) - len(done) - processed,
+        "days_remaining": len(pending) - processed,
     }
 
 
@@ -556,6 +570,12 @@ def _cli() -> None:
     en.add_argument("--limit", type=int, default=None, help="Process at most N days this run")
     en.add_argument("--force", action="store_true", help="Re-process days already recorded")
     en.add_argument("--newest-first", action="store_true", help="Process most recent days first")
+    en.add_argument(
+        "--acq-type",
+        default=None,
+        help="Only visit days with a document whose acquisition_type_sub_type matches "
+        "this SQL LIKE pattern, e.g. 'IT Services%%' (the drill still loads all docs on a day)",
+    )
     dc = sub.add_parser("document", help="Show a document like the PO Details page")
     dc.add_argument("document", help="Purchase document id or suffix, e.g. 63626")
     dc.add_argument("--fetch", action="store_true", help="Drill it now if not yet enriched")
@@ -579,6 +599,7 @@ def _cli() -> None:
                 limit=args.limit,
                 force=args.force,
                 newest_first=args.newest_first,
+                acq_type=args.acq_type,
             )
         )
     elif args.cmd == "document":

@@ -169,3 +169,45 @@ def test_enrich_resume(tmp_path, monkeypatch):
     )
     assert r3["days_processed"] == 2
     assert model.query("SELECT COUNT(*) c FROM details_progress", db_path=db)["c"][0] == 2
+
+
+def test_enrich_acq_type_filter(tmp_path, monkeypatch):
+    """--acq-type restricts to days with a matching document; drilling loads whole days."""
+    db = tmp_path / "acq.db"
+    con = model._connect(db)
+    model._ensure_schema(con)
+    con.executemany(
+        "INSERT INTO purchases (business_unit, purchase_document, start_date, "
+        "acquisition_type_sub_type) VALUES (?, ?, ?, ?)",
+        [
+            ("8660", "A", "2021-02-18", "IT Services"),
+            ("8660", "B", "2021-02-18", "NON-IT Goods"),  # same day, different type
+            ("8660", "C", "2021-05-20", "IT Services_Cloud"),
+            ("8660", "D", "2021-07-01", "NON-IT Services_Legal Services"),  # no IT that day
+        ],
+    )
+    con.commit()
+    con.close()
+
+    calls = []
+    monkeypatch.setattr(
+        model,
+        "build_details_db",
+        lambda bu, f, t, *, db_path, log=print, **k: calls.append(t)
+        or {"documents": 1, "lines": 1, "pos": 0},
+    )
+
+    r = model.enrich_details(
+        "8660",
+        "01/01/2021",
+        "12/31/2021",
+        db_path=db,
+        acq_type="IT Services%",
+        log=lambda *a: None,
+    )
+    # Only the two IT-Services days are visited; the legal-only day is skipped.
+    assert r["days_total"] == 2
+    assert r["days_processed"] == 2
+    assert r["days_remaining"] == 0
+    assert set(calls) == {"02/18/2021", "05/20/2021"}
+    assert "07/01/2021" not in calls
