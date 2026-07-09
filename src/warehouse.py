@@ -818,6 +818,66 @@ def _build_marts(con):
             FROM gold_supplier_profile p
             LEFT JOIN bronze_supplier_web w
               ON UPPER(w.supplier_name) = UPPER(p.supplier_name)""",
+        # -- contract change capture (from the append-only dw_document_history) -- #
+        # One row per observed transition of a document: version bump, value change,
+        # status change, term extension -- with a human-readable summary.
+        "gold_contract_change_log": """
+            WITH ordered AS (
+              SELECT business_unit, purchase_document, version, grand_total, status,
+                     end_date, supplier_name, observed_at,
+                     LAG(version) OVER w AS prev_version,
+                     LAG(grand_total) OVER w AS prev_grand_total,
+                     LAG(status) OVER w AS prev_status,
+                     LAG(end_date) OVER w AS prev_end_date
+              FROM dw_document_history
+              WINDOW w AS (PARTITION BY business_unit, purchase_document
+                           ORDER BY CAST(version AS INTEGER), observed_at, rowid))
+            SELECT business_unit, purchase_document,
+                   prev_version AS from_version, version AS to_version,
+                   ROUND(prev_grand_total, 2) AS from_value, ROUND(grand_total, 2) AS to_value,
+                   ROUND(grand_total - prev_grand_total, 2) AS value_delta,
+                   ROUND(100.0 * (grand_total - prev_grand_total)
+                         / NULLIF(prev_grand_total, 0), 1) AS value_pct_change,
+                   prev_status AS from_status, status AS to_status,
+                   prev_end_date AS from_end_date, end_date AS to_end_date, observed_at,
+                   TRIM(
+                     CASE WHEN version <> prev_version
+                          THEN 'v' || prev_version || '->' || version || ' ' ELSE '' END ||
+                     CASE WHEN COALESCE(grand_total,0) <> COALESCE(prev_grand_total,0)
+                          THEN 'value ' || printf('%+.0f', COALESCE(grand_total,0)
+                               - COALESCE(prev_grand_total,0)) || ' ' ELSE '' END ||
+                     CASE WHEN COALESCE(status,'') <> COALESCE(prev_status,'')
+                          THEN 'status ' || COALESCE(prev_status,'?') || '->'
+                               || COALESCE(status,'?') || ' ' ELSE '' END ||
+                     CASE WHEN COALESCE(end_date,'') <> COALESCE(prev_end_date,'')
+                          THEN CASE WHEN end_date > prev_end_date THEN 'term extended'
+                                    ELSE 'term changed' END || ' ' ELSE '' END
+                   ) AS change_summary
+            FROM ordered
+            WHERE prev_version IS NOT NULL""",
+        # One row per contract: amendment count (= current version), value growth
+        # where multiple snapshots were captured, and observation window.
+        "gold_contract_amendments": """
+            WITH h AS (
+              SELECT business_unit, purchase_document, CAST(version AS INTEGER) AS v,
+                     grand_total, observed_at,
+                     ROW_NUMBER() OVER w_asc AS rn_first,
+                     ROW_NUMBER() OVER w_desc AS rn_last
+              FROM dw_document_history
+              WINDOW w_asc AS (PARTITION BY business_unit, purchase_document
+                               ORDER BY CAST(version AS INTEGER), observed_at, rowid),
+                     w_desc AS (PARTITION BY business_unit, purchase_document
+                                ORDER BY CAST(version AS INTEGER) DESC, observed_at DESC, rowid DESC))
+            SELECT business_unit, purchase_document,
+                   MAX(v) AS amendment_count,
+                   COUNT(*) AS snapshots_captured,
+                   ROUND(MAX(CASE WHEN rn_last = 1 THEN grand_total END), 2) AS current_value,
+                   ROUND(MAX(CASE WHEN rn_last = 1 THEN grand_total END)
+                         - MAX(CASE WHEN rn_first = 1 THEN grand_total END), 2) AS value_growth,
+                   MIN(observed_at) AS first_observed, MAX(observed_at) AS last_observed
+            FROM h
+            GROUP BY business_unit, purchase_document
+            HAVING MAX(v) > 0 OR COUNT(*) > 1""",
     }
     for name, sql in marts.items():
         con.execute(f"DROP VIEW IF EXISTS {name}")
@@ -840,6 +900,20 @@ def _ensure_control(con: sqlite3.Connection) -> None:
     con.execute(
         "CREATE TABLE IF NOT EXISTS dw_dq_results (batch_id TEXT, check_name TEXT, scope TEXT, "
         "severity TEXT, failed_count INTEGER, passed INTEGER, run_at TEXT)"
+    )
+    # Append-only snapshot history of each document's tracked attributes, so
+    # amendments and value/status/term changes are captured over time. Unlike the
+    # full-refresh bronze/silver/gold, this table is never dropped — it accumulates.
+    con.execute(
+        "CREATE TABLE IF NOT EXISTS dw_document_history ("
+        "business_unit TEXT, purchase_document TEXT, version INTEGER, grand_total REAL, "
+        "status TEXT, start_date TEXT, end_date TEXT, "
+        "supplier_id TEXT, supplier_name TEXT, acquisition TEXT, "
+        "content_sig TEXT, batch_id TEXT, observed_at TEXT)"
+    )
+    con.execute(
+        "CREATE INDEX IF NOT EXISTS ix_doc_history ON "
+        "dw_document_history(business_unit, purchase_document, version)"
     )
 
 
@@ -912,6 +986,52 @@ _DQ_CHECKS = [
 ]
 
 
+# Attributes whose change we track over time; their concatenation is the snapshot
+# signature, so a new row is appended only when one of them actually changes.
+_HISTORY_SIG = (
+    "COALESCE(version,'')||'|'||COALESCE(grand_total,'')||'|'||COALESCE(status,'')||'|'||"
+    "COALESCE(start_date,'')||'|'||COALESCE(end_date,'')||'|'||COALESCE(supplier_id,'')||'|'||"
+    "COALESCE(acquisition_type_sub_type,'')||'|'||COALESCE(acquisition_method,'')"
+)
+
+
+def capture_document_history(con: sqlite3.Connection, batch: str, ts: str) -> int:
+    """Append a snapshot of each document/version whose tracked attributes changed.
+
+    Reads the current build's bronze_purchases and inserts into the append-only
+    `dw_document_history` only rows whose (document, version, signature) is not
+    already recorded. So the first build backfills every version present now
+    (giving amendment history for multi-version documents immediately), and later
+    builds append a new snapshot whenever a value, status, term, supplier, or
+    version changes. Returns the number of snapshots appended. Idempotent.
+    """
+    _ensure_control(con)
+    before = con.execute("SELECT COUNT(*) FROM dw_document_history").fetchone()[0]
+    con.execute(
+        f"""
+        INSERT INTO dw_document_history
+        SELECT business_unit, purchase_document, version, grand_total, status,
+               start_date, end_date, supplier_id, supplier_name,
+               TRIM(COALESCE(acquisition_type_sub_type,'')||' / '||
+                    COALESCE(acquisition_method,''), ' /') AS acquisition,
+               {_HISTORY_SIG} AS content_sig, ? AS batch_id, ? AS observed_at
+        FROM (SELECT DISTINCT business_unit, purchase_document, version, grand_total, status,
+                     start_date, end_date, supplier_id, supplier_name,
+                     acquisition_type_sub_type, acquisition_method
+              FROM bronze_purchases) b
+        WHERE NOT EXISTS (
+          SELECT 1 FROM dw_document_history h
+          WHERE h.business_unit = b.business_unit
+            AND h.purchase_document = b.purchase_document
+            AND h.version = b.version
+            AND h.content_sig = {_HISTORY_SIG})
+        """,  # noqa: S608 - signature is a fixed internal expression; values are bound
+        (batch, ts),
+    )
+    con.commit()
+    return con.execute("SELECT COUNT(*) FROM dw_document_history").fetchone()[0] - before
+
+
 def run_dq(con: sqlite3.Connection, batch: str, ts: str) -> list[dict]:
     _ensure_control(con)
     results = []
@@ -946,7 +1066,8 @@ def build_all(
     log=print,
 ) -> dict:
     ts = datetime.now().isoformat(timespec="seconds")
-    batch = "batch_" + datetime.now().strftime("%Y%m%d_%H%M%S")
+    # microseconds keep the batch id unique even for rapid successive rebuilds
+    batch = "batch_" + datetime.now().strftime("%Y%m%d_%H%M%S_%f")
     con = _connect(wh_path, source_path)
     try:
         _ensure_control(con)
@@ -957,6 +1078,9 @@ def build_all(
         log(f"[{batch}] bronze...")
         counts = build_bronze(con, batch, ts, enrichment_db)
         con.commit()
+        appended = capture_document_history(con, batch, ts)
+        counts["dw_document_history_appended"] = appended
+        log(f"[{batch}] history: +{appended} snapshot(s)")
         log(f"[{batch}] silver...")
         counts |= build_silver(con, ts)
         con.commit()

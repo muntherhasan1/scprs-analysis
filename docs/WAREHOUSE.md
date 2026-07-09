@@ -88,6 +88,26 @@ per-registration scorecard in **`gold_supplier_enriched`** and to the canonical
 scorecard in **`gold_supplier_master`** (internal metrics + external firmographics
 + confidence, matched by supplier name).
 
+## Contract change capture (history over time)
+The bronze/silver/gold layers are a full-refresh snapshot of *current* state, so on
+their own they can't show how a contract changed. **`dw_document_history`** fixes
+that: an **append-only** table (never dropped on rebuild) that records a snapshot of
+each document/version's tracked attributes — `version`, `grand_total`, `status`,
+`start_date`/`end_date`, supplier, acquisition — with the batch and observation time.
+
+`capture_document_history` runs each build and appends a snapshot only when a
+document/version's signature is new, so:
+- the first build **backfills** every version present now (immediate amendment
+  history for the multi-version documents), and
+- later builds append a row whenever a value, status, term, supplier, or version
+  changes — building true change-over-time history as the daily job runs.
+
+Two marts derive from it:
+- **`gold_contract_change_log`** — one row per observed transition (`v1 -> v3`,
+  value delta + %, status change, term extension) with a readable `change_summary`.
+- **`gold_contract_amendments`** — per contract: amendment count (= current version),
+  snapshots captured, current value, value growth, and observation window.
+
 ## Control & data quality
 - **`dw_batch`** — one row per build (batch id, start/finish, status, row counts).
 - **`dw_dq_results`** — every check's outcome per batch, with a **severity**:
@@ -123,3 +143,7 @@ term to the CSV and rebuilding is all it takes to restandardize.
 - **SCD note:** dimensions are currently Type 1 (overwrite on rebuild). The
   surrogate keys already decouple facts from natural keys, so upgrading
   `dim_supplier`/`dim_buyer` to Type 2 (history) is a localized change.
+- **Change history:** while the star is a current-state snapshot, the append-only
+  `dw_document_history` captures how each *contract* changes over time (see above),
+  so amendments are not lost even though `silver_document` keeps only the current
+  version.

@@ -199,6 +199,64 @@ def test_warehouse_build(tmp_path):
     assert errors == []
 
 
+def test_contract_change_capture(tmp_path):
+    """Append-only history records amendments; the change-log derives the transition."""
+    src, wh = tmp_path / "scprs.db", tmp_path / "warehouse.db"
+    no_enrich = tmp_path / "no_enrich.db"
+
+    con = sqlite3.connect(src)
+    model._ensure_schema(con)
+    con.execute(
+        "INSERT INTO purchases (business_unit, purchase_document, version, grand_total, status, "
+        "start_date, end_date, supplier_id, supplier_name, acquisition_type_sub_type, "
+        "acquisition_method, department_name) VALUES ('8660','D','1',100000.0,'Active',"
+        "'2021-01-01','2022-01-01','S1','Acme','IT Services','Formal - COMPETITIVE','PUC')"
+    )
+    con.commit()
+    con.close()
+
+    warehouse.build_all(wh_path=wh, source_path=src, enrichment_db=no_enrich, log=lambda *a: None)
+    con = sqlite3.connect(wh)
+    assert con.execute("SELECT COUNT(*) FROM dw_document_history").fetchone()[0] == 1
+    assert con.execute("SELECT COUNT(*) FROM gold_contract_change_log").fetchone()[0] == 0
+    con.close()
+
+    # Amend the contract: value up, status changed, term extended, version bumped.
+    con = sqlite3.connect(src)
+    con.execute(
+        "UPDATE purchases SET version='2', grand_total=150000.0, status='Expired', "
+        "end_date='2023-01-01' WHERE purchase_document='D'"
+    )
+    con.commit()
+    con.close()
+
+    warehouse.build_all(wh_path=wh, source_path=src, enrichment_db=no_enrich, log=lambda *a: None)
+    con = sqlite3.connect(wh)
+    # history appended (append-only: the original v1 snapshot is retained)
+    assert con.execute("SELECT COUNT(*) FROM dw_document_history").fetchone()[0] == 2
+    row = con.execute(
+        "SELECT from_version, to_version, value_delta, from_status, to_status, change_summary "
+        "FROM gold_contract_change_log WHERE purchase_document='D'"
+    ).fetchone()
+    assert row[0] == 1 and row[1] == 2  # v1 -> v2
+    assert row[2] == 50000.0  # value delta
+    assert (row[3], row[4]) == ("Active", "Expired")
+    assert "value +50000" in row[5] and "term extended" in row[5]
+    # amendment rollup: current version 2 = 2 amendments, value growth captured
+    amend = con.execute(
+        "SELECT amendment_count, value_growth FROM gold_contract_amendments "
+        "WHERE purchase_document='D'"
+    ).fetchone()
+    assert amend == (2, 50000.0)
+    con.close()
+
+    # Idempotent: rebuilding with no source change appends nothing.
+    warehouse.build_all(wh_path=wh, source_path=src, enrichment_db=no_enrich, log=lambda *a: None)
+    con = sqlite3.connect(wh)
+    assert con.execute("SELECT COUNT(*) FROM dw_document_history").fetchone()[0] == 2
+    con.close()
+
+
 def test_abbreviate():
     abbr = {"amount": "amt", "supplier": "sup", "name": "nm", "business_unit": "bu", "total": "tot"}
     # token-by-token replacement, unknown tokens pass through

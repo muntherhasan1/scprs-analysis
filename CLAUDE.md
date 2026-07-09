@@ -92,6 +92,17 @@ separate; the warehouse ATTACHes the source read-only. Gold is a Kimball star
 schema (surrogate-keyed `dim_*`, `fact_document`/`fact_line`/`fact_associated_po`,
 plus `gold_*` mart views). See `docs/WAREHOUSE.md` for the full layer/grain spec.
 
+**Contract change over time lives in `dw_document_history`.** The bronze/silver/gold
+layers are a full-refresh snapshot of *current* state, so they can't show how a
+contract changed. `capture_document_history` (run each build, after bronze) appends
+to the **append-only** `dw_document_history` (never dropped) a snapshot of each
+document/version's tracked attributes — but only when its signature changed, so
+rebuilds are idempotent. The first build backfills the versions present now; later
+builds accumulate real history. `gold_contract_change_log` and
+`gold_contract_amendments` derive amendments/value-growth from it. When you need
+"how did this contract change," query the history / change-log, not silver (which
+keeps only the current version).
+
 **Gold physical columns are abbreviated; marts stay friendly.** A post-build pass
 (`_abbreviate_gold`) renames `dim_*`/`fact_*` physical columns to a governed
 standard from `references/abbreviations.csv` (`grand_total`→`grand_tot`,

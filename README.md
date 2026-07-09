@@ -71,6 +71,12 @@ python -m src.warehouse info     # layer row counts + last batch
 
 See [docs/WAREHOUSE.md](docs/WAREHOUSE.md) for the full design.
 
+Contract **changes over time** are captured in the append-only `dw_document_history`
+(snapshots appended only when a document's value/status/term/version changes), with
+`gold_contract_change_log` (per-transition) and `gold_contract_amendments`
+(per-contract rollup) derived from it — so amendments aren't lost when silver keeps
+only the current version.
+
 Gold **physical** columns are abbreviated to a governed standard
 (`references/abbreviations.csv`, e.g. `grand_total → grand_tot`), but the `gold_*`
 marts stay friendly — they read per-table `lv_<table>` views that alias the
