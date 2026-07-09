@@ -11,15 +11,18 @@ service-account*.json
 secrets/
 .secrets/
 
-# ---- Data (SCPRS extracts may be sensitive; keep out of git) ----
+# ---- Data (SCPRS extracts; keep large/derived files out of git) ----
 # Ignore data/ contents but keep the (empty) directory via .gitkeep.
 data/*
 !data/.gitkeep
 *.csv
 *.parquet
 *.xlsx
+*.xls
 *.db
 *.sqlite
+# ...but DO commit small public reference lists.
+!references/*.csv
 
 # ---- Python ----
 __pycache__/
@@ -49,3 +52,7 @@ Thumbs.db
 
 # ---- Claude Code (local, machine-specific) ----
 .claude/settings.local.json
+
+# ---- Local scratch / probe files ----
+scratchpad_*
+*.bin

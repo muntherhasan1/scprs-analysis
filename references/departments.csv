@@ -1,0 +1,301 @@
+code,name
+0000,Statewide Business Unit
+0001,Major Revenue - DOF USE ONLY
+0003,Major Policy Revenue - DOF USE
+0010,Legislative/Judicial/Executive
+0020,Legislative
+0100,Legislature
+0110,Senate
+0120,Assembly
+0130,Legislative Joint Expenses
+0150,Contrib Legislatrs' Retire Sys
+0160,Legislative Counsel Bureau
+0200,Judicial
+0240,CA Judicial Center Library
+0250,Judicial Branch
+0260,SUPREME COURT
+0270,JUDICIAL COUNCIL
+0280,Comm. on Judicial Performance
+0290,Habeas Resource Center
+0300,DISTRICT COURTS OF APPEAL
+0310,1st DISTRICT COURT OF APPEAL
+0320,2nd DISTRICT COURT OF APPEAL
+0330,3rd DISTRICT COURT OF APPEAL
+0390,Judges' Retirement System
+0490,Executive
+0500,Governor's Office
+0502,California Technology Agency
+0509,Business & Economic Developmnt
+0510,Sec. for State & Consumer Svcs
+0511,"Sec., Gov't Operations Agency"
+0515,"Bus & Consumer Services, Secy"
+0516,"CA Housing & Homelessness,Secy"
+0520,Sec Business Trans & Housing
+0521,"Sec., Transportation Agency"
+0530,"Sec., Health & Human Services"
+0531,Ofc Technology and Solutions I
+0540,"Sec., Natural Resources"
+0552,Inspector General Office
+0555,"Sec., Environment Protection"
+0558,Secretary for Education
+0559,"Sec., Labor/Workforce Develop"
+0570,Wellness & Physical Fitness
+0596,Service & Volunteering Agency
+0650,Gov's Off of Lnd Use & Clmt In
+0680,Gov Ofc Serv and Community Eng
+0690,Office of Emergency Services
+0720,Governor's Portrait
+0730,Governor Elect & Outgoing
+0740,Executive/Constitutional
+0750,Office of Lieutenant Governor
+0780,Rural Youth Employment Comm
+0820,Department of Justice
+0840,State Controller
+0845,Department of Insurance
+0850,CA State Lottery Commission
+0855,CA Gambling Control Commission
+0860,State Board of Equalization
+0870,Office of Tax Appeals
+0890,Secretary of State
+0911,Citizens Redistricting Comm
+0950,State Treasurer
+0954,Scholarshare Investment Board
+0956,Debt & Investment Advisory Com
+0957,HOPE for Children Trust Acct
+0959,Debt Limit Allocation Commitee
+0964,Transportation Financing Auth
+0965,Industrial Develop Fin Comm
+0968,Tax Credit Allocation Commitee
+0971,Alternative Energy & Adv Trans
+0972,Sacramento City Fin Auth
+0973,Riverside Cty Public Fin Auth
+0974,Climate Financing Authority
+0975,Los Angeles State Bldg Auth
+0976,Capitol Area Development Auth
+0977,Health Facilities Fin Auth
+0978,San Francisco State Bldg Auth
+0979,Oakland Joint Powers Authority
+0981,California ABLE Act Board
+0983,Urban Waterfront Area Restore
+0984,CalSavers Retirement Savings B
+0985,CA School Finance Authority
+0989,Educational Facilities Auth
+0996,GO Bonds - Debt Service - LJE
+1000,Business and Consumer Services
+1015,"Sec., Biz, Con Srvs, & Housing"
+1030,"Sec., State & Consumer Service"
+1045,Cannabis Control Appeals Panel
+1100,CA Science Center
+1105,CA African¿American Museum
+1110,Consumer Affairs-Reg Boards
+1111,Department of Consumer Affairs
+1115,Department of Cannabis Control
+1690,A. E. Alquist Seismic Safety
+1700,Civil Rights Department
+17000,Fair Employment and Housing
+1701,Dept of Finan Protec and Innov
+1703,California Privacy Protection
+1705,Fair Employment & Housing Comm
+1730,Franchise Tax Board
+1750,Horse Racing Board
+1870,Victim Comp & Govt Claims Bd
+1880,State Personnel Board
+1900,Public Employees' Retirement
+1920,State Teachers' Retirement
+1996,General Obligation Bonds-BCS
+2000,CA  Housing and Homelessness
+2010,Business & Housing
+2020,Transportation
+2030,"Sec., Business, Trans & Housng"
+2100,Dept. Alcoholic Beverage Cntrl
+2120,Alcoholic Beverage Cntl Appeal
+2150,Dept. of Financial Institution
+2180,Department of Corporations
+2240,Housing & Community Developmnt
+2245,CA Housing Finance Agency
+2250,Housing Development & Finance
+2255,CA Interagency Coun on Homeles
+2260,CA Housing Finance Agency
+2310,Office Real Estate Appraisers
+2320,Department of Real Estate
+2400,Dept of Managed Health Care
+2500,Transportation
+2521,Sec. for Transportation Agency
+2600,CA Transportation Commission
+2640,State Transit Assistance
+2660,Department of Transportation
+2665,High Speed Rail Authority
+2667,High-Speed Rail Auth Ofc Inspe
+2670,Board of Pilot Commissioners
+2700,Office of Traffic Safety
+2720,Dept of the CA Highway Patrol
+2740,Department of Motor Vehicles
+2830,GO Bonds-Transportation
+3000,Natural Resources
+3030,"Sec., Natural Resources Agency"
+3100,Exposition Park
+31001,Office of Exposition Park
+3105,CA African American Museum
+3110,Special Resources Programs
+3125,CA Tahoe Conservancy
+3210,Environmental Protection Pgm
+3340,CA Conservation Corps
+3355,Office of Energy Infrastructur
+3360,Energy Resources Conservation
+3370,Renew Res Protect Pgm
+3460,Colorado River Board of CA
+3480,Department of Conservation
+3500,Resources Recycling & Recovery
+3540,CAL FIRE
+3560,State Lands Commission
+3600,Department of Fish & Wildlife
+3640,Wildlife Conservation Board
+3680,Dept of Boating & Waterways
+3720,CA Coastal Commission
+3760,State Coastal Conservancy
+3780,Native American Heritage Comm
+3790,Dept of Parks & Recreation
+3810,Santa Monica Mtns Conservancy
+3815,Salton Sea Conservancy
+3820,SF Bay Conservation Commission
+3825,San Gabriel & Lower LA Rivers
+3830,San Joaquin River Conservancy
+3835,Baldwin Hills and Urban Waters
+3840,Delta Protection Commission
+3845,San Diego River Conservancy
+3850,Coachella Valley Mtns Conser
+3855,Sierra Nevada Conservancy
+3860,Department of Water Resources
+3875,Sacramento-San Joaquin Delta
+3882,GO Bonds Resources
+3885,Delta Stewardship Council
+3890,Environmental Protection
+3895,"Sec., Environmental Protectio"
+3900,State Air Resources Board
+3930,Dept of Pesticide Regulation
+3940,State Water Resources Control
+3960,Dept. Toxic Substances Control
+3970,Resources Recycling & Recovery
+3980,Env'l Health Hazard Assessment
+39800,Ofc of Env Health Hazard Asmnt
+3996,GO Bonds Env Protect
+4000,Health & Human Services
+4020,"Sec., Health & Human Srvs Agy"
+4100,Developmental Disabilities
+4120,Emergency Medical Service Auth
+4140,Health Care Access and Informa
+4150,Dept of Managed Health Care
+4170,California Department of Aging
+41700,Department of Aging
+4180,Commission on Aging
+41800,Commission on Aging
+4185,CA Senior Legislature
+4200,Dept. Alcohol & Drug Programs
+4250,First 5 California
+4260,State Dept Hlth Care Services
+4265,Department of Public Health
+4270,Medical Assistance Commission
+4280,Managed Risk Medical Insurance
+4300,Dept of Developmental Services
+4310,Developmental Services - HQ
+4320,State Hospitals
+4330,Agnews State Hospital
+4350,Fairview State Hospital
+4370,F. D. Lanterman State Hospital
+4390,Porterville State Hospital
+4400,Sonoma State Hospital
+4420,Northern CA Facility-Yuba City
+4430,SO. CA Facility¿Cathedral City
+4440,Department of State Hospitals
+4450,State Hospitals Sacramento
+4460,State Hospitals
+4470,State Hospital - Atascadero
+4490,State Hospital Metropolitan
+4500,State Hospital Napa
+4510,State Hospital Patton
+4520,State Hospital Stockton
+4530,State Hospital Vacaville
+4540,State Hospital Coalinga
+4550,State Hospital Salinas
+4560,Behavioral Hlth Svcs Ovrst Acn
+4700,Community Srvcs & Development
+4800,CA Health Benefit Exchange
+5160,Department of Rehabilitation
+5170,Independent Living Council
+5175,Dept of Child Support Services
+5180,Department of Social Services
+5195,State - Local Realignment 1991
+5196,State - Local Realignment 2011
+5206,GO Bonds -HHS
+5209,Misc Adj- HHS
+5210,Corrections & Rehabilitation
+5225,Dept of Corrections & Rehab
+5227,State & Community Corrections
+5296,Local Law Enforcement Services
+5396,Trial Court Security 2011
+5420,Correctional Trng Rehab Aut
+5496,Local Community Corrections
+5596,District Atty & Pub Def Svcs
+5696,Juvenile Justice Programs
+5796,ELEA Growth Subaccount
+5990,Fed Immig Fd Incarc-DCR
+5996,GO Bonds-DCR
+6000,Education
+6010,K-12 Education
+6015,Higher Ed ¿ Community Colleges
+6020,"Higher Ed - UC, CSU, & Other"
+6050,"Secretary for Education, K-12"
+6054,Scholarshare Investment Board
+6100,Department of Education
+6110,Department of Education
+6120,CA State Library
+6125,Education Audit Appeals Panel
+6190,Special Schools
+6200,CA School for the Blind
+6210,Diagnostic School - North CA
+6220,Diagnostic School - Central CA
+6230,Diagnostic School - So CA
+6240,School for the Deaf-Fremont
+6250,School for the Deaf-Riverside
+6255,State Summer School for Arts
+62550,Summer School for the Arts
+6260,Diagnostic Centers
+6300,State Contributions to STRS
+6305,Retire Costs for Comm Coll
+6330,CA Career Resource Network
+6350,School Facilities Aid Program
+6360,Teacher Credentialing Comm
+6396,GO Bonds K-12
+6420,Postsecondary Education Comm
+6440,University of California
+6445,Institute for Regenerative Med
+6491,UC Office of the President
+6511,UC Davis Medical Center
+6520,UC Irvine
+6521,UC Irvine Med Center
+6530,UCLA
+6561,UCSF Medical Center
+6580,UC Santa Cruz
+6590,UC Merced
+6600,"College of the Law, San Fran"
+6610,Cal State University
+6620,CSU Statewide Programs
+6630,CSU Systemwide Offices
+6640,CSU Campuses
+6645,CSU Health Ben for Ret  Annuit
+6650,"CSU, Bakersfield"
+6660,"CSU, San Bernardino"
+6670,"CSU, Stanislaus"
+6680,"CSU, Chico"
+6690,"CSU, Dominguez Hills"
+6700,"CSU, Fresno"
+6710,"CSU, Fullerton"
+6720,"CSU, East Bay"
+6730,"CSU, Humboldt"
+6740,"CSU, Long Beach"
+6750,"CSU, Los Angeles"
+6752,"CSU, Maritime Academy"
+6756,"CSU, Monterey Bay"
+6760,"CSU, Northridge"
+6770,Polytechnic University Pomona
+6780,"CSU, Sacramento"

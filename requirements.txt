@@ -6,3 +6,4 @@ python-dotenv>=1.0
 requests>=2.32
 beautifulsoup4>=4.12
 lxml>=5.2          # fast, robust HTML parser backend for BeautifulSoup
+playwright>=1.44   # headless browser: drives the PeopleSoft JS download flow

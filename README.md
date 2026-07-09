@@ -30,17 +30,26 @@ data/           local datasets — git-ignored, never committed
 .github/        hardened CI + Dependabot (dormant until a GitHub remote exists)
 ```
 
-## Scraping CSVs
+## Scraping SCPRS
+
+The California FI$Cal SCPRS search is a stateful PeopleSoft app; `src/scprs.py`
+drives it with a headless browser. See [docs/SCPRS_NOTES.md](docs/SCPRS_NOTES.md)
+for how it works and why a browser is required.
 
 ```bash
-# Download every .csv linked from a page into data/ (sanitized filenames):
-python -m src.scraper https://example.gov/scprs/reports
+# Download + convert a Department + date-range extract to CSV (into data/):
+python -m src.scprs 0250 06/01/2025 06/30/2025               # summary
+python -m src.scprs 0250 06/01/2025 06/30/2025 --kind detail # line-item detail
 ```
 
-`src/scraper.py` is a starting point — adjust the link-finding to match your
-target page. It enforces request timeouts, keeps TLS verification on, and
-sanitizes output filenames to prevent path traversal. Check a site's
-robots.txt / terms before scraping it.
+- Business-unit codes: `references/departments.csv` (300 valid Departments).
+- Dates are `MM/DD/YYYY` and filter on each record's **Start Date**.
+- A single download is capped at **65,000 rows**; if exceeded, the tool prints a
+  truncation warning (`Extract.truncated`) — narrow the date range for full
+  coverage.
+
+`src/scraper.py` remains as a generic CSV-link downloader for simpler sites
+(timeouts, TLS on, path-traversal-safe filenames).
 
 ## Security
 
