@@ -76,6 +76,40 @@ def test_build_details_db(tmp_path, monkeypatch):
     assert model.query("SELECT COUNT(*) c FROM document_lines", db_path=db)["c"][0] == 1
 
 
+def test_document_view(tmp_path):
+    db = tmp_path / "doc.db"
+    doc_id = "0000000000000000000063626"
+    con = model._connect(db)
+    model._ensure_details_schema(con)
+    con.execute(
+        "INSERT INTO document_details (business_unit, purchase_document, bill_code, "
+        "merchandise_amount, grand_total) VALUES ('8660', ?, '059000', 482500.0, 482500.0)",
+        (doc_id,),
+    )
+    con.executemany(
+        "INSERT INTO document_lines (business_unit, purchase_document, line_number, "
+        "unit_price, quantity, item_description) VALUES (?, ?, ?, ?, ?, ?)",
+        [("8660", doc_id, "1", 2500.0, 1.0, "A"), ("8660", doc_id, "2", 480000.0, 1.0, "B")],
+    )
+    con.execute(
+        "INSERT INTO document_pos (business_unit, purchase_document, po_id, po_total) "
+        "VALUES ('8660', ?, 'P1', 245180.0)",
+        (doc_id,),
+    )
+    con.commit()
+    con.close()
+
+    doc = model.document("63626", db_path=db)  # suffix match
+    assert doc is not None
+    assert doc["header"]["bill_code"] == "059000"
+    assert len(doc["lines"]) == 2
+    assert len(doc["pos"]) == 1
+    # line items reconcile to merchandise amount
+    assert (doc["lines"]["unit_price"] * doc["lines"]["quantity"]).sum() == 482500.0
+    model._print_document(doc)  # must not raise
+    assert model.document("99999", db_path=db) is None
+
+
 def test_enrich_resume(tmp_path, monkeypatch):
     db = tmp_path / "e.db"
     con = model._connect(db)

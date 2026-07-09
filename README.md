@@ -37,10 +37,13 @@ drives it with a headless browser. See [docs/SCPRS_NOTES.md](docs/SCPRS_NOTES.md
 for how it works and why a browser is required.
 
 ```bash
-# Download + convert a Department + date-range extract to CSV (into data/):
-python -m src.scprs 0250 06/01/2025 06/30/2025               # summary
-python -m src.scprs 0250 06/01/2025 06/30/2025 --kind detail # line-item detail
+# Download + convert the summary extract to CSV (into data/):
+python -m src.scprs 0250 06/01/2025 06/30/2025
 ```
+
+> The site's "Download Detail Information" Excel export is **not used** — it
+> silently drops line-item value on multi-line documents. Line-item and
+> associated-PO data come from the PO Details drill-down instead (below).
 
 - Business-unit codes: `references/departments.csv` (300 valid Departments).
 - Dates are `MM/DD/YYYY` and filter on each record's **Start Date**.
@@ -77,14 +80,19 @@ acquisition_method, buyer_name/email, status, version, … Views:
 `v_supplier_totals`, `v_method_totals`, `v_monthly_totals`. Indexed on
 business_unit, start_date, supplier, and acquisition_method.
 
-### Drill-down details (richer than the CSV exports)
+### Drill-down details (authoritative — the Excel export is not)
 
-The `Download Detail Information` CSV understates line-item dollars and omits
-some fields. `src.model details` instead clicks each document's **PO Details**
-page and loads three tables with the authoritative data:
+The site's detail Excel understates line-item dollars (verified: it exported
+$22,680 of a $482,500 contract). `src.model details` instead clicks each
+document's **PO Details** page and loads three tables with the authoritative
+data — its line items always reconcile to the merchandise amount:
 
 ```bash
 python -m src.model details 8660 02/18/2021 02/18/2021
+
+# Inspect one document exactly like the PO Details page (from the DB):
+python -m src.model document 63626           # id or suffix
+python -m src.model document 63626 --fetch   # drill it now if not yet enriched
 ```
 
 - `document_details` — one row per document, incl. **`bill_code`** (absent from

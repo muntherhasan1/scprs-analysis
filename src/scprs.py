@@ -10,13 +10,14 @@ Key facts discovered about the site:
   (real keystrokes) then committed with Tab, or the filter is silently ignored.
 - The From/To Date filter applies to each record's Start Date.
 - "Download Search Results" returns a Summary .xls (actually an HTML table).
-  "Download Detail Information" returns line-item Detail.
+  The site's "Download Detail Information" export is unreliable (drops line-item
+  value on multi-line documents) and is intentionally not used — line items come
+  from the PO Details drill-down (collect_po_details / parse_po_details).
 - A download is capped at 65,000 rows; if the result is larger, a modal warns
   and only the first 65,000 rows are exported (see `Truncated`).
 
 Usage:
     python -m src.scprs 0250 06/01/2025 06/30/2025
-    python -m src.scprs 2660 01/01/2025 01/31/2025 --kind detail
 """
 
 from __future__ import annotations
@@ -39,8 +40,11 @@ _FROM = "#ZZ_SCPRS_SP_WRK_FROM_DATE"
 _TO = "#ZZ_SCPRS_SP_WRK_TO_DATE"
 _SEARCH = "#ZZ_SCPRS_SP_WRK_BUTTON"
 _DL_SUMMARY = "#ZZ_SCPRS_SP_WRK_BUTTONS_GB"
-_DL_DETAIL = "#ZZ_SCPRS_SP_WRK_BUTTON_BACKWARD"
 _MODAL_OK = '[id="#ICOK"]'
+# NOTE: the site's "Download Detail Information" export is unreliable (it drops
+# line-item value on multi-line documents). We deliberately do not use it; the
+# authoritative line-item / associated-PO data comes from the PO Details
+# drill-down (collect_po_details) instead.
 
 
 @dataclass
@@ -48,7 +52,6 @@ class Extract:
     business_unit: str
     from_date: str
     to_date: str
-    kind: str
     path: Path | None  # None when no records were found
     truncated: bool  # True if the result hit the 65,000-row cap
     no_records: bool
@@ -72,16 +75,15 @@ def download_extract(
     from_date: str,
     to_date: str,
     *,
-    kind: str = "summary",
     out_dir: Path = DATA_DIR,
     headless: bool = True,
     timeout_ms: int = 120_000,
 ) -> Extract:
-    """Search SCPRS and download the extract for one business unit + date range.
+    """Download the SCPRS *summary* extract for one business unit + date range.
 
-    Dates are MM/DD/YYYY. `kind` is "summary" or "detail".
+    Dates are MM/DD/YYYY. (Line-item detail comes from the drill-down, not the
+    unreliable "Download Detail Information" export — see collect_po_details.)
     """
-    dl_button = _DL_SUMMARY if kind == "summary" else _DL_DETAIL
     out_dir.mkdir(parents=True, exist_ok=True)
 
     with sync_playwright() as p:
@@ -104,11 +106,11 @@ def download_extract(
             page.wait_for_timeout(6000)
 
             if "No Records Found" in page.inner_text("body"):
-                return Extract(business_unit, from_date, to_date, kind, None, False, True)
+                return Extract(business_unit, from_date, to_date, None, False, True)
 
             truncated = False
             with page.expect_download(timeout=timeout_ms) as dl_info:
-                page.click(dl_button)
+                page.click(_DL_SUMMARY)
                 page.wait_for_timeout(2500)
                 # A confirmation dialog appears for every download; it must be
                 # accepted or the file is never generated. When the result set
@@ -121,11 +123,11 @@ def download_extract(
                     ok.click()
             dl = dl_info.value
             dest = (
-                out_dir / f"scprs_{business_unit}_{from_date.replace('/','')}_"
-                f"{to_date.replace('/','')}_{kind}.xls"
+                out_dir / f"scprs_{business_unit}_{from_date.replace('/', '')}_"
+                f"{to_date.replace('/', '')}_summary.xls"
             )
             dl.save_as(str(dest))
-            return Extract(business_unit, from_date, to_date, kind, dest, truncated, False)
+            return Extract(business_unit, from_date, to_date, dest, truncated, False)
         except PWTimeout as e:
             raise RuntimeError(f"Timed out driving SCPRS search: {e}") from e
         finally:
@@ -145,7 +147,6 @@ def download_range(
     from_date: str,
     to_date: str,
     *,
-    kind: str = "summary",
     out_dir: Path = DATA_DIR,
     max_depth: int = 12,
     log=print,
@@ -163,9 +164,7 @@ def download_range(
     warnings: list[str] = []
 
     def rec(a: date, b: date, depth: int) -> None:
-        res = download_extract(
-            business_unit, _fmt_date(a), _fmt_date(b), kind=kind, out_dir=out_dir
-        )
+        res = download_extract(business_unit, _fmt_date(a), _fmt_date(b), out_dir=out_dir)
         if res.no_records:
             log(f"  {_fmt_date(a)}..{_fmt_date(b)}: no records")
             return
@@ -412,11 +411,10 @@ def to_csv(xls_path: Path, csv_path: Path | None = None) -> Path:
 
 
 def _cli() -> None:
-    ap = argparse.ArgumentParser(description="Download a SCPRS extract.")
+    ap = argparse.ArgumentParser(description="Download the SCPRS summary extract.")
     ap.add_argument("business_unit", help="Department / business-unit code, e.g. 0250")
     ap.add_argument("from_date", help="From date MM/DD/YYYY")
     ap.add_argument("to_date", help="To date MM/DD/YYYY")
-    ap.add_argument("--kind", choices=["summary", "detail"], default="summary")
     ap.add_argument("--show", action="store_true", help="Run browser headed (visible)")
     args = ap.parse_args()
 
@@ -424,7 +422,6 @@ def _cli() -> None:
         args.business_unit,
         args.from_date,
         args.to_date,
-        kind=args.kind,
         headless=not args.show,
     )
     if result.no_records:

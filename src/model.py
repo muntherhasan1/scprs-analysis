@@ -111,7 +111,7 @@ def build_db(
 ) -> tuple[int, list[str]]:
     """Fetch (with auto-chunking) and load one business unit into the model."""
     log(f"Collecting SCPRS summary for BU {business_unit} {from_date}..{to_date}")
-    df, warnings = scprs.download_range(business_unit, from_date, to_date, kind="summary", log=log)
+    df, warnings = scprs.download_range(business_unit, from_date, to_date, log=log)
     if df.empty:
         log("No records for that business unit + date range.")
         return 0, warnings
@@ -418,6 +418,95 @@ def query(sql: str, *, db_path: Path = DB_PATH, params: tuple = ()):
         con.close()
 
 
+def document(doc_number: str, *, db_path: Path = DB_PATH):
+    """Return {header, lines, pos} for a purchase document from the detail tables.
+
+    Reproduces the site's PO Details page from the DB. Matches an exact id or a
+    suffix (e.g. "63626"). Returns None if the document has not been enriched
+    yet; raises if the id is ambiguous.
+    """
+    try:
+        d = query(
+            "SELECT * FROM document_details WHERE purchase_document = ? "
+            "OR purchase_document LIKE ?",
+            db_path=db_path,
+            params=(doc_number, f"%{doc_number}"),
+        )
+    except Exception:  # noqa: BLE001 - detail tables may not exist yet
+        return None
+    if d.empty:
+        return None
+    ids = list(d["purchase_document"].unique())
+    if len(ids) > 1:
+        raise ValueError(f"'{doc_number}' matches multiple documents: {ids}")
+    pd_id = ids[0]
+    lines = query(
+        "SELECT line_number, unspsc, quantity, unit_price, line_status, item_description "
+        "FROM document_lines WHERE purchase_document = ? ORDER BY CAST(line_number AS INT)",
+        db_path=db_path,
+        params=(pd_id,),
+    )
+    pos = query(
+        "SELECT po_id, buyer, start_date, po_total, po_status "
+        "FROM document_pos WHERE purchase_document = ?",
+        db_path=db_path,
+        params=(pd_id,),
+    )
+    return {"header": d.iloc[0].to_dict(), "lines": lines, "pos": pos}
+
+
+def _fmt_money(v):
+    try:
+        return f"${float(v):,.2f}"
+    except (TypeError, ValueError):
+        return str(v)
+
+
+def _print_document(doc: dict) -> None:
+    """Print a document like the PO Details page: header + two sections."""
+    h, lines, pos = doc["header"], doc["lines"], doc["pos"]
+    print("FI$Cal SCPRS - PO Details")
+    print(f"  Department        : {h['business_unit']}  {h.get('department_name') or ''}")
+    print(
+        f"  Purchase Document : {h['purchase_document']}   "
+        f"Version {h.get('version')}   Bill Code {h.get('bill_code')}"
+    )
+    print(
+        f"  Status            : {h.get('status')}   "
+        f"{h.get('acquisition_type')} / {h.get('acquisition_method')}"
+    )
+    print(f"  Dates             : {h.get('start_date')}  ->  {h.get('end_date')}")
+    print(f"  Supplier          : {h.get('supplier_name')}")
+    print(f"  Buyer             : {h.get('buyer_name')}  {h.get('buyer_email') or ''}")
+    print(
+        f"  Amounts           : merchandise {_fmt_money(h.get('merchandise_amount'))}   "
+        f"freight/tax/misc {_fmt_money(h.get('freight_tax_misc'))}   "
+        f"grand total {_fmt_money(h.get('grand_total'))}"
+    )
+
+    print(f"\nPurchase Document Line Item Details ({len(lines)})")
+    if not lines.empty:
+        disp = lines.copy()
+        disp["line_total"] = disp["unit_price"] * disp["quantity"]
+        disp["description"] = disp["item_description"].str.slice(0, 44)
+        cols = [
+            "line_number",
+            "unspsc",
+            "quantity",
+            "unit_price",
+            "line_total",
+            "line_status",
+            "description",
+        ]
+        print(disp[cols].to_string(index=False))
+        lt, merch = disp["line_total"].sum(), (h.get("merchandise_amount") or 0)
+        flag = "OK" if abs(lt - merch) < 1 else "MISMATCH"
+        print(f"  line total sum {_fmt_money(lt)}  vs merchandise {_fmt_money(merch)}  [{flag}]")
+
+    print(f"\nAssociated Transactions ({len(pos)})")
+    print(pos.to_string(index=False) if not pos.empty else "  (none - standalone document)")
+
+
 def _cli() -> None:
     ap = argparse.ArgumentParser(description="Build / query the SCPRS data model.")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -436,6 +525,9 @@ def _cli() -> None:
     en.add_argument("to_date")
     en.add_argument("--limit", type=int, default=None, help="Process at most N days this run")
     en.add_argument("--force", action="store_true", help="Re-process days already recorded")
+    dc = sub.add_parser("document", help="Show a document like the PO Details page")
+    dc.add_argument("document", help="Purchase document id or suffix, e.g. 63626")
+    dc.add_argument("--fetch", action="store_true", help="Drill it now if not yet enriched")
     q = sub.add_parser("query", help="Run a SQL query against the model")
     q.add_argument("sql")
     sub.add_parser("info", help="Show schema and a data summary")
@@ -457,6 +549,31 @@ def _cli() -> None:
                 force=args.force,
             )
         )
+    elif args.cmd == "document":
+        result = document(args.document)
+        if result is None and args.fetch:
+            found = query(
+                "SELECT business_unit, start_date FROM purchases "
+                "WHERE purchase_document = ? OR purchase_document LIKE ?",
+                params=(args.document, f"%{args.document}"),
+            )
+            if found.empty:
+                print("Not in `purchases`; build the summary first or pass the exact id.")
+            else:
+                row = found.iloc[0]
+                day = datetime.strptime(row["start_date"], "%Y-%m-%d").strftime("%m/%d/%Y")
+                print(f"Enriching {row['business_unit']} {day} to fetch this document...")
+                build_details_db(row["business_unit"], day, day, log=lambda *a: None)
+                result = document(args.document)
+        if result is None:
+            print("Not enriched yet. Run one of:")
+            print(f"  python -m src.model document {args.document} --fetch")
+            print("  python -m src.model details <BU> <MM/DD/YYYY> <MM/DD/YYYY>")
+        else:
+            import pandas as pd
+
+            pd.set_option("display.width", 200)
+            _print_document(result)
     elif args.cmd == "query":
         import pandas as pd
 
