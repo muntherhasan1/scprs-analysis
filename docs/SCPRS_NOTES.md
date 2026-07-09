@@ -49,6 +49,27 @@ Both `.xls` files are actually **HTML tables**; parse with `pandas.read_html`
 (handled by `load_extract`). Identifier columns carry a leading `'`; money is
 `$1234.5`.
 
+## Drill-down "PO Details" (richest source)
+
+Clicking a purchase document link (`PURCHASE_DOC$N`) in the results grid opens a
+new **PO Details** page (component `ZZ_SCPRS2_CMP`) that carries data **neither
+CSV export has**:
+- **Bill Code** (header field `ZZ_SCPR_SBP_WRK_ZZ_DGS_BILL_CD`).
+- A complete line-item breakdown whose unit prices sum to the grand total — the
+  Detail CSV scatters these across associated POs and shows most as `$0`.
+- An "Associated Transactions" table with **per-PO** buyer, start date, PO total,
+  and status (the Detail CSV can omit a PO's header row entirely).
+
+`scprs.parse_po_details()` reads it from per-cell spans (`ZZ_SCPR_SBP_WRK_*`
+header, `ZZ_SCPR_PDL_DVW_*$N` lines, `ZZ_SCPR_PHD_DVW_*$N` / `PO_DETAIL$span$N`
+POs) because the nested grid tables defeat `read_html`. `model.build_details_db`
+loads it into `document_details` / `document_lines` / `document_pos`.
+
+## CSV leading-zero gotcha
+The exported IDs like `0000000000000000000063626` are stored correctly in the
+file, but `pandas.read_csv` re-infers them as numbers (→ `63626`). Read ID
+columns as strings, or use the SQLite model (IDs are TEXT there).
+
 ## The 65,000-row cap (the "more scraping?" answer)
 A single download is capped at **65,000 rows**. If a Department + date range
 exceeds that, a modal warns and only the first 65,000 rows are exported

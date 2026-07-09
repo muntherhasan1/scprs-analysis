@@ -23,6 +23,7 @@ from __future__ import annotations
 import argparse
 import re
 import sqlite3
+from datetime import datetime
 from pathlib import Path
 
 from . import scprs
@@ -135,6 +136,183 @@ def build_db(
     return len(df), warnings
 
 
+# --- PO Details drill-down tables (richer than the CSV exports) ---
+_DETAILS_SCHEMA = {
+    "document_details": [
+        "business_unit",
+        "purchase_document",
+        "department_name",
+        "version",
+        "bill_code",
+        "status",
+        "acquisition_type",
+        "acquisition_method",
+        "start_date",
+        "end_date",
+        "merchandise_amount",
+        "freight_tax_misc",
+        "grand_total",
+        "lpa_contract_id",
+        "supplier_name",
+        "buyer_name",
+        "buyer_email",
+    ],
+    "document_lines": [
+        "business_unit",
+        "purchase_document",
+        "line_number",
+        "item_id",
+        "item_description",
+        "unspsc",
+        "unspsc_description",
+        "unit_of_measure",
+        "quantity",
+        "unit_price",
+        "line_status",
+    ],
+    "document_pos": [
+        "business_unit",
+        "purchase_document",
+        "po_id",
+        "buyer",
+        "start_date",
+        "po_total",
+        "po_status",
+    ],
+}
+_REAL_COLUMNS = {
+    "merchandise_amount",
+    "freight_tax_misc",
+    "grand_total",
+    "quantity",
+    "unit_price",
+    "po_total",
+}
+
+
+def _money(v):
+    if v is None:
+        return None
+    s = re.sub(r"[^0-9.\-]", "", str(v))
+    try:
+        return float(s)
+    except ValueError:
+        return None
+
+
+def _iso(v):
+    if not v:
+        return None
+    try:
+        return datetime.strptime(str(v).strip(), "%m/%d/%Y").strftime("%Y-%m-%d")
+    except ValueError:
+        return v
+
+
+def _ensure_details_schema(con: sqlite3.Connection) -> None:
+    for table, cols in _DETAILS_SCHEMA.items():
+        defs = ",\n  ".join(f"{c} {'REAL' if c in _REAL_COLUMNS else 'TEXT'}" for c in cols)
+        con.execute(f"CREATE TABLE IF NOT EXISTS {table} (\n  {defs}\n)")
+        for col in ("business_unit", "purchase_document"):
+            con.execute(f"CREATE INDEX IF NOT EXISTS ix_{table}_{col} ON {table}({col})")
+
+
+def build_details_db(
+    business_unit: str,
+    from_date: str,
+    to_date: str,
+    *,
+    db_path: Path = DB_PATH,
+    max_docs: int | None = None,
+    log=print,
+) -> dict:
+    """Drill into each document's PO Details page and load the three detail tables.
+
+    Idempotent per document: reloading a document replaces its detail rows.
+    """
+    import pandas as pd
+
+    docs = scprs.collect_po_details(business_unit, from_date, to_date, max_docs=max_docs, log=log)
+    if not docs:
+        return {"documents": 0, "lines": 0, "pos": 0}
+
+    det, lines, pos = [], [], []
+    for d in docs:
+        h = d["header"]
+        doc = h.get("purchase_document") or d["document"]
+        det.append(
+            {
+                "business_unit": business_unit,
+                "purchase_document": doc,
+                "department_name": h.get("department_name"),
+                "version": h.get("version"),
+                "bill_code": h.get("bill_code"),
+                "status": h.get("status"),
+                "acquisition_type": h.get("acquisition_type"),
+                "acquisition_method": h.get("acquisition_method"),
+                "start_date": _iso(h.get("start_date")),
+                "end_date": _iso(h.get("end_date")),
+                "merchandise_amount": _money(h.get("merchandise_amount")),
+                "freight_tax_misc": _money(h.get("freight_tax_misc")),
+                "grand_total": _money(h.get("grand_total")),
+                "lpa_contract_id": h.get("lpa_contract_id"),
+                "supplier_name": h.get("supplier_name"),
+                "buyer_name": h.get("buyer_name"),
+                "buyer_email": h.get("buyer_email"),
+            }
+        )
+        for ln in d["lines"]:
+            lines.append(
+                {
+                    "business_unit": business_unit,
+                    "purchase_document": doc,
+                    "line_number": ln.get("line_number"),
+                    "item_id": ln.get("item_id"),
+                    "item_description": ln.get("item_description"),
+                    "unspsc": ln.get("unspsc"),
+                    "unspsc_description": ln.get("unspsc_description"),
+                    "unit_of_measure": ln.get("unit_of_measure"),
+                    "quantity": _money(ln.get("quantity")),
+                    "unit_price": _money(ln.get("unit_price")),
+                    "line_status": ln.get("line_status"),
+                }
+            )
+        for po in d["pos"]:
+            pos.append(
+                {
+                    "business_unit": business_unit,
+                    "purchase_document": doc,
+                    "po_id": po.get("po_id"),
+                    "buyer": po.get("buyer"),
+                    "start_date": _iso(po.get("start_date")),
+                    "po_total": _money(po.get("po_total")),
+                    "po_status": po.get("po_status"),
+                }
+            )
+
+    con = _connect(db_path)
+    try:
+        _ensure_details_schema(con)
+        loaded = [r["purchase_document"] for r in det]
+        ph = ",".join("?" * len(loaded))
+        for table, rows in (
+            ("document_details", det),
+            ("document_lines", lines),
+            ("document_pos", pos),
+        ):
+            # `table` is an internal constant (loop above), never user input; values parameterized.
+            q = f"DELETE FROM {table} WHERE purchase_document IN ({ph})"  # noqa: S608 # nosec
+            con.execute(q, loaded)
+            frame = pd.DataFrame(rows).reindex(columns=_DETAILS_SCHEMA[table])
+            frame.to_sql(table, con, if_exists="append", index=False)
+        con.commit()
+    finally:
+        con.close()
+    counts = {"documents": len(det), "lines": len(lines), "pos": len(pos)}
+    log(f"Loaded {counts} into {db_path}")
+    return counts
+
+
 def query(sql: str, *, db_path: Path = DB_PATH, params: tuple = ()):
     """Run a read query and return a DataFrame."""
     import pandas as pd
@@ -153,6 +331,11 @@ def _cli() -> None:
     b.add_argument("business_unit")
     b.add_argument("from_date")
     b.add_argument("to_date")
+    dt = sub.add_parser("details", help="Drill into each document's PO Details page")
+    dt.add_argument("business_unit")
+    dt.add_argument("from_date")
+    dt.add_argument("to_date")
+    dt.add_argument("--max-docs", type=int, default=None)
     q = sub.add_parser("query", help="Run a SQL query against the model")
     q.add_argument("sql")
     sub.add_parser("info", help="Show schema and a data summary")
@@ -162,6 +345,8 @@ def _cli() -> None:
         n, warnings = build_db(args.business_unit, args.from_date, args.to_date)
         for w in warnings:
             print("WARNING:", w)
+    elif args.cmd == "details":
+        build_details_db(args.business_unit, args.from_date, args.to_date, max_docs=args.max_docs)
     elif args.cmd == "query":
         import pandas as pd
 

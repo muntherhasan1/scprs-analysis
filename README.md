@@ -77,6 +77,26 @@ acquisition_method, buyer_name/email, status, version, … Views:
 `v_supplier_totals`, `v_method_totals`, `v_monthly_totals`. Indexed on
 business_unit, start_date, supplier, and acquisition_method.
 
+### Drill-down details (richer than the CSV exports)
+
+The `Download Detail Information` CSV understates line-item dollars and omits
+some fields. `src.model details` instead clicks each document's **PO Details**
+page and loads three tables with the authoritative data:
+
+```bash
+python -m src.model details 8660 02/18/2021 02/18/2021
+```
+
+- `document_details` — one row per document, incl. **`bill_code`** (absent from
+  both CSV exports) and clean totals.
+- `document_lines` — line items whose `unit_price` sums to the grand total
+  (item description, UNSPSC + description, quantity, line status).
+- `document_pos` — associated POs with **per-PO** id, buyer, start date,
+  PO total, and status.
+
+Processes the documents in the results grid, so run it on narrow date ranges
+(one document = one page load). Idempotent per document.
+
 ## Security
 
 Secrets management, CI/CD hardening, and access-control practices are documented

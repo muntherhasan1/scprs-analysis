@@ -249,6 +249,135 @@ def fetch_departments() -> list[tuple[str, str]]:
     return sorted(found.items())
 
 
+# --- PO Details drill-down (clicking a purchase document in the results grid) ---
+# Field ids on the "PO Details" component (ZZ_SCPRS2_CMP). Parsed from per-cell
+# spans because the grids are nested tables that defeat pandas.read_html.
+_PODET_HEADER_IDS = {
+    "business_unit": "ZZ_SCPR_SBP_WRK_BUSINESS_UNIT",
+    "department_name": "ZZ_SCPR_SBP_WRK_DESCR",
+    "purchase_document": "ZZ_SCPR_SBP_WRK_CRDMEM_ACCT_NBR",
+    "version": "ZZ_SCPR_SBP_WRK_VERSION_NBR$span",
+    "bill_code": "ZZ_SCPR_SBP_WRK_ZZ_DGS_BILL_CD",  # not in either CSV export
+    "status": "ZZ_SCPR_SBP_WRK_STATUS1",
+    "acquisition_type": "ZZ_SCPR_SBP_WRK_ZZ_COMMENT1",
+    "acquisition_method": "ZZ_SCPR_SBP_WRK_ZZ_ACQ_MTHD",
+    "start_date": "ZZ_SCPR_SBP_WRK_START_DATE",
+    "end_date": "ZZ_SCPR_SBP_WRK_END_DATE",
+    "merchandise_amount": "ZZ_SCPR_SBP_WRK_MERCH_AMT_TTL",
+    "freight_tax_misc": "ZZ_SCPR_SBP_WRK_ADJ_AMT_TTL",
+    "grand_total": "ZZ_SCPR_SBP_WRK_AWARDED_AMT",
+    "lpa_contract_id": "ZZ_SCPR_SBP_WRK_ZZ_LPACONTRACTNBR",
+    "supplier_name": "ZZ_SCPR_SBP_WRK_NAME1",
+    "buyer_name": "ZZ_SCPR_SBP_WRK_BUYER_DESCR",
+    "buyer_email": "ZZ_SCPR_SBP_WRK_EMAILID",
+}
+_PODET_LINE_IDS = {
+    "line_number": "ZZ_SCPR_PDL_DVW_CRDMEM_ACCT_NBR",
+    "item_id": "ZZ_SCPR_PDL_DVW_INV_ITEM_ID",
+    "item_description": "ZZ_SCPR_PDL_DVW_DESCR254_MIXED",
+    "unspsc": "ZZ_SCPR_PDL_DVW_PV_UNSPSC_CODE",
+    "unspsc_description": "ZZ_CAT_ID_VW_DESCR254",
+    "unit_of_measure": "ZZ_SCPR_PDL_DVW_DESCR",
+    "quantity": "ZZ_SCPR_PDL_DVW_QUANTITY",
+    "unit_price": "ZZ_SCPR_PDL_DVW_UNIT_PRICE",
+    "line_status": "ZZ_SCPR_PDL_DVW_DESCR1",
+}
+_PODET_PO_IDS = {
+    "po_id": "PO_DETAIL$span",
+    "buyer": "ZZ_SCPR_PHD_DVW_DESCR60",
+    "start_date": "ZZ_SCPR_PHD_DVW_START_DATE",
+    "po_total": "ZZ_SCPR_PHD_DVW_PO_TOTAL",
+    "po_status": "ZZ_SCPR_PHD_DVW_STATUS10",
+}
+
+
+def _span_text(soup, eid: str):
+    el = soup.find(id=eid)
+    return el.get_text(strip=True).replace("\xa0", " ") if el else None
+
+
+def _rows_by_span(soup, id_map: dict) -> list[dict]:
+    """Extract a PeopleSoft grid row-by-row using each column's `<base>$N` span."""
+    first = next(iter(id_map.values()))
+    rows = []
+    i = 0
+    while soup.find(id=f"{first}${i}") is not None:
+        rows.append({k: _span_text(soup, f"{base}${i}") for k, base in id_map.items()})
+        i += 1
+    return rows
+
+
+def parse_po_details(html: str):
+    """Parse a PO Details drill-down page into (header, line_items, pos)."""
+    from bs4 import BeautifulSoup
+
+    soup = BeautifulSoup(html, "lxml")
+    header = {k: _span_text(soup, eid) for k, eid in _PODET_HEADER_IDS.items()}
+    return header, _rows_by_span(soup, _PODET_LINE_IDS), _rows_by_span(soup, _PODET_PO_IDS)
+
+
+def collect_po_details(
+    business_unit: str,
+    from_date: str,
+    to_date: str,
+    *,
+    headless: bool = True,
+    timeout_ms: int = 120_000,
+    max_docs: int | None = None,
+    log=print,
+) -> list[dict]:
+    """Search, then click each purchase-document link and parse its PO Details.
+
+    Returns a list of {"document", "header", "lines", "pos"} dicts. Processes
+    the documents in the results grid (narrow the date range for large sets).
+    """
+    results: list[dict] = []
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=headless)
+        ctx = browser.new_context()
+        page = ctx.new_page()
+        try:
+            page.goto(SEARCH_URL, wait_until="networkidle", timeout=timeout_ms)
+            _type(page, _BU, business_unit)
+            _type(page, _FROM, from_date)
+            _type(page, _TO, to_date)
+            if {page.input_value(_FROM), page.input_value(_TO)} != {from_date, to_date}:
+                raise RuntimeError("Date fields did not commit; would return unfiltered data.")
+            page.click(_SEARCH)
+            for _ in range(30):
+                page.wait_for_timeout(1000)
+                if (
+                    "No Records Found" in page.inner_text("body")
+                    or page.locator("a[id^='PURCHASE_DOC$']").count()
+                ):
+                    break
+            if "No Records Found" in page.inner_text("body"):
+                log("No records for that business unit + date range.")
+                return []
+
+            total = page.locator("a[id^='PURCHASE_DOC$']").count()
+            n = min(total, max_docs) if max_docs else total
+            log(f"{total} document(s) in grid; drilling into {n}")
+            for i in range(n):
+                link = page.locator(f"[id='PURCHASE_DOC${i}']")
+                doc = link.inner_text().strip()
+                with ctx.expect_page(timeout=timeout_ms) as pop:
+                    link.click()
+                detail = pop.value
+                try:
+                    detail.wait_for_load_state("networkidle", timeout=timeout_ms)
+                except PWTimeout:
+                    pass
+                detail.wait_for_timeout(1200)
+                header, lines, pos = parse_po_details(detail.content())
+                detail.close()
+                results.append({"document": doc, "header": header, "lines": lines, "pos": pos})
+                log(f"  [{i + 1}/{n}] {doc}: {len(lines)} lines, {len(pos)} POs")
+        finally:
+            browser.close()
+    return results
+
+
 def load_extract(path: Path):
     """Parse a downloaded SCPRS .xls (HTML table) into a tidy DataFrame.
 
