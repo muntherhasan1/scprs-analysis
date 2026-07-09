@@ -44,12 +44,38 @@ python -m src.scprs 0250 06/01/2025 06/30/2025 --kind detail # line-item detail
 
 - Business-unit codes: `references/departments.csv` (300 valid Departments).
 - Dates are `MM/DD/YYYY` and filter on each record's **Start Date**.
-- A single download is capped at **65,000 rows**; if exceeded, the tool prints a
-  truncation warning (`Extract.truncated`) — narrow the date range for full
-  coverage.
+- A single download is capped at **65,000 rows**. `src.model` (below) splits
+  the date range automatically when it hits the cap; the low-level
+  `download_extract` just flags it via `Extract.truncated`.
 
 `src/scraper.py` remains as a generic CSV-link downloader for simpler sites
 (timeouts, TLS on, path-traversal-safe filenames).
+
+## Queryable data model (SQLite)
+
+`src/model.py` pulls a business unit over a date range (auto-splitting past the
+65k cap) into a local SQLite database (`data/scprs.db`) as a `purchases` table
+— one row per purchase document — plus rollup views. Re-running a business unit
+refreshes just that unit.
+
+```bash
+# Build / refresh the model for a business unit + date range:
+python -m src.model build 8660 01/01/2016 07/08/2026
+
+# Ad-hoc SQL:
+python -m src.model query "SELECT supplier_name, document_count, total_value
+                           FROM v_supplier_totals WHERE business_unit='8660'
+                           ORDER BY total_value DESC LIMIT 10"
+
+# Schema + loaded-data summary:
+python -m src.model info
+```
+
+Table `purchases` columns: business_unit, department_name, purchase_document,
+start_date, end_date, grand_total, supplier_id/name, acquisition_type_sub_type,
+acquisition_method, buyer_name/email, status, version, … Views:
+`v_supplier_totals`, `v_method_totals`, `v_monthly_totals`. Indexed on
+business_unit, start_date, supplier, and acquisition_method.
 
 ## Security
 

@@ -10,13 +10,17 @@ Reverse-engineering findings for the California FI$Cal SCPRS search:
 ## Search parameters (what you asked for)
 | Field on page | HTML id | Notes |
 |---|---|---|
-| Department | `ZZ_SCPRS_SP_WRK_BUSINESS_UNIT` | 4-digit business-unit code; see `references/departments.csv` (300 valid codes) |
+| Department | `ZZ_SCPRS_SP_WRK_BUSINESS_UNIT` | 4-digit business-unit code; see `references/departments.csv` |
 | From Date | `ZZ_SCPRS_SP_WRK_FROM_DATE` | `MM/DD/YYYY`; filters on each record's **Start Date** |
 | To Date | `ZZ_SCPRS_SP_WRK_TO_DATE` | `MM/DD/YYYY` |
 | Search | `ZZ_SCPRS_SP_WRK_BUTTON` | runs the query |
 
 Other available filters: Supplier ID/Name, Purchase Document #, Description,
 Acquisition Type/Method (useful for splitting oversized result sets — see below).
+
+> **Department list is partial.** The lookup returns only the first ~300 codes
+> (last is `6780`). Higher codes still work when entered directly — e.g. `8660`
+> (Public Utilities Commission) returns data fine despite not being listed.
 
 ## Why a headless browser is required
 Two behaviors defeat a plain `requests` scrape:

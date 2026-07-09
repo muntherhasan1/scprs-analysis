@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 from playwright.sync_api import TimeoutError as PWTimeout
@@ -129,6 +130,65 @@ def download_extract(
             raise RuntimeError(f"Timed out driving SCPRS search: {e}") from e
         finally:
             browser.close()
+
+
+def _parse_date(s: str) -> date:
+    return datetime.strptime(s, "%m/%d/%Y").date()
+
+
+def _fmt_date(d: date) -> str:
+    return d.strftime("%m/%d/%Y")
+
+
+def download_range(
+    business_unit: str,
+    from_date: str,
+    to_date: str,
+    *,
+    kind: str = "summary",
+    out_dir: Path = DATA_DIR,
+    max_depth: int = 12,
+    log=print,
+):
+    """Download a full date range, auto-splitting when the 65k row cap is hit.
+
+    The site caps a single export at 65,000 rows. This bisects the date range
+    (recursively, on non-overlapping sub-ranges) until every slice is under the
+    cap, then concatenates. Returns (DataFrame, warnings). `warnings` lists any
+    slice that still exceeded the cap at a single day (unsplittable).
+    """
+    import pandas as pd
+
+    frames: list = []
+    warnings: list[str] = []
+
+    def rec(a: date, b: date, depth: int) -> None:
+        res = download_extract(
+            business_unit, _fmt_date(a), _fmt_date(b), kind=kind, out_dir=out_dir
+        )
+        if res.no_records:
+            log(f"  {_fmt_date(a)}..{_fmt_date(b)}: no records")
+            return
+        if not res.truncated or a == b or depth >= max_depth:
+            df = load_extract(res.path)
+            if res.truncated:
+                warnings.append(f"{_fmt_date(a)}..{_fmt_date(b)} exceeds {ROW_CAP:,} rows; partial")
+                log(f"  {_fmt_date(a)}..{_fmt_date(b)}: TRUNCATED, kept first {ROW_CAP:,}")
+            else:
+                log(f"  {_fmt_date(a)}..{_fmt_date(b)}: {len(df)} rows")
+            frames.append(df)
+            return
+        # Truncated and splittable: bisect on date into two disjoint halves.
+        mid = a + (b - a) / 2
+        log(f"  {_fmt_date(a)}..{_fmt_date(b)}: >cap, splitting at {_fmt_date(mid)}")
+        rec(a, mid, depth + 1)
+        rec(mid + timedelta(days=1), b, depth + 1)
+
+    rec(_parse_date(from_date), _parse_date(to_date), 0)
+    if not frames:
+        return pd.DataFrame(), warnings
+    df = pd.concat(frames, ignore_index=True).drop_duplicates()
+    return df, warnings
 
 
 def fetch_departments() -> list[tuple[str, str]]:
