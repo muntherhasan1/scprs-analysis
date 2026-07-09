@@ -354,9 +354,19 @@ def collect_po_details(
                 log("No records for that business unit + date range.")
                 return []
 
+            import re
+
             total = page.locator("a[id^='PURCHASE_DOC$']").count()
+            # PeopleSoft grids page at ~100 rows; surface any rows beyond this page.
+            m = re.search(r"1-\d+ of ([\d,]+)", page.inner_text("body"))
+            grid_total = int(m.group(1).replace(",", "")) if m else total
+            if grid_total > total:
+                log(
+                    f"WARNING: grid reports {grid_total} rows but only the first {total} are on "
+                    "this page; narrow the date range to capture all (pagination not automated)."
+                )
             n = min(total, max_docs) if max_docs else total
-            log(f"{total} document(s) in grid; drilling into {n}")
+            log(f"{total} document(s) on page; drilling into {n}")
             for i in range(n):
                 link = page.locator(f"[id='PURCHASE_DOC${i}']")
                 doc = link.inner_text().strip()

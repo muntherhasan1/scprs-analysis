@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import json
 import sqlite3
 from datetime import datetime
 from pathlib import Path
@@ -188,19 +189,6 @@ def build_silver(con: sqlite3.Connection, ts: str) -> dict:
         {where_clause}
         """
     )
-    # attach line/PO counts and the line-reconciliation DQ flag
-    for col, tbl, have in (
-        ("line_count", "bronze_document_lines", have_lines),
-        ("associated_po_count", "bronze_document_pos", have_pos),
-    ):
-        con.execute(f"ALTER TABLE silver_document ADD COLUMN {col} INTEGER DEFAULT 0")
-        if have:
-            con.execute(
-                f"""UPDATE silver_document SET {col} = (
-                        SELECT COUNT(*) FROM {tbl} t
-                        WHERE t.business_unit = silver_document.business_unit
-                          AND t.purchase_document = silver_document.purchase_document)"""
-            )
 
     # -- silver_line
     con.execute("DROP TABLE IF EXISTS silver_line")
@@ -257,6 +245,21 @@ def build_silver(con: sqlite3.Connection, ts: str) -> dict:
     else:
         con.execute(
             "CREATE TABLE silver_associated_po (business_unit TEXT, purchase_document TEXT)"
+        )
+
+    # attach line/PO counts from the deduped, version-correct silver tables in one
+    # pass each (UPDATE ... FROM aggregate; avoids a per-row correlated subquery)
+    for col, tbl in (
+        ("line_count", "silver_line"),
+        ("associated_po_count", "silver_associated_po"),
+    ):
+        con.execute(f"ALTER TABLE silver_document ADD COLUMN {col} INTEGER DEFAULT 0")
+        con.execute(
+            f"UPDATE silver_document SET {col} = c.n FROM "
+            f"(SELECT business_unit, purchase_document, COUNT(*) AS n FROM {tbl} "
+            f"GROUP BY business_unit, purchase_document) c "
+            f"WHERE silver_document.business_unit = c.business_unit "
+            f"AND silver_document.purchase_document = c.purchase_document"
         )
 
     # data-quality flag: enriched line items should reconcile to merchandise amount
@@ -553,6 +556,13 @@ _DQ_CHECKS = [
         "SELECT COUNT(*) FROM fact_line WHERE unspsc_key IS NULL",
     ),
     (
+        "fact_line_document_subset",
+        "error",
+        "fact_line vs fact_document",
+        "SELECT COUNT(*) FROM fact_line WHERE document_bk NOT IN "
+        "(SELECT document_bk FROM fact_document)",
+    ),
+    (
         "line_items_reconcile",
         "warn",
         "silver_document (enriched)",
@@ -615,8 +625,6 @@ def build_all(*, wh_path: Path = WAREHOUSE_DB, source_path: Path = SOURCE_DB, lo
         log(f"[{batch}] data quality...")
         dq = run_dq(con, batch, ts)
         fin = datetime.now().isoformat(timespec="seconds")
-        import json
-
         con.execute(
             "UPDATE dw_batch SET finished_at=?, status=?, row_counts=? WHERE batch_id=?",
             (fin, "ok", json.dumps(counts), batch),
