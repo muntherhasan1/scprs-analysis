@@ -262,11 +262,14 @@ def build_silver(con: sqlite3.Connection, ts: str) -> dict:
             f"AND silver_document.purchase_document = c.purchase_document"
         )
 
-    # data-quality flag: enriched line items should reconcile to merchandise amount
+    # data-quality flag: enriched line items should reconcile to merchandise amount.
+    # Only checked when the header reports a non-zero merchandise amount -- some
+    # older contracts carry $0 header totals with the value in the line items, so
+    # there is nothing to reconcile against (flag stays NULL, not a failure).
     con.execute("ALTER TABLE silver_document ADD COLUMN dq_line_reconciles INTEGER")
     con.execute(
         """UPDATE silver_document SET dq_line_reconciles = CASE
-             WHEN is_enriched = 0 OR merchandise_amount IS NULL THEN NULL
+             WHEN is_enriched = 0 OR COALESCE(merchandise_amount, 0) = 0 THEN NULL
              WHEN ABS(COALESCE((SELECT SUM(line_amount) FROM silver_line l
                      WHERE l.business_unit = silver_document.business_unit
                        AND l.purchase_document = silver_document.purchase_document), 0)
