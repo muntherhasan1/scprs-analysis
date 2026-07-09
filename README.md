@@ -111,6 +111,33 @@ python -m src.model enrich  8660 01/01/2016 07/08/2026 --limit 50   # a chunk at
 A day that errors is left unrecorded and retried on the next run; `--force`
 re-processes days already done.
 
+### Run it a little every day (Windows Task Scheduler)
+
+`scripts/enrich_daily.ps1` drills a few more active days and appends to
+`data/enrich_daily.log`. Register it to run daily:
+
+```powershell
+$script  = "C:\Users\munth\scprs-analysis\scripts\enrich_daily.ps1"
+$action  = New-ScheduledTaskAction -Execute "powershell.exe" `
+             -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$script`" -Days 10"
+$trigger = New-ScheduledTaskTrigger -Daily -At 8:00AM
+Register-ScheduledTask -TaskName "SCPRS Enrich 8660" -Action $action -Trigger $trigger `
+  -Settings (New-ScheduledTaskSettingsSet -StartWhenAvailable) -Force
+```
+
+`-Days N` sets how many active days to drill per run. Manage it with:
+
+```powershell
+Get-ScheduledTaskInfo "SCPRS Enrich 8660"   # last/next run + result
+Start-ScheduledTask    "SCPRS Enrich 8660"  # run now
+Unregister-ScheduledTask "SCPRS Enrich 8660" -Confirm:$false   # remove
+```
+
+The job only drills days already in `purchases`. To pick up **newly published**
+documents, re-run `python -m src.model build 8660 …` periodically (SCPRS
+refreshes every 24h) — that refreshes the summary and adds any new active days
+the enricher will then drill.
+
 ## Security
 
 Secrets management, CI/CD hardening, and access-control practices are documented
