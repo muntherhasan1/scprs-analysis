@@ -341,6 +341,7 @@ def enrich_details(
     db_path: Path = DB_PATH,
     force: bool = False,
     limit: int | None = None,
+    newest_first: bool = False,
     log=print,
 ) -> dict:
     """Drill into PO Details one active day at a time, resuming across runs.
@@ -349,17 +350,25 @@ def enrich_details(
     the `purchases` table) are visited, so build the summary first. Each
     completed day is recorded in `details_progress`; a re-run skips finished
     days. A day that errors is left unrecorded so it retries next run.
+    `newest_first` processes the most recent days first (recent data priority).
     """
     con = _connect(db_path)
+    # Two literal statements (not interpolated) keep the SQL parameterized.
+    active_asc = (
+        "SELECT DISTINCT start_date FROM purchases WHERE business_unit = ? "
+        "AND start_date BETWEEN ? AND ? AND start_date IS NOT NULL ORDER BY start_date ASC"
+    )
+    active_desc = (
+        "SELECT DISTINCT start_date FROM purchases WHERE business_unit = ? "
+        "AND start_date BETWEEN ? AND ? AND start_date IS NOT NULL ORDER BY start_date DESC"
+    )
     try:
         _ensure_progress_schema(con)
         try:
             active = [
                 r[0]
                 for r in con.execute(
-                    "SELECT DISTINCT start_date FROM purchases WHERE business_unit = ? "
-                    "AND start_date BETWEEN ? AND ? AND start_date IS NOT NULL "
-                    "ORDER BY start_date",
+                    active_desc if newest_first else active_asc,
                     (business_unit, _iso(from_date), _iso(to_date)),
                 ).fetchall()
             ]
@@ -546,6 +555,7 @@ def _cli() -> None:
     en.add_argument("to_date")
     en.add_argument("--limit", type=int, default=None, help="Process at most N days this run")
     en.add_argument("--force", action="store_true", help="Re-process days already recorded")
+    en.add_argument("--newest-first", action="store_true", help="Process most recent days first")
     dc = sub.add_parser("document", help="Show a document like the PO Details page")
     dc.add_argument("document", help="Purchase document id or suffix, e.g. 63626")
     dc.add_argument("--fetch", action="store_true", help="Drill it now if not yet enriched")
@@ -568,6 +578,7 @@ def _cli() -> None:
                 args.to_date,
                 limit=args.limit,
                 force=args.force,
+                newest_first=args.newest_first,
             )
         )
     elif args.cmd == "document":
