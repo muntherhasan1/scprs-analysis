@@ -438,9 +438,10 @@ def document(doc_number: str, *, db_path: Path = DB_PATH):
     yet; raises if the id is ambiguous.
     """
     try:
+        # A document can be enriched at several versions; show the current one.
         d = query(
             "SELECT * FROM document_details WHERE purchase_document = ? "
-            "OR purchase_document LIKE ?",
+            "OR purchase_document LIKE ? ORDER BY CAST(version AS INTEGER) DESC",
             db_path=db_path,
             params=(doc_number, f"%{doc_number}"),
         )
@@ -452,17 +453,25 @@ def document(doc_number: str, *, db_path: Path = DB_PATH):
     if len(ids) > 1:
         raise ValueError(f"'{doc_number}' matches multiple documents: {ids}")
     pd_id = ids[0]
+    # Restrict line/PO rows to the current document version (max present; legacy
+    # NULL rows collapse to -1, so single-version docs are unaffected).
     lines = query(
-        "SELECT line_number, unspsc, quantity, unit_price, line_status, item_description "
-        "FROM document_lines WHERE purchase_document = ? ORDER BY CAST(line_number AS INT)",
+        "SELECT DISTINCT line_number, unspsc, quantity, unit_price, line_status, item_description "
+        "FROM document_lines WHERE purchase_document = ? "
+        "AND CAST(COALESCE(document_version, '-1') AS INTEGER) = "
+        "(SELECT MAX(CAST(COALESCE(document_version, '-1') AS INTEGER)) FROM document_lines "
+        "WHERE purchase_document = ?) ORDER BY CAST(line_number AS INT)",
         db_path=db_path,
-        params=(pd_id,),
+        params=(pd_id, pd_id),
     )
     pos = query(
-        "SELECT po_id, buyer, start_date, po_total, po_status "
-        "FROM document_pos WHERE purchase_document = ?",
+        "SELECT DISTINCT po_id, buyer, start_date, po_total, po_status "
+        "FROM document_pos WHERE purchase_document = ? "
+        "AND CAST(COALESCE(document_version, '-1') AS INTEGER) = "
+        "(SELECT MAX(CAST(COALESCE(document_version, '-1') AS INTEGER)) FROM document_pos "
+        "WHERE purchase_document = ?)",
         db_path=db_path,
-        params=(pd_id,),
+        params=(pd_id, pd_id),
     )
     return {"header": d.iloc[0].to_dict(), "lines": lines, "pos": pos}
 
@@ -562,7 +571,11 @@ def _cli() -> None:
             )
         )
     elif args.cmd == "document":
-        result = document(args.document)
+        try:
+            result = document(args.document)
+        except ValueError as e:
+            print(e)
+            return
         if result is None and args.fetch:
             found = query(
                 "SELECT business_unit, start_date FROM purchases "

@@ -110,6 +110,30 @@ def test_document_view(tmp_path):
     assert model.document("99999", db_path=db) is None
 
 
+def test_document_shows_current_version_only(tmp_path):
+    """A document drilled at two versions must display only the current version."""
+    db = tmp_path / "v.db"
+    con = model._connect(db)
+    model._ensure_details_schema(con)
+    con.executemany(
+        "INSERT INTO document_details (business_unit, purchase_document, version, "
+        "merchandise_amount, grand_total) VALUES ('8660', 'D', ?, ?, ?)",
+        [("1", 100.0, 100.0), ("3", 500.0, 500.0)],  # current version is 3
+    )
+    con.executemany(
+        "INSERT INTO document_lines (business_unit, purchase_document, document_version, "
+        "line_number, quantity, unit_price) VALUES ('8660', 'D', ?, ?, ?, ?)",
+        [("1", "1", 1.0, 100.0), ("3", "1", 1.0, 500.0)],  # one line per version
+    )
+    con.commit()
+    con.close()
+
+    doc = model.document("D", db_path=db)
+    assert doc["header"]["version"] == "3"  # current version header
+    assert len(doc["lines"]) == 1  # only v3's line, not both
+    assert (doc["lines"]["unit_price"] * doc["lines"]["quantity"]).sum() == 500.0
+
+
 def test_enrich_resume(tmp_path, monkeypatch):
     db = tmp_path / "e.db"
     con = model._connect(db)
