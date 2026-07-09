@@ -491,6 +491,67 @@ def _build_marts(con):
                    COUNT(*) AS document_count, SUM(grand_total) AS total_value,
                    ROUND(AVG(grand_total), 0) AS avg_value
             FROM fact_document GROUP BY document_type""",
+        # -- competitive intelligence --------------------------------------- #
+        # Vendor scorecard: volume, reach, and how "captured" the awards are.
+        "gold_supplier_profile": """
+            SELECT s.supplier_id, s.supplier_name,
+                   COUNT(*) AS award_count,
+                   ROUND(SUM(f.grand_total), 0) AS total_value,
+                   ROUND(AVG(f.grand_total), 0) AS avg_award,
+                   COUNT(DISTINCT f.dept_key) AS department_count,
+                   MIN(dd.full_date) AS first_award, MAX(dd.full_date) AS last_award,
+                   SUM(f.has_associated_pos) AS contract_count,
+                   ROUND(100.0 * SUM(CASE WHEN a.competitive_flag = 'Non-Competitive'
+                         THEN f.grand_total ELSE 0 END) / NULLIF(SUM(f.grand_total), 0), 1)
+                         AS pct_noncompetitive_value
+            FROM fact_document f
+            JOIN dim_supplier s ON s.supplier_key = f.supplier_key
+            JOIN dim_acquisition a ON a.acq_key = f.acq_key
+            LEFT JOIN dim_date dd ON dd.date_key = f.start_date_key
+            GROUP BY s.supplier_id, s.supplier_name""",
+        # Supplier share of each department's total spend.
+        "gold_supplier_share": """
+            WITH v AS (
+              SELECT dep.business_unit, f.supplier_key, SUM(f.grand_total) AS val
+              FROM fact_document f JOIN dim_department dep ON dep.dept_key = f.dept_key
+              GROUP BY dep.business_unit, f.supplier_key)
+            SELECT v.business_unit, s.supplier_id, s.supplier_name,
+                   ROUND(v.val, 0) AS total_value,
+                   ROUND(100.0 * v.val / SUM(v.val) OVER (PARTITION BY v.business_unit), 2)
+                         AS share_pct
+            FROM v JOIN dim_supplier s ON s.supplier_key = v.supplier_key
+            WHERE v.val > 0""",
+        # Market concentration (HHI) per department x acquisition type.
+        # HHI: <1500 competitive, 1500-2500 moderate, >2500 concentrated.
+        "gold_market_concentration": """
+            WITH v AS (
+              SELECT dep.business_unit, a.acquisition_type, f.supplier_key,
+                     SUM(f.grand_total) AS val
+              FROM fact_document f
+              JOIN dim_department dep ON dep.dept_key = f.dept_key
+              JOIN dim_acquisition a ON a.acq_key = f.acq_key
+              GROUP BY 1, 2, 3),
+            sh AS (
+              SELECT business_unit, acquisition_type, val,
+                     val / SUM(val) OVER (PARTITION BY business_unit, acquisition_type) AS share
+              FROM v WHERE val > 0)
+            SELECT business_unit, acquisition_type,
+                   COUNT(*) AS supplier_count,
+                   ROUND(SUM(share * share) * 10000, 0) AS hhi,
+                   ROUND(MAX(share) * 100, 1) AS top_supplier_pct,
+                   ROUND(SUM(val), 0) AS market_value
+            FROM sh GROUP BY business_unit, acquisition_type""",
+        # Unit-price spread per UNSPSC where 2+ suppliers compete (enriched lines).
+        "gold_price_benchmark": """
+            SELECT u.unspsc, u.unspsc_description,
+                   COUNT(DISTINCT f.supplier_key) AS supplier_count, COUNT(*) AS line_count,
+                   ROUND(MIN(f.unit_price), 2) AS min_price,
+                   ROUND(AVG(f.unit_price), 2) AS avg_price,
+                   ROUND(MAX(f.unit_price), 2) AS max_price
+            FROM fact_line f JOIN dim_unspsc u ON u.unspsc_key = f.unspsc_key
+            WHERE f.unit_price > 0
+            GROUP BY u.unspsc, u.unspsc_description
+            HAVING COUNT(DISTINCT f.supplier_key) >= 2""",
     }
     for name, sql in marts.items():
         con.execute(f"DROP VIEW IF EXISTS {name}")

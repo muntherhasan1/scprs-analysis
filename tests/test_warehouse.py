@@ -140,6 +140,19 @@ def test_warehouse_build(tmp_path):
             "WHERE document_type LIKE 'contract%'"
         ).fetchone()[0]
         assert contract == 1
+
+        # Competitive-intelligence marts: B was NON-COMPETITIVELY BID -> 100%
+        ncb = con.execute(
+            "SELECT pct_noncompetitive_value FROM gold_supplier_profile WHERE supplier_id='S2'"
+        ).fetchone()[0]
+        assert ncb == 100.0
+        # concentration mart computes an HHI per market
+        assert (
+            con.execute(
+                "SELECT COUNT(*) FROM gold_market_concentration WHERE hhi IS NOT NULL"
+            ).fetchone()[0]
+            >= 1
+        )
     finally:
         con.close()
 
