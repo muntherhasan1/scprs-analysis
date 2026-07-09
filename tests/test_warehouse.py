@@ -115,10 +115,10 @@ def test_warehouse_build(tmp_path):
         # dim_date spine populated (more than just the Unknown member)
         assert con.execute("SELECT COUNT(*) FROM dim_date").fetchone()[0] > 1
 
-        # Star integrity: no orphan foreign keys
+        # Star integrity: no orphan foreign keys (physical cols are abbreviated)
         assert (
             con.execute(
-                "SELECT COUNT(*) FROM fact_document WHERE dept_key IS NULL OR supplier_key IS NULL "
+                "SELECT COUNT(*) FROM fact_document WHERE dept_key IS NULL OR sup_key IS NULL "
                 "OR acq_key IS NULL"
             ).fetchone()[0]
             == 0
@@ -130,9 +130,9 @@ def test_warehouse_build(tmp_path):
 
         # fact_line reconciles to merchandise amount (1*2000 + 3*1000 = 5000)
         assert (
-            con.execute(
-                "SELECT ROUND(SUM(line_amount), 2) FROM fact_line WHERE purchase_document='B'"
-            ).fetchone()[0]
+            con.execute("SELECT ROUND(SUM(ln_amt), 2) FROM fact_line WHERE pur_doc='B'").fetchone()[
+                0
+            ]
             == 5000.0
         )
 
@@ -163,11 +163,9 @@ def test_warehouse_build(tmp_path):
             == 2
         )
         # canonical layer wired in: unmapped suppliers are their own canonical entity
+        # (physical dim_supplier columns are abbreviated: supplier_id->sup_id, etc.)
         assert (
-            con.execute("SELECT canonical_id FROM dim_supplier WHERE supplier_id='S1'").fetchone()[
-                0
-            ]
-            == "S1"
+            con.execute("SELECT canon_id FROM dim_supplier WHERE sup_id='S1'").fetchone()[0] == "S1"
         )
         assert (
             con.execute(
@@ -176,9 +174,45 @@ def test_warehouse_build(tmp_path):
             ).fetchone()[0]
             == 1
         )
+
+        # Abbreviation layer: physical columns abbreviated, lv_ view exposes logical
+        # names, marts keep friendly output names, and the mapping is recorded.
+        phys = {r[1] for r in con.execute("PRAGMA table_info(dim_supplier)")}
+        assert {"sup_id", "sup_nm", "grand_tot"} & phys == {"sup_id", "sup_nm"}
+        assert "supplier_id" not in phys  # logical name is gone from physical storage
+        lv = {r[1] for r in con.execute("PRAGMA table_info(lv_dim_supplier)")}
+        assert {"supplier_id", "supplier_name", "canonical_id"} <= lv  # friendly view
+        mart = {r[1] for r in con.execute("PRAGMA table_info(gold_supplier_profile)")}
+        assert "supplier_id" in mart and "total_value" in mart  # marts stay friendly
+        assert (
+            con.execute(
+                "SELECT physical_name FROM gold_data_dictionary "
+                "WHERE table_name='fact_document' AND logical_name='grand_total'"
+            ).fetchone()[0]
+            == "grand_tot"
+        )
     finally:
         con.close()
 
     # No error-severity data-quality failures
     errors = [d for d in result["dq"] if not d["passed"] and d["severity"] == "error"]
     assert errors == []
+
+
+def test_abbreviate():
+    abbr = {"amount": "amt", "supplier": "sup", "name": "nm", "business_unit": "bu", "total": "tot"}
+    # token-by-token replacement, unknown tokens pass through
+    assert warehouse.abbreviate("merchandise_amount", abbr) == "merchandise_amt"
+    assert warehouse.abbreviate("supplier_name", abbr) == "sup_nm"
+    assert warehouse.abbreviate("grand_total", abbr) == "grand_tot"
+    # full-name (phrase) match wins over token replacement
+    assert warehouse.abbreviate("business_unit", abbr) == "bu"
+    # nothing to abbreviate -> unchanged
+    assert warehouse.abbreviate("po_id", abbr) == "po_id"
+
+
+def test_load_abbreviations():
+    abbr = warehouse.load_abbreviations()  # the real references/abbreviations.csv
+    assert abbr["amount"] == "amt"
+    assert abbr["supplier"] == "sup"
+    assert warehouse.abbreviate("unit_price", abbr) == "unt_prc"

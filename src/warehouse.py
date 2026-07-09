@@ -32,6 +32,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import re
 import sqlite3
 from datetime import datetime
 from pathlib import Path
@@ -42,6 +43,33 @@ SOURCE_DB = scprs.DATA_DIR / "scprs.db"
 WAREHOUSE_DB = scprs.DATA_DIR / "warehouse.db"
 ENRICHMENT_DB = scprs.DATA_DIR / "supplier_enrichment.db"  # web-researched supplier profiles
 DEPARTMENTS_CSV = Path(__file__).resolve().parent.parent / "references" / "departments.csv"
+ABBREVIATIONS_CSV = Path(__file__).resolve().parent.parent / "references" / "abbreviations.csv"
+
+
+def load_abbreviations(path: Path = ABBREVIATIONS_CSV) -> dict[str, str]:
+    """Load the term->abbreviation dictionary that standardizes gold physical names."""
+    if not path.exists():
+        return {}
+    with path.open(newline="", encoding="utf-8") as fh:
+        return {
+            r["term"].strip().lower(): r["abbreviation"].strip().lower()
+            for r in csv.DictReader(fh)
+            if r.get("term") and r.get("abbreviation")
+        }
+
+
+def abbreviate(name: str, abbr: dict[str, str]) -> str:
+    """Return the standardized physical form of a snake_case column name.
+
+    A full-name match wins first (so multi-word phrases like `business_unit -> bu`
+    apply), otherwise each `_`-separated token is abbreviated independently and
+    unknown tokens pass through unchanged. Deterministic and dictionary-driven.
+    """
+    key = name.strip().lower()
+    if key in abbr:
+        return abbr[key]
+    return "_".join(abbr.get(tok, tok) for tok in key.split("_"))
+
 
 _BRONZE_SOURCES = {
     "bronze_purchases": "purchases",
@@ -478,6 +506,7 @@ def build_gold(con: sqlite3.Connection, ts: str) -> dict:
         """
     )
 
+    _abbreviate_gold(con, load_abbreviations())  # abbreviate physical cols + build lv_ views
     _build_marts(con)
     return {
         t: _count(con, t)
@@ -556,6 +585,69 @@ def _build_dim(con, table, key, natural_cols, distinct_sql, ts):
         (ts,),
     )
     con.execute(f"CREATE UNIQUE INDEX ix_{table} ON {table}({cols})")  # noqa: S608
+
+
+# Physical gold tables whose columns are abbreviated. Marts and DQ read them via
+# the friendly-named lv_ views (see _to_logical_views), so their SQL stays logical.
+_GOLD_TABLES = (
+    "dim_date",
+    "dim_department",
+    "dim_supplier",
+    "dim_buyer",
+    "dim_acquisition",
+    "dim_unspsc",
+    "fact_document",
+    "fact_line",
+    "fact_associated_po",
+)
+
+
+def _to_logical_views(sql: str) -> str:
+    """Point a query at the friendly lv_ views instead of the abbreviated tables.
+
+    Replaces each gold table name with its lv_ alias as a whole word. The table
+    names are distinctive tokens (columns never share them), so this is safe and
+    lets marts / DQ keep referencing logical column names.
+    """
+    for t in _GOLD_TABLES:
+        sql = re.sub(rf"\b{t}\b", f"lv_{t}", sql)
+    return sql
+
+
+def _abbreviate_gold(con, abbr: dict[str, str]) -> None:
+    """Abbreviate physical columns of the gold dim_/fact_ tables per the dictionary.
+
+    Renames each column to its standardized form, then (re)creates a friendly-named
+    view `lv_<table>` that aliases the abbreviated columns back to their logical
+    names for the marts / DQ to read, and records the full mapping in
+    `gold_data_dictionary`. Dependent views are dropped first so the renames (which
+    SQLite would otherwise reject for breaking a view) have nothing to break.
+    """
+    for (view,) in con.execute(
+        "SELECT name FROM sqlite_master WHERE type='view' "
+        "AND (name LIKE 'gold_%' OR name LIKE 'lv_%')"
+    ).fetchall():
+        con.execute(f"DROP VIEW IF EXISTS {view}")  # noqa: S608 - internal view names
+    con.execute("DROP TABLE IF EXISTS gold_data_dictionary")
+    con.execute(
+        "CREATE TABLE gold_data_dictionary (table_name TEXT, logical_name TEXT, physical_name TEXT)"
+    )
+    dd_rows = []
+    for t in _GOLD_TABLES:
+        logical_cols = [r[1] for r in con.execute(f"PRAGMA table_info({t})")]
+        physical = {}
+        for c in logical_cols:
+            p = abbreviate(c, abbr)
+            if p != c and p in physical.values():
+                raise ValueError(f"abbreviation collision in {t}: '{c}' and another map to '{p}'")
+            if p != c:
+                con.execute(f'ALTER TABLE {t} RENAME COLUMN "{c}" TO "{p}"')  # noqa: S608
+            physical[c] = p
+            dd_rows.append((t, c, p))
+        select = ", ".join(f'"{physical[c]}" AS "{c}"' for c in logical_cols)
+        con.execute(f"DROP VIEW IF EXISTS lv_{t}")
+        con.execute(f"CREATE VIEW lv_{t} AS SELECT {select} FROM {t}")  # noqa: S608
+    con.executemany("INSERT INTO gold_data_dictionary VALUES (?, ?, ?)", dd_rows)
 
 
 def _build_marts(con):
@@ -729,7 +821,12 @@ def _build_marts(con):
     }
     for name, sql in marts.items():
         con.execute(f"DROP VIEW IF EXISTS {name}")
-        con.execute(f"CREATE VIEW {name} AS {sql}")
+        con.execute(f"CREATE VIEW {name} AS {_to_logical_views(sql)}")
+    # Guard: every gold view must be queryable (catches a missed column reference).
+    for (view,) in con.execute(
+        "SELECT name FROM sqlite_master WHERE type='view' AND name LIKE 'gold_%'"
+    ).fetchall():
+        con.execute(f"SELECT * FROM {view} LIMIT 0")  # noqa: S608 - internal view names
 
 
 # --------------------------------------------------------------------------- #
@@ -820,7 +917,7 @@ def run_dq(con: sqlite3.Connection, batch: str, ts: str) -> list[dict]:
     results = []
     for name, severity, scope, sql in _DQ_CHECKS:
         try:
-            failed = con.execute(sql).fetchone()[0] or 0
+            failed = con.execute(_to_logical_views(sql)).fetchone()[0] or 0
         except sqlite3.OperationalError as e:
             failed, scope = -1, f"{scope} (error: {e})"
         passed = 1 if failed == 0 else 0

@@ -96,6 +96,24 @@ scorecard in **`gold_supplier_master`** (internal metrics + external firmographi
   - `warn` (informational): line-item reconciliation, and negative grand totals
     (real credits/deobligations in the source data).
 
+## Physical naming (abbreviation standard)
+Physical columns on the gold `dim_*`/`fact_*` **tables** are abbreviated to a
+governed standard from `references/abbreviations.csv` (a `term → abbreviation`
+dictionary: `amount → amt`, `supplier → sup`, `date → dt`, `business_unit → bu`,
+…). Applied token-by-token by `abbreviate()`, so `fact_document.grand_total`
+becomes `grand_tot`, `dim_supplier.supplier_id` becomes `sup_id`, etc.
+
+Analysts don't have to memorize the abbreviations — the marts stay friendly:
+- For each gold table there is a **`lv_<table>` view** that aliases the abbreviated
+  columns back to their logical names (`lv_dim_supplier.supplier_id`, …).
+- All `gold_*` marts and the data-quality checks read those `lv_` views, so mart
+  **output** column names are unchanged (`SELECT total_value FROM gold_supplier_master`
+  still works).
+- **`gold_data_dictionary`** records every `(table, logical_name, physical_name)`.
+
+The abbreviation runs as a post-build rename pass (`_abbreviate_gold`), so adding a
+term to the CSV and rebuilding is all it takes to restandardize.
+
 ## Design notes / best practices applied
 - Separation of operational (`scprs.db`) and analytical (`warehouse.db`) stores.
 - Immutable raw layer with lineage; transformations only move *forward* a layer.

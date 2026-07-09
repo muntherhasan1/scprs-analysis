@@ -71,6 +71,11 @@ python -m src.warehouse info     # layer row counts + last batch
 
 See [docs/WAREHOUSE.md](docs/WAREHOUSE.md) for the full design.
 
+Gold **physical** columns are abbreviated to a governed standard
+(`references/abbreviations.csv`, e.g. `grand_total → grand_tot`), but the `gold_*`
+marts stay friendly — they read per-table `lv_<table>` views that alias the
+abbreviations back to logical names, and `gold_data_dictionary` records the mapping.
+
 ### Canonical vendors (supplier master data)
 
 SCPRS issues a `supplier_id` per vendor *registration*, so one company can appear

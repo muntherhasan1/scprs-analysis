@@ -92,6 +92,16 @@ separate; the warehouse ATTACHes the source read-only. Gold is a Kimball star
 schema (surrogate-keyed `dim_*`, `fact_document`/`fact_line`/`fact_associated_po`,
 plus `gold_*` mart views). See `docs/WAREHOUSE.md` for the full layer/grain spec.
 
+**Gold physical columns are abbreviated; marts stay friendly.** A post-build pass
+(`_abbreviate_gold`) renames `dim_*`/`fact_*` physical columns to a governed
+standard from `references/abbreviations.csv` (`grand_total`→`grand_tot`,
+`supplier_id`→`sup_id`, `business_unit`→`bu`). Marts and DQ **don't** reference the
+tables directly — a build-time transform (`_to_logical_views`) points their SQL at
+per-table `lv_<table>` views that alias the abbreviated columns back to logical
+names, so mart output names and existing queries are unchanged. `gold_data_dictionary`
+records the full logical↔physical mapping. When adding a gold column, just rebuild —
+the pass abbreviates it automatically; add the term to the CSV if it's a new word.
+
 **Supplier identity is many-to-one.** SCPRS issues a `supplier_id` per vendor
 *registration*, so one company appears under several ids (NORTH RIDGE CONSULTING
 has two, BETA ALPHA PSI four). `src/supplier_master.py` + the curated crosswalk
@@ -106,8 +116,9 @@ enrichment joins to gold **by name**, so it attaches to the canonical entity.
 - Secrets load only through `src/config.py` (`require()` fails loudly on a missing
   var) from a git-ignored `.env` or the platform secret store — never hard-coded.
 - `data/` is git-ignored and never committed; the committed datasets live in
-  `references/` (`departments.csv`, the 300 valid business-unit codes, and
-  `supplier_master.csv`, the curated canonical-vendor crosswalk).
+  `references/` (`departments.csv`, the 300 valid business-unit codes;
+  `supplier_master.csv`, the curated canonical-vendor crosswalk; and
+  `abbreviations.csv`, the gold column-naming dictionary).
 - Ruff lint selects `E,F,I,B,S` (incl. flake8-bandit). `warehouse.py` is exempt
   from `S608`/`E501` because it generates DDL from **internal constants only**
   with parameterized values — keep that invariant true (never interpolate user
