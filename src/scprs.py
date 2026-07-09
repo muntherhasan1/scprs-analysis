@@ -23,12 +23,17 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import os
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
 from playwright.sync_api import TimeoutError as PWTimeout
 from playwright.sync_api import sync_playwright
+
+# Chromium needs --no-sandbox when running as non-root in a container; set the
+# PLAYWRIGHT_NO_SANDBOX env var there (the Dockerfile does). No effect locally.
+_CHROMIUM_ARGS = ["--no-sandbox"] if os.environ.get("PLAYWRIGHT_NO_SANDBOX") else []
 
 SEARCH_URL = "https://suppliers.fiscal.ca.gov/psc/psfpd1/SUPPLIER/ERP/c/" "ZZ_PO.ZZ_SCPRS1_CMP.GBL"
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
@@ -87,7 +92,7 @@ def download_extract(
     out_dir.mkdir(parents=True, exist_ok=True)
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=headless)
+        browser = p.chromium.launch(headless=headless, args=_CHROMIUM_ARGS)
         ctx = browser.new_context(accept_downloads=True)
         page = ctx.new_page()
         try:
@@ -332,7 +337,7 @@ def collect_po_details(
     """
     results: list[dict] = []
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=headless)
+        browser = p.chromium.launch(headless=headless, args=_CHROMIUM_ARGS)
         ctx = browser.new_context()
         page = ctx.new_page()
         try:

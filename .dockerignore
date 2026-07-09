@@ -1,0 +1,23 @@
+# Keep the image small and reproducible — build from source + requirements only.
+.git
+.github
+.venv
+data
+tests
+docs
+scripts
+*.md
+.gitignore
+.gitattributes
+.pre-commit-config.yaml
+.claude
+__pycache__
+*.pyc
+.ruff_cache
+.pytest_cache
+.mypy_cache
+scratchpad_*
+*.db
+*.xls
+*.csv
+!references/*.csv

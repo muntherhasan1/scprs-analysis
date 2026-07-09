@@ -71,6 +71,30 @@ python -m src.warehouse info     # layer row counts + last batch
 
 See [docs/WAREHOUSE.md](docs/WAREHOUSE.md) for the full design.
 
+## Deployment (Docker)
+
+The pipeline is containerized (`Dockerfile`) so it can run off a personal machine
+as a scheduled cloud job. The image bundles Chromium (via Playwright) and runs as
+a non-root user with `--no-sandbox` (set by `PLAYWRIGHT_NO_SANDBOX`).
+
+```bash
+docker build -t scprs-analysis .
+
+# SQLite files live under /app/data — mount a volume so they persist:
+docker run --rm -v scprs-data:/app/data scprs-analysis src.warehouse info
+docker run --rm -v scprs-data:/app/data scprs-analysis \
+  src.model enrich 8660 07/01/2021 06/30/2028 --limit 200 --newest-first
+docker run --rm -v scprs-data:/app/data scprs-analysis src.warehouse build
+```
+
+`docker run <image> <module> <args…>` maps to `python -m <module> <args…>`.
+
+**Toward the cloud:** run the container as a scheduled job (Cloud Run Jobs / ECS
+Fargate / Container Apps Jobs), point the warehouse at a managed Postgres
+(bronze/silver/gold become schemas), keep raw extracts in object storage, and
+wire build/deploy through the existing GitHub Actions CI. See the repo's issues
+/ roadmap for the migration steps.
+
 ## Queryable data model (SQLite)
 
 `src/model.py` pulls a business unit over a date range (auto-splitting past the
