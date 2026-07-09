@@ -97,6 +97,20 @@ python -m src.model details 8660 02/18/2021 02/18/2021
 Processes the documents in the results grid, so run it on narrow date ranges
 (one document = one page load). Idempotent per document.
 
+To enrich a whole business unit, use the **day-by-day driver** — it only visits
+days that actually have documents (distinct `start_date`s already in
+`purchases`, so build the summary first) and records each finished day in
+`details_progress`, so it **resumes** after an interruption:
+
+```bash
+python -m src.model build   8660 01/01/2016 07/08/2026   # summary first
+python -m src.model enrich  8660 01/01/2016 07/08/2026   # then drill, resumable
+python -m src.model enrich  8660 01/01/2016 07/08/2026 --limit 50   # a chunk at a time
+```
+
+A day that errors is left unrecorded and retried on the next run; `--force`
+re-processes days already done.
+
 ## Security
 
 Secrets management, CI/CD hardening, and access-control practices are documented

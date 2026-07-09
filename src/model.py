@@ -313,6 +313,100 @@ def build_details_db(
     return counts
 
 
+def _ensure_progress_schema(con: sqlite3.Connection) -> None:
+    con.execute(
+        "CREATE TABLE IF NOT EXISTS details_progress ("
+        "business_unit TEXT, day TEXT, documents INTEGER, lines INTEGER, pos INTEGER, "
+        "completed_at TEXT, PRIMARY KEY (business_unit, day))"
+    )
+
+
+def enrich_details(
+    business_unit: str,
+    from_date: str,
+    to_date: str,
+    *,
+    db_path: Path = DB_PATH,
+    force: bool = False,
+    limit: int | None = None,
+    log=print,
+) -> dict:
+    """Drill into PO Details one active day at a time, resuming across runs.
+
+    Only days that actually have documents (distinct `start_date`s already in
+    the `purchases` table) are visited, so build the summary first. Each
+    completed day is recorded in `details_progress`; a re-run skips finished
+    days. A day that errors is left unrecorded so it retries next run.
+    """
+    con = _connect(db_path)
+    try:
+        _ensure_progress_schema(con)
+        try:
+            active = [
+                r[0]
+                for r in con.execute(
+                    "SELECT DISTINCT start_date FROM purchases WHERE business_unit = ? "
+                    "AND start_date BETWEEN ? AND ? AND start_date IS NOT NULL "
+                    "ORDER BY start_date",
+                    (business_unit, _iso(from_date), _iso(to_date)),
+                ).fetchall()
+            ]
+        except sqlite3.OperationalError:
+            active = []
+        done = {
+            r[0]
+            for r in con.execute(
+                "SELECT day FROM details_progress WHERE business_unit = ?", (business_unit,)
+            ).fetchall()
+        }
+    finally:
+        con.close()
+
+    if not active:
+        log("No active days in `purchases` for that BU/range. Build the summary first:")
+        log(f"  python -m src.model build {business_unit} {from_date} {to_date}")
+        return {"days_total": 0, "days_processed": 0, "days_remaining": 0}
+
+    todo = active if force else [d for d in active if d not in done]
+    log(f"{len(active)} active day(s); {len(active) - len(todo)} done; {len(todo)} to process")
+    if limit is not None:
+        todo = todo[:limit]
+
+    processed = 0
+    for iso_day in todo:
+        mdy = datetime.strptime(iso_day, "%Y-%m-%d").strftime("%m/%d/%Y")
+        log(f"[{processed + 1}/{len(todo)}] {iso_day}")
+        try:
+            counts = build_details_db(business_unit, mdy, mdy, db_path=db_path, log=lambda *a: None)
+        except Exception as e:  # noqa: BLE001 - keep going; unrecorded day retries next run
+            log(f"    ERROR: {repr(e)[:120]} (will retry next run)")
+            continue
+        con = _connect(db_path)
+        try:
+            con.execute(
+                "INSERT OR REPLACE INTO details_progress VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    business_unit,
+                    iso_day,
+                    counts["documents"],
+                    counts["lines"],
+                    counts["pos"],
+                    datetime.now().isoformat(timespec="seconds"),
+                ),
+            )
+            con.commit()
+        finally:
+            con.close()
+        processed += 1
+        log(f"    {counts}")
+
+    return {
+        "days_total": len(active),
+        "days_processed": processed,
+        "days_remaining": len(active) - len(done) - processed,
+    }
+
+
 def query(sql: str, *, db_path: Path = DB_PATH, params: tuple = ()):
     """Run a read query and return a DataFrame."""
     import pandas as pd
@@ -336,6 +430,12 @@ def _cli() -> None:
     dt.add_argument("from_date")
     dt.add_argument("to_date")
     dt.add_argument("--max-docs", type=int, default=None)
+    en = sub.add_parser("enrich", help="Day-by-day PO Details enrichment with resume")
+    en.add_argument("business_unit")
+    en.add_argument("from_date")
+    en.add_argument("to_date")
+    en.add_argument("--limit", type=int, default=None, help="Process at most N days this run")
+    en.add_argument("--force", action="store_true", help="Re-process days already recorded")
     q = sub.add_parser("query", help="Run a SQL query against the model")
     q.add_argument("sql")
     sub.add_parser("info", help="Show schema and a data summary")
@@ -347,6 +447,16 @@ def _cli() -> None:
             print("WARNING:", w)
     elif args.cmd == "details":
         build_details_db(args.business_unit, args.from_date, args.to_date, max_docs=args.max_docs)
+    elif args.cmd == "enrich":
+        print(
+            enrich_details(
+                args.business_unit,
+                args.from_date,
+                args.to_date,
+                limit=args.limit,
+                force=args.force,
+            )
+        )
     elif args.cmd == "query":
         import pandas as pd
 

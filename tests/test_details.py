@@ -74,3 +74,40 @@ def test_build_details_db(tmp_path, monkeypatch):
     # reload replaces (idempotent), no duplicate rows
     model.build_details_db("8660", "02/18/2021", "02/18/2021", db_path=db, log=lambda *a: None)
     assert model.query("SELECT COUNT(*) c FROM document_lines", db_path=db)["c"][0] == 1
+
+
+def test_enrich_resume(tmp_path, monkeypatch):
+    db = tmp_path / "e.db"
+    con = model._connect(db)
+    model._ensure_schema(con)
+    con.executemany(
+        "INSERT INTO purchases (business_unit, purchase_document, start_date) VALUES (?, ?, ?)",
+        [("8660", "A", "2021-02-18"), ("8660", "B", "2021-02-18"), ("8660", "C", "2021-05-20")],
+    )
+    con.commit()
+    con.close()
+
+    calls = []
+
+    def fake_build(bu, f, t, *, db_path, log=print, **k):
+        calls.append((bu, f, t))
+        return {"documents": 1, "lines": 2, "pos": 0}
+
+    monkeypatch.setattr(model, "build_details_db", fake_build)
+
+    # first run: two distinct active days (dupe start_date collapses to one)
+    r1 = model.enrich_details("8660", "01/01/2021", "12/31/2021", db_path=db, log=lambda *a: None)
+    assert r1["days_processed"] == 2
+    assert ("8660", "02/18/2021", "02/18/2021") in calls  # ISO -> MM/DD/YYYY
+    assert ("8660", "05/20/2021", "05/20/2021") in calls
+
+    # resume: nothing left to do
+    r2 = model.enrich_details("8660", "01/01/2021", "12/31/2021", db_path=db, log=lambda *a: None)
+    assert r2["days_processed"] == 0
+
+    # force reprocesses
+    r3 = model.enrich_details(
+        "8660", "01/01/2021", "12/31/2021", db_path=db, force=True, log=lambda *a: None
+    )
+    assert r3["days_processed"] == 2
+    assert model.query("SELECT COUNT(*) c FROM details_progress", db_path=db)["c"][0] == 2
