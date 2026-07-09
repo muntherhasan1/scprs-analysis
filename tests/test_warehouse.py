@@ -92,7 +92,9 @@ def _seed_source(path):
 def test_warehouse_build(tmp_path):
     src, wh = tmp_path / "scprs.db", tmp_path / "warehouse.db"
     _seed_source(src)
-    result = warehouse.build_all(wh_path=wh, source_path=src, log=lambda *a: None)
+    result = warehouse.build_all(
+        wh_path=wh, source_path=src, enrichment_db=tmp_path / "no_enrich.db", log=lambda *a: None
+    )
 
     con = sqlite3.connect(wh)
     try:

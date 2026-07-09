@@ -40,6 +40,7 @@ from . import scprs
 
 SOURCE_DB = scprs.DATA_DIR / "scprs.db"
 WAREHOUSE_DB = scprs.DATA_DIR / "warehouse.db"
+ENRICHMENT_DB = scprs.DATA_DIR / "supplier_enrichment.db"  # web-researched supplier profiles
 DEPARTMENTS_CSV = Path(__file__).resolve().parent.parent / "references" / "departments.csv"
 
 _BRONZE_SOURCES = {
@@ -51,7 +52,8 @@ _BRONZE_SOURCES = {
 
 
 def _connect(wh_path: Path = WAREHOUSE_DB, source_path: Path = SOURCE_DB) -> sqlite3.Connection:
-    con = sqlite3.connect(wh_path)
+    con = sqlite3.connect(wh_path, timeout=30)
+    con.execute("PRAGMA busy_timeout=30000")
     con.execute("ATTACH DATABASE ? AS src", (str(source_path),))
     return con
 
@@ -70,7 +72,9 @@ def _count(con: sqlite3.Connection, table: str) -> int:
 # --------------------------------------------------------------------------- #
 # Bronze: raw snapshot + lineage
 # --------------------------------------------------------------------------- #
-def build_bronze(con: sqlite3.Connection, batch: str, ts: str) -> dict:
+def build_bronze(
+    con: sqlite3.Connection, batch: str, ts: str, enrichment_db: Path = ENRICHMENT_DB
+) -> dict:
     counts = {}
     for bronze, source in _BRONZE_SOURCES.items():
         con.execute(f"DROP TABLE IF EXISTS {bronze}")
@@ -81,6 +85,39 @@ def build_bronze(con: sqlite3.Connection, batch: str, ts: str) -> dict:
                 (batch, ts, f"scprs.db:{source}"),
             )
         counts[bronze] = _count(con, bronze) if _src_has_local(con, bronze) else 0
+
+    # web-researched supplier profiles (kept in a separate enrichment store; read
+    # with its own connection to avoid cross-database attach locks).
+    con.execute("DROP TABLE IF EXISTS bronze_supplier_web")
+    web_cols, web_rows = None, []
+    if enrichment_db.exists():
+        enr = sqlite3.connect(enrichment_db, timeout=30)
+        try:
+            if enr.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='supplier_web_profile'"
+            ).fetchone():
+                cur = enr.execute("SELECT * FROM supplier_web_profile")
+                web_cols = [d[0] for d in cur.description]
+                web_rows = cur.fetchall()
+        finally:
+            enr.close()
+    if web_cols:
+        defs = ", ".join(f"{c} {'REAL' if c == 'confidence' else 'TEXT'}" for c in web_cols)
+        con.execute(
+            f"CREATE TABLE bronze_supplier_web ({defs}, _batch_id TEXT, _loaded_at TEXT, _source TEXT)"
+        )
+        ph = ", ".join("?" * (len(web_cols) + 3))
+        con.executemany(
+            f"INSERT INTO bronze_supplier_web VALUES ({ph})",
+            [[*r, batch, ts, "supplier_enrichment.db"] for r in web_rows],
+        )
+    else:
+        con.execute(
+            "CREATE TABLE bronze_supplier_web (supplier_name TEXT, description TEXT, "
+            "org_type TEXT, hq_city TEXT, hq_state TEXT, website TEXT, parent_affiliation TEXT, "
+            "sb_dvbe TEXT, confidence REAL)"
+        )
+    counts["bronze_supplier_web"] = _count(con, "bronze_supplier_web")
     return counts
 
 
@@ -219,8 +256,13 @@ def build_silver(con: sqlite3.Connection, ts: str) -> dict:
             WHERE _v = _maxv
             """
         )
-    else:
-        con.execute("CREATE TABLE silver_line (business_unit TEXT, purchase_document TEXT)")
+    else:  # no enriched lines yet: empty table with the full schema downstream expects
+        con.execute(
+            "CREATE TABLE silver_line (business_unit TEXT, purchase_document TEXT, "
+            "line_number INTEGER, item_id TEXT, item_description TEXT, unspsc TEXT, "
+            "unspsc_description TEXT, unit_of_measure TEXT, quantity REAL, unit_price REAL, "
+            "line_amount REAL, line_status TEXT)"
+        )
 
     # -- silver_associated_po
     con.execute("DROP TABLE IF EXISTS silver_associated_po")
@@ -242,9 +284,10 @@ def build_silver(con: sqlite3.Connection, ts: str) -> dict:
             WHERE _v = _maxv
             """
         )
-    else:
+    else:  # no enriched POs yet: empty table with the full schema downstream expects
         con.execute(
-            "CREATE TABLE silver_associated_po (business_unit TEXT, purchase_document TEXT)"
+            "CREATE TABLE silver_associated_po (business_unit TEXT, purchase_document TEXT, "
+            "po_id TEXT, buyer TEXT, start_date TEXT, po_total REAL, po_status TEXT)"
         )
 
     # attach line/PO counts from the deduped, version-correct silver tables in one
@@ -592,6 +635,15 @@ def _build_marts(con):
             JOIN dim_supplier s ON s.supplier_key = f.supplier_key
             JOIN dim_acquisition a ON a.acq_key = f.acq_key
             GROUP BY s.supplier_id, s.supplier_name, a.acquisition_type""",
+        # Vendor scorecard + web-researched firmographics (with confidence).
+        "gold_supplier_enriched": """
+            SELECT p.supplier_id, p.supplier_name, p.award_count, p.total_value,
+                   p.pct_noncompetitive_value,
+                   w.org_type, w.hq_city, w.hq_state, w.sb_dvbe, w.website,
+                   w.parent_affiliation, w.description, w.confidence AS profile_confidence
+            FROM gold_supplier_profile p
+            LEFT JOIN bronze_supplier_web w
+              ON UPPER(w.supplier_name) = UPPER(p.supplier_name)""",
     }
     for name, sql in marts.items():
         con.execute(f"DROP VIEW IF EXISTS {name}")
@@ -707,7 +759,13 @@ def run_dq(con: sqlite3.Connection, batch: str, ts: str) -> list[dict]:
     return results
 
 
-def build_all(*, wh_path: Path = WAREHOUSE_DB, source_path: Path = SOURCE_DB, log=print) -> dict:
+def build_all(
+    *,
+    wh_path: Path = WAREHOUSE_DB,
+    source_path: Path = SOURCE_DB,
+    enrichment_db: Path = ENRICHMENT_DB,
+    log=print,
+) -> dict:
     ts = datetime.now().isoformat(timespec="seconds")
     batch = "batch_" + datetime.now().strftime("%Y%m%d_%H%M%S")
     con = _connect(wh_path, source_path)
@@ -718,7 +776,7 @@ def build_all(*, wh_path: Path = WAREHOUSE_DB, source_path: Path = SOURCE_DB, lo
             (batch, ts),
         )
         log(f"[{batch}] bronze...")
-        counts = build_bronze(con, batch, ts)
+        counts = build_bronze(con, batch, ts, enrichment_db)
         con.commit()
         log(f"[{batch}] silver...")
         counts |= build_silver(con, ts)

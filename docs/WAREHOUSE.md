@@ -56,6 +56,22 @@ member.
 **Marts (views):** `gold_supplier_spend`, `gold_monthly_spend`,
 `gold_acquisition_spend`, `gold_unspsc_spend`, `gold_contract_vs_standalone`.
 
+**Competitive-intelligence marts:**
+- `gold_supplier_profile` — vendor scorecard (value, reach, % won non-competitively).
+- `gold_supplier_share` — supplier share of each department's spend.
+- `gold_market_concentration` — HHI + top-supplier share per dept × acquisition type.
+- `gold_price_benchmark` — unit-price spread per UNSPSC where 2+ suppliers compete.
+- `gold_supplier_unspsc_profile` / `gold_supplier_specialization` — what each
+  vendor supplies and how specialized.
+- `gold_supplier_acquisition_profile` — broad (all-document) category footprint.
+
+**Supplier enrichment:** web-researched firmographic profiles (org type, HQ,
+certifications, ownership) with **source provenance + a confidence score** live
+in a separate store `data/supplier_enrichment.db` (`src/supplier_research.py`).
+The warehouse snapshots them to `bronze_supplier_web` and joins them to the
+vendor scorecard in **`gold_supplier_enriched`** (internal metrics + external
+firmographics + confidence, matched by supplier name).
+
 ## Control & data quality
 - **`dw_batch`** — one row per build (batch id, start/finish, status, row counts).
 - **`dw_dq_results`** — every check's outcome per batch, with a **severity**:
