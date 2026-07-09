@@ -54,6 +54,23 @@ python -m src.scprs 0250 06/01/2025 06/30/2025
 `src/scraper.py` remains as a generic CSV-link downloader for simpler sites
 (timeouts, TLS on, path-traversal-safe filenames).
 
+## Data warehouse (medallion: bronze → silver → gold)
+
+`src/warehouse.py` builds a layered analytical warehouse (`data/warehouse.db`)
+from the operational `scprs.db` — raw **bronze** snapshots with lineage,
+cleaned/conformed **silver** (current-version grain, parsed acquisition,
+Unknown members, DQ flags), and a **gold** Kimball star schema (surrogate-keyed
+`dim_*` + `fact_document`/`fact_line`/`fact_associated_po` + mart views). Every
+build is logged in `dw_batch` with severity-tiered `dw_dq_results`.
+
+```bash
+python -m src.warehouse build   # bronze -> silver -> gold + data quality
+python -m src.warehouse dq       # re-run data-quality checks
+python -m src.warehouse info     # layer row counts + last batch
+```
+
+See [docs/WAREHOUSE.md](docs/WAREHOUSE.md) for the full design.
+
 ## Queryable data model (SQLite)
 
 `src/model.py` pulls a business unit over a date range (auto-splitting past the

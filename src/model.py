@@ -160,6 +160,7 @@ _DETAILS_SCHEMA = {
     "document_lines": [
         "business_unit",
         "purchase_document",
+        "document_version",
         "line_number",
         "item_id",
         "item_description",
@@ -173,6 +174,7 @@ _DETAILS_SCHEMA = {
     "document_pos": [
         "business_unit",
         "purchase_document",
+        "document_version",
         "po_id",
         "buyer",
         "start_date",
@@ -213,6 +215,14 @@ def _ensure_details_schema(con: sqlite3.Connection) -> None:
     for table, cols in _DETAILS_SCHEMA.items():
         defs = ",\n  ".join(f"{c} {'REAL' if c in _REAL_COLUMNS else 'TEXT'}" for c in cols)
         con.execute(f"CREATE TABLE IF NOT EXISTS {table} (\n  {defs}\n)")
+        # idempotent migration: add any columns introduced since the table was created
+        existing = {r[1] for r in con.execute(f"PRAGMA table_info({table})")}
+        for c in cols:
+            if c not in existing:
+                con.execute(
+                    f"ALTER TABLE {table} ADD COLUMN {c} "  # noqa: S608 - internal constants
+                    f"{'REAL' if c in _REAL_COLUMNS else 'TEXT'}"
+                )
         for col in ("business_unit", "purchase_document"):
             con.execute(f"CREATE INDEX IF NOT EXISTS ix_{table}_{col} ON {table}({col})")
 
@@ -266,6 +276,7 @@ def build_details_db(
                 {
                     "business_unit": business_unit,
                     "purchase_document": doc,
+                    "document_version": h.get("version"),
                     "line_number": ln.get("line_number"),
                     "item_id": ln.get("item_id"),
                     "item_description": ln.get("item_description"),
@@ -282,6 +293,7 @@ def build_details_db(
                 {
                     "business_unit": business_unit,
                     "purchase_document": doc,
+                    "document_version": h.get("version"),
                     "po_id": po.get("po_id"),
                     "buyer": po.get("buyer"),
                     "start_date": _iso(po.get("start_date")),
