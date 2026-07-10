@@ -43,10 +43,13 @@ jobs:
       - name: Dependency vulnerability scan (pip-audit)
         run: pip-audit -r requirements.txt
 
-      - name: Secret scan (gitleaks)
-        uses: gitleaks/gitleaks-action@v2
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # Same scanner + baseline as the local pre-commit hook, so CI and dev
+      # agree. Layered behind GitHub's native secret scanning + push protection
+      # (which block known-provider credentials before they ever land).
+      - name: Secret scan (detect-secrets)
+        run: |
+          git ls-files -z -- ':!:.secrets.baseline' \
+            | xargs -0 python -m detect_secrets.pre_commit_hook --baseline .secrets.baseline
 
       - name: Tests
         run: pytest -q

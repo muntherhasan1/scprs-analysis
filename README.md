@@ -234,8 +234,9 @@ in [SECURITY.md](SECURITY.md). Key points:
 
 - Secrets stay in a git-ignored `.env` (local) or the platform secret store
   (deployed) — loaded via `src/config.py`, never hard-coded.
-- Secret scanning runs on every commit: `detect-secrets` locally (via `python -m`,
-  managed with `.secrets.baseline`) and `gitleaks` in CI. `pre-commit`/CI also run
+- Secret scanning runs on every commit: `detect-secrets` (via `python -m`,
+  managed with `.secrets.baseline`) both locally and in CI, layered behind
+  GitHub's native secret scanning + push protection. `pre-commit`/CI also run
   `bandit`, `pip-audit`, and `ruff`.
 - Enable branch protection + secret-scanning on the remote (see SECURITY.md).
 
