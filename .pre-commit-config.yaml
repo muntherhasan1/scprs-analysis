@@ -12,24 +12,28 @@ repos:
       - id: trailing-whitespace
       - id: check-merge-conflict
 
-  - repo: https://github.com/gitleaks/gitleaks
-    rev: v8.18.4
-    hooks:
-      - id: gitleaks                  # scans staged changes for secrets
-
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.6.9
     hooks:
       - id: ruff                      # lint
       - id: ruff-format               # format
 
-  # Bandit runs as a local hook (python -m) rather than in an isolated
-  # pre-commit environment: on Windows, Smart App Control / WDAC blocks the
-  # unsigned .exe shims pre-commit generates (WinError 4551). Using the
-  # installed interpreter sidesteps that. Requires `pip install bandit[toml]`
-  # (included in requirements-dev.txt).
+  # Local hooks run through the installed (signed) Python interpreter via
+  # `python -m`, rather than the unsigned .exe shims pre-commit generates in an
+  # isolated environment — on Windows, Smart App Control / WDAC blocks those
+  # shims (WinError 4551). Both tools ship in requirements-dev.txt.
+  #
+  # detect-secrets replaces the gitleaks pre-commit hook here: gitleaks is a Go
+  # binary with no `python -m` form, so its unsigned exe was permanently WDAC-
+  # blocked. CI still runs gitleaks (gitleaks-action) on Linux, where WDAC is a
+  # non-issue. Manage false positives in .secrets.baseline (see README).
   - repo: local
     hooks:
+      - id: detect-secrets
+        name: detect-secrets
+        entry: python -m detect_secrets.pre_commit_hook --baseline .secrets.baseline
+        language: system
+        exclude: ^\.secrets\.baseline$
       - id: bandit
         name: bandit (SAST)
         entry: python -m bandit -c pyproject.toml
