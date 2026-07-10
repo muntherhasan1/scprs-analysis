@@ -9,6 +9,13 @@ updates:
     groups:
       python-deps:
         patterns: ["*"]
+    # pandas major upgrades (e.g. 2.x -> 3.x) change data-parsing and aggregation
+    # behavior in ways the unit tests may not catch, so they're done deliberately
+    # by hand (build the warehouse + diff the gold marts). Remove this block when
+    # performing that upgrade. Minor/patch pandas updates still flow normally.
+    ignore:
+      - dependency-name: "pandas"
+        update-types: ["version-update:semver-major"]
 
   # Keep GitHub Actions pinned to current, non-vulnerable versions.
   - package-ecosystem: github-actions
