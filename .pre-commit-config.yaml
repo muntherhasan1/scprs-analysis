@@ -25,8 +25,9 @@ repos:
   #
   # detect-secrets replaces the gitleaks pre-commit hook here: gitleaks is a Go
   # binary with no `python -m` form, so its unsigned exe was permanently WDAC-
-  # blocked. CI still runs gitleaks (gitleaks-action) on Linux, where WDAC is a
-  # non-issue. Manage false positives in .secrets.baseline (see README).
+  # blocked. CI runs the same detect-secrets scan against .secrets.baseline, so
+  # local and CI agree; GitHub's native secret scanning + push protection sit in
+  # front of both. Manage false positives in .secrets.baseline (see README).
   - repo: local
     hooks:
       - id: detect-secrets
