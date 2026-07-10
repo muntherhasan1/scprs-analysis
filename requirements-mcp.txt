@@ -1,0 +1,5 @@
+# Runtime deps for the remote MCP server image ONLY — deliberately minimal.
+# The server (src/mcp_server.py) imports just `mcp` + the standard library, so
+# the container needs none of the pipeline's heavy deps (pandas, playwright, …).
+# uvicorn/starlette come in transitively with mcp.
+mcp>=1.28.1

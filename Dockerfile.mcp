@@ -1,0 +1,38 @@
+# Remote MCP server image (deployment "Model A").
+#
+# Ships ONLY the read-only warehouse MCP server plus the gold warehouse DB baked
+# in — no pandas/playwright, so the image stays small. The DB is a read-only
+# snapshot: to publish fresh data, rebuild the warehouse locally and rebuild this
+# image. MCP_AUTH_TOKEN is injected at deploy time (a Fly secret), never baked in.
+#
+# Build (BuildKit uses Dockerfile.mcp.dockerignore, which re-includes the DB):
+#   docker build -f Dockerfile.mcp -t scprs-mcp .
+# Run:
+#   docker run -e MCP_AUTH_TOKEN=$(openssl rand -hex 24) -p 8000:8000 scprs-mcp
+FROM python:3.12-slim
+
+# Least privilege: run as a non-root user.
+RUN useradd --create-home --uid 10001 appuser
+WORKDIR /app
+
+COPY requirements-mcp.txt .
+RUN pip install --no-cache-dir -r requirements-mcp.txt
+
+# Server code + the read-only data snapshot (world-readable; opened ?mode=ro).
+COPY src/ ./src/
+COPY data/warehouse.db /data/warehouse.db
+
+ENV WAREHOUSE_DB=/data/warehouse.db \
+    HOST=0.0.0.0 \
+    PORT=8000 \
+    PYTHONUNBUFFERED=1
+# MCP_AUTH_TOKEN is NOT set here — provide it at deploy time.
+
+USER appuser
+EXPOSE 8000
+
+# Liveness against the unauthenticated /healthz path.
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+  CMD python -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/healthz').status==200 else 1)"
+
+CMD ["python", "-m", "src.mcp_server", "http"]
