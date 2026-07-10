@@ -1,10 +1,13 @@
 """Read-only MCP server exposing the SCPRS gold warehouse to an MCP client.
 
-Consumed by an MCP client such as Claude Code over stdio. It makes **no**
-Anthropic API calls — the client (your Claude Code subscription) does the
-reasoning; this server only answers structured queries against the local
-warehouse. That keeps the whole loop inside the flat subscription, with no
-per-token metering.
+Runs two ways from the same tool definitions:
+  * **stdio** (default) — for a local MCP client such as Claude Code, wired via
+    `.mcp.json`. No network, no auth.
+  * **http** — a remote, bearer-token-gated Streamable HTTP endpoint so any MCP
+    client (Claude Desktop/Code, Cursor, …) can query from anywhere. This is the
+    "Model A" deployment: the server does **no** Anthropic API calls — each
+    user's own MCP client does the natural-language reasoning — so there is no
+    per-token metering on our side, only (free-tier) hosting.
 
 Safety model — the server is query-only by construction:
   * The SQLite connection is opened in read-only URI mode (`?mode=ro`), so a
@@ -13,18 +16,24 @@ Safety model — the server is query-only by construction:
   * `describe_table` / row counts interpolate object names, but only after
     checking them against the live allowlist of `gold_*`/`lv_*`/`dim_*`/`fact_*`
     objects from `sqlite_master` — never raw client input.
+  * In http mode every request must carry `Authorization: Bearer <MCP_AUTH_TOKEN>`
+    (constant-time compared); `/healthz` is the only unauthenticated path.
 
 Run:
     pip install mcp                       # one-time (free, open source)
     python -m src.warehouse build         # ensure data/warehouse.db exists
-    python -m src.mcp_server              # starts the stdio server
+    python -m src.mcp_server              # stdio (local Claude Code)
+    MCP_AUTH_TOKEN=... python -m src.mcp_server http   # remote HTTP endpoint
 
-Then point an MCP client at it (see .mcp.json in the repo root for the Claude
-Code wiring).
+Env overrides: WAREHOUSE_DB (db path), MCP_AUTH_TOKEN (required for http),
+HOST (default 0.0.0.0), PORT (default 8000).
 """
 
 from __future__ import annotations
 
+import argparse
+import hmac
+import os
 import re
 import sqlite3
 from pathlib import Path
@@ -33,8 +42,9 @@ from mcp.server.fastmcp import FastMCP
 
 # Same location as scprs.DATA_DIR, derived locally so this server has no
 # dependency on the scraping stack (Playwright et al.) just to find the DB.
+# WAREHOUSE_DB is env-overridable so the container can point at its baked-in copy.
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
-WAREHOUSE_DB = DATA_DIR / "warehouse.db"
+WAREHOUSE_DB = Path(os.environ.get("WAREHOUSE_DB", str(DATA_DIR / "warehouse.db")))
 
 mcp = FastMCP("scprs-warehouse")
 
@@ -147,12 +157,88 @@ def run_sql(query: str, max_rows: int = 200) -> dict:
     }
 
 
-def main() -> None:
+class BearerAuthMiddleware:
+    """Pure-ASGI middleware gating every HTTP request behind a bearer token.
+
+    Pure ASGI (not Starlette's BaseHTTPMiddleware) so it doesn't buffer or break
+    the MCP Streamable HTTP / SSE responses. `/healthz` is exempt so the host's
+    health checks don't need the secret. The token is compared in constant time.
+    """
+
+    def __init__(self, app, token: str, health_path: str = "/healthz") -> None:
+        self._app = app
+        self._expected = f"Bearer {token}"
+        self._health_path = health_path
+
+    async def __call__(self, scope, receive, send) -> None:
+        if scope["type"] != "http":
+            await self._app(scope, receive, send)
+            return
+        path = scope.get("path", "")
+        if path == self._health_path:
+            await self._respond(send, 200, b"ok")
+            return
+        headers = dict(scope.get("headers") or [])
+        provided = headers.get(b"authorization", b"").decode()
+        if not provided or not hmac.compare_digest(provided, self._expected):
+            await self._respond(
+                send, 401, b"unauthorized", extra=[(b"www-authenticate", b"Bearer")]
+            )
+            return
+        await self._app(scope, receive, send)
+
+    @staticmethod
+    async def _respond(send, status: int, body: bytes, extra=None) -> None:
+        headers = [(b"content-type", b"text/plain; charset=utf-8"), *(extra or [])]
+        await send({"type": "http.response.start", "status": status, "headers": headers})
+        await send({"type": "http.response.body", "body": body})
+
+
+def _require_db() -> None:
     if not WAREHOUSE_DB.exists():
         raise SystemExit(
             f"warehouse.db not found at {WAREHOUSE_DB}. "
-            "Run `python -m src.warehouse build` first."
+            "Run `python -m src.warehouse build` first (or set WAREHOUSE_DB)."
         )
+
+
+def serve_http() -> None:
+    """Serve the tools over a bearer-token-gated Streamable HTTP endpoint."""
+    import uvicorn
+
+    _require_db()
+    token = os.environ.get("MCP_AUTH_TOKEN")
+    if not token:
+        raise SystemExit(
+            "MCP_AUTH_TOKEN is required in http mode — refusing to expose the "
+            "endpoint unauthenticated. Set it to a long random secret."
+        )
+    # Bind all interfaces: intended for a containerized, token-gated service.
+    host = os.environ.get("HOST", "0.0.0.0")  # noqa: S104  # nosec B104
+    port = int(os.environ.get("PORT", "8000"))
+    # Stateless: each request is self-contained, so a scale-to-zero host that
+    # stops/starts (or runs multiple machines) never strands a session.
+    mcp.settings.stateless_http = True
+    app = BearerAuthMiddleware(mcp.streamable_http_app(), token)
+    # MCP endpoint is served at /mcp (FastMCP default); clients send the token as
+    # `Authorization: Bearer <MCP_AUTH_TOKEN>`.
+    uvicorn.run(app, host=host, port=port)
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="SCPRS read-only warehouse MCP server")
+    parser.add_argument(
+        "transport",
+        nargs="?",
+        default="stdio",
+        choices=["stdio", "http"],
+        help="stdio (default, local Claude Code) or http (remote, token-gated)",
+    )
+    args = parser.parse_args()
+    if args.transport == "http":
+        serve_http()
+        return
+    _require_db()
     mcp.run()  # stdio transport
 
 

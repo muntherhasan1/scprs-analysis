@@ -1,0 +1,31 @@
+# Fly.io config for the remote MCP server (deployment "Model A").
+#
+# Free-tier friendly: scales to zero when idle (min_machines_running = 0), so an
+# idle server costs nothing; the first request after idle pays a short cold start.
+# Set the app name to your own before deploying:
+#   fly launch --no-deploy            # or: fly apps create <name>
+#   fly secrets set MCP_AUTH_TOKEN=$(openssl rand -hex 24)
+#   fly deploy
+app = "scprs-warehouse-mcp"        # <-- change to your unique app name
+primary_region = "sjc"             # San Jose — close to California data/users
+
+[build]
+  dockerfile = "Dockerfile.mcp"
+
+[http_service]
+  internal_port = 8000
+  force_https = true               # TLS terminates at Fly's edge
+  auto_stop_machines = "stop"      # scale to zero when idle (free)
+  auto_start_machines = true       # wake on the next request
+  min_machines_running = 0
+
+  [[http_service.checks]]
+    method = "GET"
+    path = "/healthz"              # unauthenticated liveness probe
+    interval = "30s"
+    timeout = "3s"
+    grace_period = "5s"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "256mb"                 # the server is tiny; 256MB is plenty
