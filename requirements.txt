@@ -7,3 +7,6 @@ requests>=2.32
 beautifulsoup4>=4.12
 lxml>=5.2          # fast, robust HTML parser backend for BeautifulSoup
 playwright>=1.44   # headless browser: drives the PeopleSoft JS download flow
+
+# --- MCP server (read-only warehouse interface for MCP clients) ---
+mcp>=1.28          # exposes warehouse.db to Claude Code; no Anthropic API calls

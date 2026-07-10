@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "scprs-warehouse": {
+      "command": ".venv/Scripts/python.exe",
+      "args": ["-m", "src.mcp_server"]
+    }
+  }
+}
