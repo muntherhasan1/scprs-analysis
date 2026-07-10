@@ -24,3 +24,9 @@ exclude_dirs = ["tests", ".venv"]
 # B608 (hardcoded SQL) — same rationale as the ruff S608 ignore above; ruff's
 # S608 still guards every other module.
 skips = ["B608"]
+
+[tool.pytest.ini_options]
+# Put the repo root on sys.path so `from src import ...` resolves under a bare
+# `pytest` invocation (e.g. in CI), matching how `python -m pytest` works
+# locally. Without this, CI fails to import the src package.
+pythonpath = ["."]
