@@ -161,7 +161,13 @@ def _src_has_local(con: sqlite3.Connection, table: str) -> bool:
 # --------------------------------------------------------------------------- #
 # Silver: clean, conform, type, default, flag
 # --------------------------------------------------------------------------- #
-def build_silver(con: sqlite3.Connection, ts: str) -> dict:
+def build_silver(con: sqlite3.Connection, batch: str, ts: str) -> dict:
+    # Drop derived views up front: they are rebuilt in gold, and leaving stale ones
+    # would let a broken view block the ALTER ... RENAME steps in _finalize below.
+    for (v,) in con.execute(
+        "SELECT name FROM sqlite_master WHERE type='view' AND (name LIKE 'gold_%' OR name LIKE 'lv_%')"
+    ).fetchall():
+        con.execute(f"DROP VIEW IF EXISTS {v}")  # noqa: S608 - internal view names
     have_details = _src_has_local(con, "bronze_document_details")
     have_lines = _src_has_local(con, "bronze_document_lines")
     have_pos = _src_has_local(con, "bronze_document_pos")
@@ -347,6 +353,17 @@ def build_silver(con: sqlite3.Connection, ts: str) -> dict:
                   - merchandise_amount) < 1 THEN 1
              ELSE 0 END"""
     )
+    # surrogate key + audit columns (+ CLOB on the long free-text line columns)
+    _finalize(con, "silver_document", "document_sk", batch, ts)
+    _finalize(
+        con,
+        "silver_line",
+        "line_sk",
+        batch,
+        ts,
+        clob_cols=("item_description", "unspsc_description"),
+    )
+    _finalize(con, "silver_associated_po", "po_sk", batch, ts)
     return {
         t: _count(con, t)
         for t in ("silver_department", "silver_document", "silver_line", "silver_associated_po")
@@ -356,7 +373,7 @@ def build_silver(con: sqlite3.Connection, ts: str) -> dict:
 # --------------------------------------------------------------------------- #
 # Gold: Kimball star schema (surrogate-keyed dims + facts + marts)
 # --------------------------------------------------------------------------- #
-def build_gold(con: sqlite3.Connection, ts: str) -> dict:
+def build_gold(con: sqlite3.Connection, batch: str, ts: str) -> dict:
     # -- dim_date (spine over the observed date range, plus an Unknown member)
     con.execute("DROP TABLE IF EXISTS dim_date")
     con.execute(
@@ -436,6 +453,7 @@ def build_gold(con: sqlite3.Connection, ts: str) -> dict:
         ["unspsc", "unspsc_description"],
         "SELECT DISTINCT unspsc, unspsc_description FROM silver_line",
         ts,
+        clob_cols=("unspsc_description",),
     )
 
     # -- fact_document (grain: one purchase document)
@@ -471,6 +489,7 @@ def build_gold(con: sqlite3.Connection, ts: str) -> dict:
         SELECT
           l.business_unit || '|' || l.purchase_document AS document_bk,
           l.purchase_document, l.line_number, l.line_status,
+          l.item_description,   -- degenerate attribute: free-text line description
           COALESCE(dt.date_key, 0) AS start_date_key,
           dep.dept_key, sup.supplier_key, buy.buyer_key, acq.acq_key, uns.unspsc_key,
           l.quantity, l.unit_price, l.line_amount
@@ -506,6 +525,10 @@ def build_gold(con: sqlite3.Connection, ts: str) -> dict:
         """
     )
 
+    # surrogate key + audit columns on the facts (CLOB on the free-text line desc)
+    _finalize(con, "fact_document", "document_sk", batch, ts)
+    _finalize(con, "fact_line", "line_sk", batch, ts, clob_cols=("item_description",))
+    _finalize(con, "fact_associated_po", "po_sk", batch, ts)
     _abbreviate_gold(con, load_abbreviations())  # abbreviate physical cols + build lv_ views
     _build_marts(con)
     return {
@@ -575,16 +598,49 @@ def _apply_supplier_master(con, master: dict | None = None) -> None:
     con.execute("DROP TABLE _xref")
 
 
-def _build_dim(con, table, key, natural_cols, distinct_sql, ts):
+def _build_dim(con, table, key, natural_cols, distinct_sql, ts, clob_cols=()):
     con.execute(f"DROP TABLE IF EXISTS {table}")
     cols = ", ".join(natural_cols)
+    # Explicit typed DDL (not CREATE AS SELECT) so the surrogate key is a real
+    # INTEGER PRIMARY KEY and long-text columns can be declared CLOB.
+    coldefs = ", ".join(f'{c} {"CLOB" if c in clob_cols else "TEXT"}' for c in natural_cols)
     con.execute(
-        f"CREATE TABLE {table} AS "  # noqa: S608 - table/column names are internal constants
-        f"SELECT ROW_NUMBER() OVER (ORDER BY {cols}) AS {key}, {cols}, ? AS dw_loaded_at "
-        f"FROM ({distinct_sql})",
+        f"CREATE TABLE {table} ({key} INTEGER PRIMARY KEY, {coldefs}, "  # noqa: S608 - constants
+        "dw_loaded_at TEXT)"
+    )
+    con.execute(
+        f"INSERT INTO {table} ({key}, {cols}, dw_loaded_at) "  # noqa: S608 - internal constants
+        f"SELECT ROW_NUMBER() OVER (ORDER BY {cols}), {cols}, ? FROM ({distinct_sql})",
         (ts,),
     )
     con.execute(f"CREATE UNIQUE INDEX ix_{table} ON {table}({cols})")  # noqa: S608
+
+
+def _finalize(con, table, sk, batch, ts, clob_cols=()):
+    """Rebuild a full-refresh table with a surrogate PK + audit + CLOB long-text.
+
+    Adds an INTEGER PRIMARY KEY `sk` (auto-assigned), `dw_batch_id`/`dw_loaded_at`
+    audit columns, and re-declares any `clob_cols` as CLOB (TEXT affinity in SQLite;
+    portable to Oracle/Postgres). Every other column keeps its existing declared
+    type, so numeric affinity is preserved. Call before the abbreviation pass.
+    """
+    info = con.execute(f'PRAGMA table_info("{table}")').fetchall()  # cid,name,type,notnull,dflt,pk
+    names = [r[1] for r in info]
+    defs = [f"{sk} INTEGER PRIMARY KEY"]
+    for _cid, name, typ, *_rest in info:
+        col_type = "CLOB" if name in clob_cols else typ
+        defs.append(f'"{name}" {col_type}'.rstrip())
+    defs += ["dw_batch_id TEXT", "dw_loaded_at TEXT"]
+    collist = ", ".join(f'"{n}"' for n in names)
+    con.execute(f"DROP TABLE IF EXISTS {table}__new")
+    con.execute(f"CREATE TABLE {table}__new ({', '.join(defs)})")  # noqa: S608 - internal constants
+    con.execute(
+        f"INSERT INTO {table}__new ({collist}, dw_batch_id, dw_loaded_at) "  # noqa: S608
+        f"SELECT {collist}, ?, ? FROM {table}",
+        (batch, ts),
+    )
+    con.execute(f"DROP TABLE {table}")
+    con.execute(f"ALTER TABLE {table}__new RENAME TO {table}")
 
 
 # Physical gold tables whose columns are abbreviated. Marts and DQ read them via
@@ -818,6 +874,18 @@ def _build_marts(con):
             FROM gold_supplier_profile p
             LEFT JOIN bronze_supplier_web w
               ON UPPER(w.supplier_name) = UPPER(p.supplier_name)""",
+        # Denormalized line items: free-text description + category + price + vendor.
+        # The item_description is a degenerate attribute on fact_line (79% unique,
+        # so kept on the fact rather than forced into a dimension).
+        "gold_line_item": """
+            SELECT dep.business_unit, s.supplier_id, s.supplier_name,
+                   f.purchase_document, f.line_number, f.item_description,
+                   u.unspsc, u.unspsc_description AS category,
+                   f.quantity, f.unit_price, f.line_amount, f.line_status
+            FROM fact_line f
+            JOIN dim_supplier s ON s.supplier_key = f.supplier_key
+            JOIN dim_department dep ON dep.dept_key = f.dept_key
+            JOIN dim_unspsc u ON u.unspsc_key = f.unspsc_key""",
         # -- contract change capture (from the append-only dw_document_history) -- #
         # One row per observed transition of a document: version bump, value change,
         # status change, term extension -- with a human-readable summary.
@@ -897,6 +965,15 @@ def _ensure_control(con: sqlite3.Connection) -> None:
         "CREATE TABLE IF NOT EXISTS dw_batch (batch_id TEXT PRIMARY KEY, started_at TEXT, "
         "finished_at TEXT, status TEXT, row_counts TEXT)"
     )
+    # Self-heal a legacy dw_dq_results created before the severity column existed:
+    # its column layout differs, so the positional-era inserts would misalign. Drop
+    # the stale table (audit history only) so it is recreated with the current schema.
+    if con.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='dw_dq_results'"
+    ).fetchone() and "severity" not in {
+        r[1] for r in con.execute("PRAGMA table_info(dw_dq_results)")
+    }:
+        con.execute("DROP TABLE dw_dq_results")
     con.execute(
         "CREATE TABLE IF NOT EXISTS dw_dq_results (batch_id TEXT, check_name TEXT, scope TEXT, "
         "severity TEXT, failed_count INTEGER, passed INTEGER, run_at TEXT)"
@@ -904,13 +981,35 @@ def _ensure_control(con: sqlite3.Connection) -> None:
     # Append-only snapshot history of each document's tracked attributes, so
     # amendments and value/status/term changes are captured over time. Unlike the
     # full-refresh bronze/silver/gold, this table is never dropped — it accumulates.
+    # Migrate a legacy copy (created before history_sk) by copying its rows across.
+    migrate_history = bool(
+        con.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='dw_document_history'"
+        ).fetchone()
+    ) and "history_sk" not in {r[1] for r in con.execute("PRAGMA table_info(dw_document_history)")}
+    if migrate_history:
+        # drop views over the table first, else RENAME rewrites them to the temp name
+        for v in ("gold_contract_change_log", "gold_contract_amendments"):
+            con.execute(f"DROP VIEW IF EXISTS {v}")
+        con.execute("ALTER TABLE dw_document_history RENAME TO dw_document_history__old")
+    _HISTORY_COLS = (
+        "business_unit, purchase_document, version, grand_total, status, start_date, "
+        "end_date, supplier_id, supplier_name, acquisition, content_sig, batch_id, observed_at"
+    )
     con.execute(
         "CREATE TABLE IF NOT EXISTS dw_document_history ("
+        "history_sk INTEGER PRIMARY KEY AUTOINCREMENT, "
         "business_unit TEXT, purchase_document TEXT, version INTEGER, grand_total REAL, "
         "status TEXT, start_date TEXT, end_date TEXT, "
         "supplier_id TEXT, supplier_name TEXT, acquisition TEXT, "
         "content_sig TEXT, batch_id TEXT, observed_at TEXT)"
     )
+    if migrate_history:
+        con.execute(
+            f"INSERT INTO dw_document_history ({_HISTORY_COLS}) "  # noqa: S608 - fixed constant list
+            f"SELECT {_HISTORY_COLS} FROM dw_document_history__old"
+        )
+        con.execute("DROP TABLE dw_document_history__old")
     con.execute(
         "CREATE INDEX IF NOT EXISTS ix_doc_history ON "
         "dw_document_history(business_unit, purchase_document, version)"
@@ -1010,6 +1109,8 @@ def capture_document_history(con: sqlite3.Connection, batch: str, ts: str) -> in
     con.execute(
         f"""
         INSERT INTO dw_document_history
+        (business_unit, purchase_document, version, grand_total, status, start_date, end_date,
+         supplier_id, supplier_name, acquisition, content_sig, batch_id, observed_at)
         SELECT business_unit, purchase_document, version, grand_total, status,
                start_date, end_date, supplier_id, supplier_name,
                TRIM(COALESCE(acquisition_type_sub_type,'')||' / '||
@@ -1042,7 +1143,9 @@ def run_dq(con: sqlite3.Connection, batch: str, ts: str) -> list[dict]:
             failed, scope = -1, f"{scope} (error: {e})"
         passed = 1 if failed == 0 else 0
         con.execute(
-            "INSERT INTO dw_dq_results VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO dw_dq_results "
+            "(batch_id, check_name, scope, severity, failed_count, passed, run_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
             (batch, name, scope, severity, failed, passed, ts),
         )
         results.append(
@@ -1082,10 +1185,10 @@ def build_all(
         counts["dw_document_history_appended"] = appended
         log(f"[{batch}] history: +{appended} snapshot(s)")
         log(f"[{batch}] silver...")
-        counts |= build_silver(con, ts)
+        counts |= build_silver(con, batch, ts)
         con.commit()
         log(f"[{batch}] gold...")
-        counts |= build_gold(con, ts)
+        counts |= build_gold(con, batch, ts)
         con.commit()
         log(f"[{batch}] data quality...")
         dq = run_dq(con, batch, ts)

@@ -76,9 +76,12 @@ def _seed_source(path):
     )
     con.executemany(
         "INSERT INTO document_lines (business_unit, purchase_document, document_version, "
-        "line_number, unspsc, unspsc_description, quantity, unit_price, line_status) "
-        "VALUES ('8660','B','1',?,?,?,?,?,'Active')",
-        [("1", "43230000", "Software", 1.0, 2000.0), ("2", "81111508", "Services", 3.0, 1000.0)],
+        "line_number, item_description, unspsc, unspsc_description, quantity, unit_price, "
+        "line_status) VALUES ('8660','B','1',?,?,?,?,?,?,'Active')",
+        [
+            ("1", "Dell laptop", "43230000", "Software", 1.0, 2000.0),
+            ("2", "Consulting hours", "81111508", "Services", 3.0, 1000.0),
+        ],
     )
     con.execute(
         "INSERT INTO document_pos (business_unit, purchase_document, document_version, po_id, "
@@ -136,6 +139,17 @@ def test_warehouse_build(tmp_path):
             == 5000.0
         )
 
+        # line-item free-text description carried into gold as a degenerate attribute
+        # (physical col abbreviated to item_desc; gold_line_item exposes it friendly)
+        assert "item_desc" in {r[1] for r in con.execute("PRAGMA table_info(fact_line)")}
+        assert (
+            con.execute(
+                "SELECT item_description FROM gold_line_item "
+                "WHERE purchase_document='B' AND unit_price=2000.0"
+            ).fetchone()[0]
+            == "Dell laptop"
+        )
+
         # Gold mart: B classified as a contract (has associated POs)
         contract = con.execute(
             "SELECT document_count FROM gold_contract_vs_standalone "
@@ -191,6 +205,22 @@ def test_warehouse_build(tmp_path):
             ).fetchone()[0]
             == "grand_tot"
         )
+
+        # Schema standard: surrogate PK + audit columns + CLOB long-text.
+        fl = {r[1]: r[2] for r in con.execute("PRAGMA table_info(fact_line)")}  # name -> type
+        assert fl["item_desc"] == "CLOB"  # long free-text declared CLOB
+        assert "dw_batch_id" in fl and "dw_loaded_at" in fl  # audit columns
+        assert fl["ln_amt"] != "TEXT"  # numeric affinity preserved (not forced to TEXT)
+        assert [r[1] for r in con.execute("PRAGMA table_info(fact_line)") if r[5]] == ["ln_sk"]
+        # silver keeps logical names; long text is CLOB there too
+        sl = {r[1]: r[2] for r in con.execute("PRAGMA table_info(silver_line)")}
+        assert sl["item_description"] == "CLOB" and "line_sk" in sl and "dw_batch_id" in sl
+        # dim_unspsc category label declared CLOB; append-only history has a surrogate key
+        assert (
+            dict((r[1], r[2]) for r in con.execute("PRAGMA table_info(dim_unspsc)"))["unspsc_desc"]
+            == "CLOB"
+        )
+        assert "history_sk" in {r[1] for r in con.execute("PRAGMA table_info(dw_document_history)")}
     finally:
         con.close()
 

@@ -54,7 +54,13 @@ facts. FKs use COALESCEd naturals so every fact row resolves to a real dimension
 member.
 
 **Marts (views):** `gold_supplier_spend`, `gold_monthly_spend`,
-`gold_acquisition_spend`, `gold_unspsc_spend`, `gold_contract_vs_standalone`.
+`gold_acquisition_spend`, `gold_unspsc_spend`, `gold_contract_vs_standalone`,
+`gold_line_item` (denormalized line items: free-text `item_description` + UNSPSC
+category + price + vendor).
+
+The free-text line description is a **degenerate attribute** on `fact_line`
+(`item_description`; 79% unique and `item_id` is a constant placeholder, so it is
+kept on the fact rather than modeled as a `dim_item`).
 
 **Competitive-intelligence marts:**
 - `gold_supplier_profile` — vendor scorecard (value, reach, % won non-competitively).
@@ -133,6 +139,21 @@ Analysts don't have to memorize the abbreviations — the marts stay friendly:
 
 The abbreviation runs as a post-build rename pass (`_abbreviate_gold`), so adding a
 term to the CSV and rebuilding is all it takes to restandardize.
+
+## Keys, audit columns, and large-text typing
+- **Surrogate keys.** Dimensions carry `*_key` surrogates; the fact and silver
+  tables (and `dw_document_history`) each carry an integer surrogate PK too
+  (`document_sk`/`line_sk`/`po_sk`/`history_sk`). These are distinct from the
+  degenerate business key `document_bk` and the dimension FKs (`*_key`).
+- **Audit columns.** Facts and silver tables carry `dw_batch_id` + `dw_loaded_at`
+  (dimensions already carry `dw_loaded_at`; bronze carries `_batch_id`/`_loaded_at`/
+  `_source`). Every row is traceable to the build that produced it.
+- **Large text → CLOB.** Long free-text columns (`item_description`,
+  `unspsc_description`) are declared `CLOB`. In SQLite that is TEXT affinity — full
+  `LIKE`/sort behaviour, no storage change — and it ports cleanly to Oracle/Postgres.
+  (`BLOB` is deliberately avoided: it is binary and would break text search/sort.)
+  The `_finalize` helper stamps the surrogate key + audit columns and re-declares the
+  CLOB columns while preserving every other column's numeric/text affinity.
 
 ## Design notes / best practices applied
 - Separation of operational (`scprs.db`) and analytical (`warehouse.db`) stores.
