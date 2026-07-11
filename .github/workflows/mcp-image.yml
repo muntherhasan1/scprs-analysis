@@ -1,0 +1,57 @@
+name: MCP image
+
+# Builds and smoke-tests the remote MCP server container on Linux (where it
+# actually runs), so the image is validated without needing Docker locally.
+# Triggers only when the image or server changes.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "Dockerfile.mcp"
+      - "Dockerfile.mcp.dockerignore"
+      - "requirements-mcp.txt"
+      - "src/mcp_server.py"
+      - ".github/workflows/mcp-image.yml"
+  pull_request:
+    paths:
+      - "Dockerfile.mcp"
+      - "Dockerfile.mcp.dockerignore"
+      - "requirements-mcp.txt"
+      - "src/mcp_server.py"
+      - ".github/workflows/mcp-image.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-smoke-test:
+    runs-on: ubuntu-latest
+    env:
+      DOCKER_BUILDKIT: "1"   # honor Dockerfile.mcp.dockerignore
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Stub warehouse.db (real data is git-ignored)
+        run: |
+          mkdir -p data
+          python3 -c "import sqlite3; sqlite3.connect('data/warehouse.db').close()"
+
+      - name: Build image
+        run: docker build -f Dockerfile.mcp -t scprs-mcp .
+
+      - name: Boot + auth smoke test
+        run: |
+          docker run -d --name mcp -e MCP_AUTH_TOKEN=ci-secret -p 8000:8000 scprs-mcp
+          for _ in $(seq 1 20); do
+            [ "$(curl -s -o /dev/null -w '%{http_code}' localhost:8000/healthz || true)" = "200" ] && break
+            sleep 1
+          done
+          health=$(curl -s -o /dev/null -w '%{http_code}' localhost:8000/healthz)
+          noauth=$(curl -s -o /dev/null -w '%{http_code}' -X POST localhost:8000/mcp)
+          echo "healthz=$health  mcp(no token)=$noauth"
+          docker logs mcp || true
+          docker rm -f mcp >/dev/null 2>&1 || true
+          test "$health" = "200"
+          test "$noauth" = "401"
