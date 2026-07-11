@@ -38,10 +38,31 @@ docker build -f Dockerfile.mcp -t scprs-mcp .
 docker run -e MCP_AUTH_TOKEN=$(openssl rand -hex 24) -p 8000:8000 scprs-mcp
 ```
 
-## Deploy to Fly.io (free tier)
+## Deploy to Hugging Face Spaces (recommended — genuinely free)
 
-`fly.toml` scales the machine to zero when idle, so an idle server is free; the
-first request after idle pays a short cold start.
+Public Docker Spaces run free on HF's CPU hardware. The Space is a separate git
+repo; `deploy/hf-space/sync.sh` assembles it from this repo (reusing
+`Dockerfile.mcp` as the Space's `Dockerfile`) and pushes it, with the 24 MB DB
+tracked via git-LFS.
+
+```bash
+pip install huggingface_hub && huggingface-cli login   # one-time
+git lfs install
+# Create the Space once (Docker SDK): https://huggingface.co/new-space
+python -m src.warehouse build                          # ensure data/warehouse.db exists
+HF_SPACE=<user>/scprs-warehouse-mcp bash deploy/hf-space/sync.sh
+```
+
+Then in the Space's **Settings → Variables and secrets**, add secret
+`MCP_AUTH_TOKEN` (a long random string). Endpoint:
+`https://<user>-scprs-warehouse-mcp.hf.space/mcp`. Free Spaces sleep after
+inactivity and cold-start on the next request.
+
+## Deploy to Fly.io (alternative — usage-based, needs a card)
+
+Fly is not truly free — it bills usage above a small allowance and requires a
+card — but `fly.toml` scales the machine to zero when idle, keeping a tiny app
+to cents/month; the first request after idle pays a short cold start.
 
 ```bash
 fly launch --no-deploy                         # or: fly apps create <name>; edit app= in fly.toml
