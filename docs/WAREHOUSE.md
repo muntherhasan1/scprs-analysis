@@ -58,8 +58,12 @@ member.
 **Marts (views):** `gold_supplier_spend`, `gold_monthly_spend`,
 `gold_acquisition_spend`, `gold_unspsc_spend`, `gold_contract_vs_standalone`,
 `gold_line_item` (denormalized line items: free-text `item_description` + UNSPSC
-category + price + vendor + `start_date`/`calendar_year`/`fiscal_year`, so
-supplier×category×time questions resolve from this one mart).
+category + price + vendor + `start_date`/`calendar_year`/`fiscal_year` + the
+curated `acquisition_type`/`acquisition_sub_type` taxonomy, so
+supplier×category×time questions resolve from this one mart),
+`gold_acquisition_unspsc` (crosswalk: which UNSPSC line codes flow through each
+acquisition type/sub-type — the curated taxonomy, e.g. `IT Services`, is often a
+cleaner category than the free-coded line UNSPSC).
 
 The free-text line description is a **degenerate attribute** on `fact_line`
 (`item_description`; 79% unique and `item_id` is a constant placeholder, so it is

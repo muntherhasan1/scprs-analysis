@@ -889,13 +889,29 @@ def _build_marts(con):
             SELECT dep.business_unit, s.supplier_id, s.supplier_name,
                    f.purchase_document, f.line_number, f.item_description,
                    u.unspsc, u.unspsc_description AS category,
+                   aq.acquisition_type, aq.acquisition_sub_type,
                    dd.full_date AS start_date, dd.fiscal_year, dd.year AS calendar_year,
                    f.quantity, f.unit_price, f.line_amount, f.line_status
             FROM fact_line f
             JOIN dim_supplier s ON s.supplier_key = f.supplier_key
             JOIN dim_department dep ON dep.dept_key = f.dept_key
             JOIN dim_unspsc u ON u.unspsc_key = f.unspsc_key
+            JOIN dim_acquisition aq ON aq.acq_key = f.acq_key
             LEFT JOIN dim_date dd ON dd.date_key = f.start_date_key""",
+        # Crosswalk: which UNSPSC line codes flow through each acquisition
+        # type/sub-type. The acquisition type/sub-type is the curated procurement
+        # taxonomy (document level, e.g. "IT Services") and is often a cleaner
+        # category than the granular, free-coded UNSPSC on the line -- this bridges
+        # the two, with line counts and spend.
+        "gold_acquisition_unspsc": """
+            SELECT aq.acquisition_type, aq.acquisition_sub_type,
+                   u.unspsc, u.unspsc_description,
+                   COUNT(*) AS line_count, ROUND(SUM(f.line_amount), 0) AS total_value
+            FROM fact_line f
+            JOIN dim_acquisition aq ON aq.acq_key = f.acq_key
+            JOIN dim_unspsc u ON u.unspsc_key = f.unspsc_key
+            GROUP BY aq.acquisition_type, aq.acquisition_sub_type,
+                     u.unspsc, u.unspsc_description""",
         # -- contract change capture (from the append-only dw_document_history) -- #
         # One row per observed transition of a document: version bump, value change,
         # status change, term extension -- with a human-readable summary.

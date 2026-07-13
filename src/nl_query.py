@@ -61,10 +61,15 @@ Rules:
   by the year it ends in, so July 2021 is fiscal_year 2022).
 - For "the past N fiscal years", don't hardcode years — filter
   fiscal_year > (SELECT MAX(fiscal_year) FROM gold_line_item) - N.
-- Broad category words like "IT" or "IT Services" are NOT stored literally in
-  category (it holds granular UNSPSC descriptions). OR-match several terms, e.g.
-  (UPPER(category) LIKE '%INFORMATION TECHNOLOGY%' OR UPPER(category) LIKE '%SOFTWARE%'
-  OR UPPER(category) LIKE '%COMPUTER%' OR UPPER(category) LIKE '%TELECOMMUNICATION%').
+- For procurement-CATEGORY questions ("IT Services", "IT Goods", "Telecom",
+  "NON-IT Services"...), PREFER the curated taxonomy columns acquisition_type /
+  acquisition_sub_type on gold_line_item over the granular UNSPSC category. Match
+  with '=' or a PREFIX LIKE ('IT Services%') — NOT '%IT Services%', which would
+  also match 'NON-IT Services'. Fall back to UNSPSC category LIKE-matching only
+  for item-level things the taxonomy doesn't capture.
+- gold_acquisition_unspsc bridges the two taxonomies: the UNSPSC codes that flow
+  through each acquisition_type/acquisition_sub_type, with line_count and
+  total_value (use it for "what UNSPSC codes are under X").
 - Dollar amounts are plain numbers. Use LIMIT for "top N" questions.
 - When filtering by a name or text the user typed, match LOOSELY, not with
   equality: use WHERE UPPER(col) LIKE UPPER('%value%'). Stored names are often
