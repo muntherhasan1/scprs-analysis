@@ -55,6 +55,16 @@ Rules:
   document_type; the values are 'contract (has POs)' and 'standalone'. When asked
   specifically about contracts, filter WHERE document_type LIKE 'contract%' — do
   NOT sum both rows (that counts all documents, not just contracts).
+- Line-level questions that combine supplier + category + time use gold_line_item
+  (supplier_name, category, unspsc, line_amount, start_date, calendar_year,
+  fiscal_year). fiscal_year is the California fiscal year (Jul 1–Jun 30, labelled
+  by the year it ends in, so July 2021 is fiscal_year 2022).
+- For "the past N fiscal years", don't hardcode years — filter
+  fiscal_year > (SELECT MAX(fiscal_year) FROM gold_line_item) - N.
+- Broad category words like "IT" or "IT Services" are NOT stored literally in
+  category (it holds granular UNSPSC descriptions). OR-match several terms, e.g.
+  (UPPER(category) LIKE '%INFORMATION TECHNOLOGY%' OR UPPER(category) LIKE '%SOFTWARE%'
+  OR UPPER(category) LIKE '%COMPUTER%' OR UPPER(category) LIKE '%TELECOMMUNICATION%').
 - Dollar amounts are plain numbers. Use LIMIT for "top N" questions.
 - When filtering by a name or text the user typed, match LOOSELY, not with
   equality: use WHERE UPPER(col) LIKE UPPER('%value%'). Stored names are often

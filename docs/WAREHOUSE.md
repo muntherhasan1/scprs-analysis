@@ -39,8 +39,10 @@ Surrogate-keyed **conformed dimensions** and **fact tables** at declared grains,
 plus mart views.
 
 **Dimensions** (surrogate key + natural key + `dw_loaded_at`):
-`dim_date` (date spine + Unknown member), `dim_department`, `dim_supplier`,
-`dim_buyer`, `dim_acquisition`, `dim_unspsc`.
+`dim_date` (date spine + Unknown member; calendar `year`/`quarter`/`month` plus
+California `fiscal_year`/`fiscal_quarter` — FY runs Jul 1–Jun 30, labelled by the
+year it ends in), `dim_department`, `dim_supplier`, `dim_buyer`,
+`dim_acquisition`, `dim_unspsc`.
 
 **Facts:**
 | Fact | Grain | Key measures |
@@ -56,7 +58,8 @@ member.
 **Marts (views):** `gold_supplier_spend`, `gold_monthly_spend`,
 `gold_acquisition_spend`, `gold_unspsc_spend`, `gold_contract_vs_standalone`,
 `gold_line_item` (denormalized line items: free-text `item_description` + UNSPSC
-category + price + vendor).
+category + price + vendor + `start_date`/`calendar_year`/`fiscal_year`, so
+supplier×category×time questions resolve from this one mart).
 
 The free-text line description is a **degenerate attribute** on `fact_line`
 (`item_description`; 79% unique and `item_id` is a constant placeholder, so it is

@@ -118,6 +118,18 @@ def test_warehouse_build(tmp_path):
         # dim_date spine populated (more than just the Unknown member)
         assert con.execute("SELECT COUNT(*) FROM dim_date").fetchone()[0] > 1
 
+        # California fiscal year (Jul-Jun, labelled by the year it ends in) holds
+        # for every real date; gold_line_item carries it for time+category queries.
+        # Physical dim_date cols are abbreviated: full_date->full_dt, year->yr, etc.
+        assert (
+            con.execute(
+                "SELECT COUNT(*) FROM dim_date WHERE full_dt IS NOT NULL AND "
+                "fiscal_yr <> yr + (CASE WHEN mth >= 7 THEN 1 ELSE 0 END)"
+            ).fetchone()[0]
+            == 0
+        )
+        assert "fiscal_year" in {r[1] for r in con.execute("PRAGMA table_info(gold_line_item)")}
+
         # Star integrity: no orphan foreign keys (physical cols are abbreviated)
         assert (
             con.execute(
