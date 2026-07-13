@@ -1,0 +1,14 @@
+# BuildKit uses this ignore file specifically for `docker build -f Dockerfile.web`,
+# leaving the main .dockerignore (which excludes all data) untouched. Here we DO
+# need one file from data/: the baked-in warehouse snapshot.
+#
+# Strategy: ignore everything, then re-include only the app + the one DB file.
+*
+!src
+!app.py
+!requirements-web.txt
+# Re-include just data/warehouse.db (not the rest of data/): re-add the dir, drop
+# its contents, then re-add the single file.
+!data
+data/*
+!data/warehouse.db

@@ -1,0 +1,6 @@
+# Runtime deps for the natural-language web app image ONLY.
+# Gradio provides the public chat UI; google-genai calls the free-tier Gemini
+# API for the NL->SQL step. Query execution is stdlib sqlite3 (read-only) via
+# src/warehouse_query.py, so no pandas/playwright/mcp are needed here.
+gradio>=5.0,<6
+google-genai>=1.0,<2

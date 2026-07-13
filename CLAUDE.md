@@ -122,6 +122,18 @@ canonical marts (`gold_canonical_supplier_spend`, `gold_supplier_master`) for
 vendor rollups; the per-`supplier_id` marts double-count split vendors. Web
 enrichment joins to gold **by name**, so it attaches to the canonical entity.
 
+**Two read-only query front ends share one hardened guard.** `src/warehouse_query.py`
+is the single source of truth for querying gold: connection opened `?mode=ro`
+(writes impossible), `run_select` accepts one `SELECT`/`WITH` only, object names
+checked against a live `gold_*`/`lv_*`/`dim_*`/`fact_*` allowlist. Both front ends
+are thin layers over it — the **remote MCP server** (`src/mcp_server.py`, stdio +
+token-gated HTTP; see `docs/REMOTE_MCP.md`) for MCP clients, and the **public NL
+web app** (`src/nl_query.py` + `src/web_app.py`, a Gradio chat that turns plain
+English into guarded SQL via free-tier Gemini; see `docs/WEB_APP.md`) for anyone
+with a browser. Never duplicate the query guard into a front end — extend
+`warehouse_query`. Each deploys as its own Hugging Face Docker Space via
+`deploy/hf-space/deploy.py` and `deploy/hf-chat/deploy.py`.
+
 ## Security & conventions
 
 - Secrets load only through `src/config.py` (`require()` fails loudly on a missing

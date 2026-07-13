@@ -35,46 +35,18 @@ from __future__ import annotations
 import argparse
 import hmac
 import os
-import re
-import sqlite3
-from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 
-# Same location as scprs.DATA_DIR, derived locally so this server has no
-# dependency on the scraping stack (Playwright et al.) just to find the DB.
-# WAREHOUSE_DB is env-overridable so the container can point at its baked-in copy.
-DATA_DIR = Path(__file__).resolve().parent.parent / "data"
-WAREHOUSE_DB = Path(os.environ.get("WAREHOUSE_DB", str(DATA_DIR / "warehouse.db")))
+from . import warehouse_query as wq
 
 mcp = FastMCP("scprs-warehouse")
 
-# A single SELECT or CTE query, nothing else.
-_SELECT_ONLY = re.compile(r"^\s*(select|with)\b", re.IGNORECASE)
-
-
-def _connect() -> sqlite3.Connection:
-    """Open warehouse.db read-only. Writes are impossible on this connection."""
-    uri = f"file:{WAREHOUSE_DB.as_posix()}?mode=ro"
-    con = sqlite3.connect(uri, uri=True, timeout=30)
-    con.row_factory = sqlite3.Row
-    return con
-
-
-def _analytical_objects(con: sqlite3.Connection) -> set[str]:
-    """The set of queryable marts / star tables, straight from sqlite_master.
-
-    Used as an allowlist so object names interpolated into PRAGMA / COUNT
-    statements are always trusted, never client-supplied strings.
-    """
-    rows = con.execute(
-        "SELECT name FROM sqlite_master "
-        "WHERE type IN ('table', 'view') "
-        "AND (name LIKE 'gold_%' OR name LIKE 'lv_%' "
-        "OR name LIKE 'dim_%' OR name LIKE 'fact_%')"
-    ).fetchall()
-    return {r[0] for r in rows}
+# All query logic lives in the shared, hardened `warehouse_query` module so the
+# read-only guard (SELECT-only, ?mode=ro, allowlisted object names) has exactly
+# one implementation, reused by both this server and the web app. These tools are
+# thin MCP wrappers; their docstrings are what the MCP client sees.
 
 
 @mcp.tool()
@@ -86,29 +58,13 @@ def list_marts() -> list[dict]:
     ``gold_canonical_supplier_spend`` / ``gold_supplier_master`` — the
     per-supplier_id marts double-count vendors that registered more than once.
     """
-    with _connect() as con:
-        out = []
-        for name in sorted(_analytical_objects(con)):
-            # name comes from the sqlite_master allowlist, not the client.
-            count = con.execute(f'SELECT COUNT(*) FROM "{name}"').fetchone()[0]  # noqa: S608
-            out.append({"name": name, "rows": count})
-        return out
+    return wq.list_marts()
 
 
 @mcp.tool()
 def describe_table(name: str) -> dict:
     """Return the columns (logical names) and row count for one mart or table."""
-    with _connect() as con:
-        allowed = _analytical_objects(con) | {"gold_data_dictionary"}
-        if name not in allowed:
-            return {"error": f"Unknown or non-analytical object: {name!r}"}
-        # `name` is allowlisted above before any interpolation.
-        cols = [
-            {"name": r[1], "type": r[2]}
-            for r in con.execute(f'PRAGMA table_info("{name}")')  # noqa: S608
-        ]
-        count = con.execute(f'SELECT COUNT(*) FROM "{name}"').fetchone()[0]  # noqa: S608
-        return {"name": name, "row_count": count, "columns": cols}
+    return wq.describe(name)
 
 
 @mcp.tool()
@@ -120,14 +76,7 @@ def data_dictionary() -> list[dict]:
     use logical names directly, or consult this mapping when writing SQL
     straight against the star tables.
     """
-    with _connect() as con:
-        return [
-            {"table": r[0], "logical": r[1], "physical": r[2]}
-            for r in con.execute(
-                "SELECT table_name, logical_name, physical_name "
-                "FROM gold_data_dictionary ORDER BY table_name, logical_name"
-            )
-        ]
+    return wq.data_dictionary()
 
 
 @mcp.tool()
@@ -138,25 +87,7 @@ def run_sql(query: str, max_rows: int = 200) -> dict:
     read-only statement is permitted; the connection cannot write. Results are
     capped at ``max_rows`` (1–1000); ``truncated`` flags when the cap was hit.
     """
-    stripped = query.strip().rstrip(";").strip()
-    if not _SELECT_ONLY.match(stripped):
-        return {"error": "Only a single SELECT/WITH query is permitted."}
-    if ";" in stripped:
-        return {"error": "Multiple statements are not allowed."}
-    limit = max(1, min(max_rows, 1000))
-    try:
-        with _connect() as con:
-            cur = con.execute(stripped)  # read-only connection; writes raise
-            rows = cur.fetchmany(limit)
-            cols = [d[0] for d in cur.description] if cur.description else []
-    except sqlite3.Error as exc:
-        return {"error": str(exc)}
-    return {
-        "columns": cols,
-        "rows": [dict(r) for r in rows],
-        "row_count": len(rows),
-        "truncated": len(rows) == limit,
-    }
+    return wq.run_select(query, max_rows=max_rows)
 
 
 class BearerAuthMiddleware:
@@ -227,9 +158,9 @@ def _transport_security() -> TransportSecuritySettings:
 
 
 def _require_db() -> None:
-    if not WAREHOUSE_DB.exists():
+    if not wq.WAREHOUSE_DB.exists():
         raise SystemExit(
-            f"warehouse.db not found at {WAREHOUSE_DB}. "
+            f"warehouse.db not found at {wq.WAREHOUSE_DB}. "
             "Run `python -m src.warehouse build` first (or set WAREHOUSE_DB)."
         )
 
