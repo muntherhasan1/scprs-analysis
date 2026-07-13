@@ -26,7 +26,8 @@ Run:
     MCP_AUTH_TOKEN=... python -m src.mcp_server http   # remote HTTP endpoint
 
 Env overrides: WAREHOUSE_DB (db path), MCP_AUTH_TOKEN (required for http),
-HOST (default 0.0.0.0), PORT (default 8000).
+HOST (default 0.0.0.0), PORT (default 8000), MCP_ALLOWED_HOSTS (comma-separated
+Host allowlist; see `_transport_security` for the DNS-rebinding-guard rationale).
 """
 
 from __future__ import annotations
@@ -39,6 +40,7 @@ import sqlite3
 from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
+from mcp.server.transport_security import TransportSecuritySettings
 
 # Same location as scprs.DATA_DIR, derived locally so this server has no
 # dependency on the scraping stack (Playwright et al.) just to find the DB.
@@ -194,6 +196,36 @@ class BearerAuthMiddleware:
         await send({"type": "http.response.body", "body": body})
 
 
+def _transport_security() -> TransportSecuritySettings:
+    """DNS-rebinding-guard config for the Streamable HTTP transport.
+
+    The MCP SDK's guard defaults to accepting only ``localhost`` Host headers,
+    which rejects any real deployment behind a reverse proxy (e.g. HF Spaces →
+    ``421 Invalid Host header``). That guard exists to stop a malicious *web page*
+    from driving a browser's requests into a localhost MCP server; it is not our
+    threat model — this endpoint is remote, non-browser, and already gated by
+    ``BearerAuthMiddleware`` on every path but ``/healthz``.
+
+    So: if ``MCP_ALLOWED_HOSTS`` is set (comma-separated host or ``host:*``
+    patterns), keep the guard on with that explicit allowlist — the stricter,
+    preferred posture for a known hostname. Otherwise disable the Host/Origin
+    check (Content-Type is still validated) so the service works behind whatever
+    proxy host the platform assigns.
+    """
+    raw = os.environ.get("MCP_ALLOWED_HOSTS", "").strip()
+    if not raw:
+        return TransportSecuritySettings(enable_dns_rebinding_protection=False)
+    hosts = [h.strip() for h in raw.split(",") if h.strip()]
+    # Accept the bare host and any port on it, and the matching https origins.
+    allowed_hosts = [p for h in hosts for p in (h, f"{h}:*")]
+    allowed_origins = [p for h in hosts for p in (f"https://{h}", f"https://{h}:*")]
+    return TransportSecuritySettings(
+        enable_dns_rebinding_protection=True,
+        allowed_hosts=allowed_hosts,
+        allowed_origins=allowed_origins,
+    )
+
+
 def _require_db() -> None:
     if not WAREHOUSE_DB.exists():
         raise SystemExit(
@@ -219,6 +251,7 @@ def serve_http() -> None:
     # Stateless: each request is self-contained, so a scale-to-zero host that
     # stops/starts (or runs multiple machines) never strands a session.
     mcp.settings.stateless_http = True
+    mcp.settings.transport_security = _transport_security()
     app = BearerAuthMiddleware(mcp.streamable_http_app(), token)
     # MCP endpoint is served at /mcp (FastMCP default); clients send the token as
     # `Authorization: Bearer <MCP_AUTH_TOKEN>`.
