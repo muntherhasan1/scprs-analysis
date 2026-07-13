@@ -43,6 +43,7 @@ COPIES = [
     ("Dockerfile.mcp", "Dockerfile"),  # HF builds ./Dockerfile
     ("requirements-mcp.txt", "requirements-mcp.txt"),
     ("src/mcp_server.py", "src/mcp_server.py"),
+    ("src/warehouse_query.py", "src/warehouse_query.py"),  # shared query guard
     ("src/__init__.py", "src/__init__.py"),
     ("data/warehouse.db", "data/warehouse.db"),  # LFS via .gitattributes
 ]
