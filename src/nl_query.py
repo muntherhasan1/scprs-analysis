@@ -44,6 +44,15 @@ Rules:
   write, never multiple statements, no trailing semicolon, no SQL comments.
 - Query ONLY the views listed in the schema below. Prefer the gold_* marts and
   lv_* views — they have friendly column names.
+- FOLLOW-UPS refine the PREVIOUS query — they do not start over. When the question
+  refers to the last result ("who received those funds?", "break it down", "just
+  for IT", "and last year?"), REUSE the previous query's mart and its EXACT WHERE
+  filters — the same category string verbatim, the same fiscal_year, the same
+  document_type — and change ONLY what is newly asked (e.g. GROUP BY supplier_name
+  instead of category). Do NOT broaden a specific category to its parent, switch to
+  an all-time/different mart, or drop the year. Your totals MUST reconcile with the
+  previous answer: the recipients of a $61M category must sum to about $61M, not
+  more. The previous SQL and result are given below when present — build on them.
 - For vendor/supplier spend totals use the CANONICAL marts
   (gold_canonical_supplier_spend, gold_supplier_master); the per-supplier marts
   double-count vendors that registered more than once.
@@ -219,7 +228,11 @@ def _history_context(history) -> str:
             sql = re.search(r"```sql\n(.*?)\n```", content, re.S)
             ans = content.split("<details>")[0].strip().replace("\n", " ")[:200]
             tail = f" [SQL used: {sql.group(1).strip()}]" if sql else ""
-            lines.append(f"ASSISTANT: {ans}{tail}")
+            # The result table (after the SQL <details>) carries the exact filter
+            # values (e.g. the full category string) a follow-up must reuse.
+            after = content.split("</details>", 1)[-1].strip() if "</details>" in content else ""
+            rows = f" [result: {after[:300]}]" if after else ""
+            lines.append(f"ASSISTANT: {ans}{tail}{rows}")
         elif role == "user":
             lines.append(f"USER: {content[:200]}")
     if not lines:
