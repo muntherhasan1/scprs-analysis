@@ -62,7 +62,7 @@ def _respond(message: str, history) -> str:
     if not message:
         return "Ask me something about the SCPRS procurement data."
     try:
-        out = nl_query.answer(message)
+        out = nl_query.answer(message, history=history)
     except Exception as exc:  # noqa: BLE001 — surface any provider/config error to the user
         return (
             "⚠️ The language service isn't available right now "

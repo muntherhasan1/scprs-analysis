@@ -17,8 +17,10 @@ that and drop a dependency.
 
 from __future__ import annotations
 
+import datetime
 import json
 import os
+import re
 import time
 
 import httpx
@@ -59,8 +61,9 @@ Rules:
   (supplier_name, category, unspsc, line_amount, start_date, calendar_year,
   fiscal_year). fiscal_year is the California fiscal year (Jul 1–Jun 30, labelled
   by the year it ends in, so July 2021 is fiscal_year 2022).
-- For "the past N fiscal years", don't hardcode years — filter
-  fiscal_year > (SELECT MAX(fiscal_year) FROM gold_line_item) - N.
+- For fiscal-year windows ("last fiscal year", "this year", "past N fiscal
+  years"), anchor to the CURRENT-DATE note below. Do NOT use MAX(fiscal_year) as
+  "now" — the data has future-dated contracts, so MAX is a future year.
 - For procurement-CATEGORY questions ("IT Services", "IT Goods", "Telecom",
   "NON-IT Services"...), PREFER the curated taxonomy columns acquisition_type /
   acquisition_sub_type on gold_line_item over the granular UNSPSC category. Match
@@ -175,39 +178,100 @@ def _extract_sql(text: str) -> str:
     return t.strip().rstrip(";").strip()
 
 
-def generate_sql(question: str, schema: str) -> str:
-    """Ask the model for a single read-only SQL statement (or ``NO_QUERY``)."""
-    prompt = (
-        f"{_GUIDE}\n\nSchema (view (row count): columns):\n{schema}\n\n"
-        f"Question: {question}\nSQL:"
+def _ca_fiscal_year(d: datetime.date) -> int:
+    """California fiscal year for a date: Jul 1-Jun 30, labelled by the year it
+    ends in (so 2026-07-01 is FY2027, 2026-06-30 is FY2026)."""
+    return d.year + (1 if d.month >= 7 else 0)
+
+
+def _now_context() -> str:
+    """Today's date + the derived California fiscal year, so 'last fiscal year'
+    etc. anchor to the real calendar instead of MAX(fiscal_year) (which the data's
+    future-dated contracts push into a future year)."""
+    today = datetime.date.today()
+    cur_fy = _ca_fiscal_year(today)
+    return (
+        f"CURRENT-DATE note: today is {today.isoformat()}; California fiscal years "
+        f"run Jul 1-Jun 30 and are labelled by the year they end in, so the current "
+        f"fiscal year is FY{cur_fy}. The data includes FUTURE-dated contracts, so "
+        f"MAX(fiscal_year) is a future year, not 'now'. Interpret: 'this/current "
+        f"fiscal year' = {cur_fy}; 'last/previous fiscal year' = {cur_fy - 1}; "
+        f"'past N fiscal years' = the N most recent COMPLETE years, "
+        f"fiscal_year BETWEEN {cur_fy}-N AND {cur_fy - 1}."
     )
-    return _extract_sql(_generate(prompt))
 
 
-def summarize(question: str, result: dict) -> str:
+def _history_context(history) -> str:
+    """Compact transcript of prior turns so follow-ups ('those', 'said funds')
+    resolve. Gradio 'messages' history is a list of {role, content} dicts; the
+    assistant content carries the answer + the SQL it ran."""
+    turns = []
+    for msg in history or []:
+        if isinstance(msg, dict):
+            turns.append((msg.get("role", ""), str(msg.get("content", ""))))
+        elif isinstance(msg, (list, tuple)) and len(msg) == 2:
+            turns.append(("user", str(msg[0])))
+            turns.append(("assistant", str(msg[1])))
+    lines = []
+    for role, content in turns[-6:]:
+        content = content.strip()
+        if role == "assistant":
+            sql = re.search(r"```sql\n(.*?)\n```", content, re.S)
+            ans = content.split("<details>")[0].strip().replace("\n", " ")[:200]
+            tail = f" [SQL used: {sql.group(1).strip()}]" if sql else ""
+            lines.append(f"ASSISTANT: {ans}{tail}")
+        elif role == "user":
+            lines.append(f"USER: {content[:200]}")
+    if not lines:
+        return ""
+    return (
+        "Earlier in this conversation (resolve follow-ups like 'those'/'said funds'/"
+        "'them' against it, then write a fresh standalone query):\n" + "\n".join(lines)
+    )
+
+
+def generate_sql(question: str, schema: str, history=None) -> str:
+    """Ask the model for a single read-only SQL statement (or ``NO_QUERY``)."""
+    parts = [_GUIDE, _now_context()]
+    hist = _history_context(history)
+    if hist:
+        parts.append(hist)
+    parts.append(f"Schema (view (row count): columns):\n{schema}")
+    parts.append(f"Question: {question}\nSQL:")
+    return _extract_sql(_generate("\n\n".join(parts)))
+
+
+def summarize(question: str, result: dict, history=None) -> str:
     """Phrase a short natural-language answer from the actual query results."""
     preview = {
         "columns": result.get("columns"),
         "rows": result.get("rows", [])[:50],
         "truncated": result.get("truncated"),
     }
-    prompt = (
+    parts = [_now_context()]
+    hist = _history_context(history)
+    if hist:
+        parts.append(hist)
+    parts.append(
         "Answer the user's question in 1–3 sentences using ONLY these query "
         "results. Include the key numbers; format large dollar amounts readably. "
-        "If there are no rows, say no matching records were found.\n\n"
+        "If you name a fiscal year, use the one implied by the question and the "
+        "CURRENT-DATE note (don't guess). If there are no rows, say no matching "
+        "records were found.\n\n"
         f"Question: {question}\nResults (JSON): {json.dumps(preview, default=str)}\nAnswer:"
     )
-    return _generate(prompt).strip()
+    return _generate("\n\n".join(parts)).strip()
 
 
-def answer(question: str, max_rows: int = 200) -> dict:
+def answer(question: str, history=None, max_rows: int = 200) -> dict:
     """Full turn: NL question → SQL → guarded execution → NL answer.
 
+    ``history`` is the prior conversation (Gradio messages) so follow-ups resolve.
     Returns ``{answer, sql, result}``; ``sql``/``result`` may be ``None`` when the
     model declines (``NO_QUERY``). Never raises for a bad query — the guard turns
     that into ``result['error']`` and a friendly answer.
     """
-    sql = generate_sql(question, wq.schema_for_llm())
+    sql = generate_sql(question, wq.schema_for_llm(), history=history)
     if not sql or sql.strip() == "NO_QUERY":
         return {
             "answer": "I can't answer that from the SCPRS warehouse. Try asking about "
@@ -223,4 +287,4 @@ def answer(question: str, max_rows: int = 200) -> dict:
             "sql": sql,
             "result": result,
         }
-    return {"answer": summarize(question, result), "sql": sql, "result": result}
+    return {"answer": summarize(question, result, history=history), "sql": sql, "result": result}

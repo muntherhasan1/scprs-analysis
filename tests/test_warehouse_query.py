@@ -80,3 +80,33 @@ def test_extract_sql_strips_fences():
     assert nl_query._extract_sql("```sql\nSELECT 1\n```") == "SELECT 1"
     assert nl_query._extract_sql("SELECT 1;") == "SELECT 1"
     assert nl_query._extract_sql("  NO_QUERY  ") == "NO_QUERY"
+
+
+def test_california_fiscal_year_boundary():
+    import datetime
+
+    assert nl_query._ca_fiscal_year(datetime.date(2026, 6, 30)) == 2026
+    assert nl_query._ca_fiscal_year(datetime.date(2026, 7, 1)) == 2027
+    assert nl_query._ca_fiscal_year(datetime.date(2026, 1, 1)) == 2026
+
+
+def test_now_context_anchors_last_fiscal_year():
+    # Must steer away from MAX(fiscal_year) and define last = current - 1.
+    ctx = nl_query._now_context()
+    assert "MAX(fiscal_year)" in ctx and "future" in ctx.lower()
+    assert "last/previous fiscal year" in ctx
+
+
+def test_history_context_extracts_prior_turn_and_sql():
+    history = [
+        {"role": "user", "content": "What did the state spend the most on last fiscal year?"},
+        {
+            "role": "assistant",
+            "content": "Customs consulting, $156M.\n\n<details>x</details>\n\n"
+            "```sql\nSELECT category FROM gold_line_item WHERE fiscal_year=2026\n```",
+        },
+    ]
+    ctx = nl_query._history_context(history)
+    assert "spend the most" in ctx  # prior question carried forward
+    assert "fiscal_year=2026" in ctx  # prior SQL carried forward
+    assert nl_query._history_context([]) == ""
