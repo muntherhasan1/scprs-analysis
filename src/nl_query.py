@@ -78,6 +78,10 @@ Rules:
 - For procurement-CATEGORY questions ("IT Services", "IT Goods", "Telecom",
   "NON-IT Services"...), filter gold_document.acquisition_type with '=' or a PREFIX
   LIKE ('IT Services%') — NOT '%IT Services%', which also matches 'NON-IT Services'.
+- "Encumbrance Only" is a bookkeeping placeholder (funds reserved, not itemized),
+  NOT a good/service the state bought. For "what did X spend the most ON / buy the
+  most of" (category questions), EXCLUDE it: WHERE acquisition_type NOT LIKE
+  'Encumbrance%'. Keep it only for pure total-spend questions.
 - "Contracts" vs "purchases": gold_contract_vs_standalone has one row per
   document_type ('contract (has POs)' / 'standalone'). When asked specifically
   about contracts, filter WHERE document_type LIKE 'contract%' — don't sum both.
