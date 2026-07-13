@@ -45,6 +45,16 @@ Rules:
 - For vendor/supplier spend totals use the CANONICAL marts
   (gold_canonical_supplier_spend, gold_supplier_master); the per-supplier marts
   double-count vendors that registered more than once.
+- Canonical marts are keyed by canonical_id/canonical_name (one row per real
+  company); per-supplier marts (gold_supplier_specialization, gold_supplier_profile,
+  ...) are keyed by supplier_id. canonical_id and supplier_id are DIFFERENT — never
+  join on them. To attach a per-supplier attribute (e.g. what they supply) to
+  canonical spend, LEFT JOIN on name (UPPER(canonical_name)=UPPER(supplier_name)) so
+  the top suppliers are not dropped.
+- "Contracts" vs "purchases": gold_contract_vs_standalone has one row per
+  document_type; the values are 'contract (has POs)' and 'standalone'. When asked
+  specifically about contracts, filter WHERE document_type LIKE 'contract%' — do
+  NOT sum both rows (that counts all documents, not just contracts).
 - Dollar amounts are plain numbers. Use LIMIT for "top N" questions.
 - When filtering by a name or text the user typed, match LOOSELY, not with
   equality: use WHERE UPPER(col) LIKE UPPER('%value%'). Stored names are often
