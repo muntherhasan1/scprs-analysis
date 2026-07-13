@@ -39,24 +39,33 @@ Space. Rotate it (regenerate + update the Space secret) if it leaks.
 
 ## Step 2 — Add the MCP server as a tool
 
-1. Open the agent → **Tools** → **+ Add a tool** → **Model Context Protocol**
-   (in some tenants: **New tool → Model Context Protocol**, or build a **custom
-   connector** first — see the note below).
-2. Fill in:
-   - **Server name**: `SCPRS Warehouse`
-   - **Server URL**: `https://munther-hasan-scprs-warehouse-mcp.hf.space/mcp`
-   - **Transport**: **Streamable HTTP**
-   - **Authentication**: **API key** → the key is sent as a **header** named
-     `Authorization` with value `Bearer <MCP_AUTH_TOKEN>`. (You'll be prompted to
-     create a *connection* and paste that value; it's stored in the tenant.)
-3. Save. Copilot Studio introspects the server and lists the six tools. **Enable
-   all six.** Their descriptions (from the server) tell Copilot when to use each.
+**Copilot Studio speaks MCP only through a connector whose definition declares the
+agentic protocol** (`x-ms-agentic-protocol: mcp-streamable-1.0`). Pasting a bare
+URL into a generic field does **not** load the tools. Import the ready-made
+connector — this is the reliable path:
 
-> **If the native MCP option doesn't let you set a bearer header:** create a
-> **custom connector** (Power Apps → Custom connectors → New) pointing at the same
-> URL, with a security definition of type **API key**, parameter name
-> `Authorization`, location **Header**; then add that connector as the agent's
-> tool. This gives full control over the auth header.
+1. Go to <https://make.powerapps.com> → pick the same **environment** →
+   **Custom connectors** → **New custom connector** → **Import an OpenAPI file**.
+2. Upload `deploy/copilot-studio/mcp-connector.swagger.yaml` from this repo
+   (it targets the Space host, the `/mcp` Streamable-HTTP endpoint, and API-key
+   auth in the `Authorization` header). Name it *SCPRS Warehouse MCP*.
+3. On the **Security** tab confirm: **API key**, parameter name `Authorization`,
+   location **Header**. Create the connector.
+4. **Test** tab → **New connection** → paste the API key value as exactly
+   `Bearer <MCP_AUTH_TOKEN>` (include the word `Bearer` and a space — the whole
+   string becomes the `Authorization` header).
+5. Back in Copilot Studio: open the agent → **Tools** → **+ Add a tool** → find
+   your **SCPRS Warehouse MCP** connector → add it. The six tools
+   (`list_marts`, `describe_table`, `data_dictionary`, `run_sql`, `generate_chart`,
+   `generate_report`) now load. **Enable all six.**
+
+> There is no separate "resources" to load — this server exposes **tools only**
+> (no MCP resources/prompts), so an empty resources list is normal.
+
+> Some newer tenants have a native **Tools → Add a tool → Model Context Protocol**
+> wizard (server URL + auth). If it's available and it loads the tools, great — but
+> if tools don't appear, fall back to the imported connector above, which pins the
+> protocol extension explicitly.
 
 ## Step 3 — Agent instructions (paste this)
 
@@ -138,6 +147,7 @@ Watch the tool-call trace to confirm it's hitting `run_sql` / `generate_chart` /
 
 | Symptom | Likely cause / fix |
 |---|---|
+| **Tools/resources don't load when adding the server** | The connector must declare `x-ms-agentic-protocol: mcp-streamable-1.0` — import `deploy/copilot-studio/mcp-connector.swagger.yaml` rather than pasting a URL. Also make the API-key value literally `Bearer <token>`. (No resources is normal — the server exposes tools only.) |
 | First call is slow / times out | The HF Space was asleep (cold start). Retry; or move the server to always-on hosting (Azure App Service B1) — see REMOTE_MCP.md. |
 | 401 Unauthorized | Bearer token wrong/missing in the connection. It must be `Bearer <token>` in the `Authorization` header. |
 | 421 Invalid Host header | The server's `MCP_ALLOWED_HOSTS` must include the Space host (it does by default via the deploy). |
