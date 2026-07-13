@@ -30,6 +30,11 @@ ENV WAREHOUSE_DB=/data/warehouse.db \
     PYTHONUNBUFFERED=1
 # GEMINI_API_KEY is NOT set here — provide it at deploy time (Space secret).
 
+# Writable staging dir for the optional query log (CommitScheduler): /app is
+# root-owned, so the non-root appuser needs its own writable folder or captures
+# fail silently. Matches the default QUERY_LOG_DIR ("query_logs").
+RUN mkdir -p /app/query_logs && chown appuser /app/query_logs
+
 USER appuser
 EXPOSE 7860
 
