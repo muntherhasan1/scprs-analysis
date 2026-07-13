@@ -17,7 +17,15 @@ Safety model — the server is query-only by construction:
     checking them against the live allowlist of `gold_*`/`lv_*`/`dim_*`/`fact_*`
     objects from `sqlite_master` — never raw client input.
   * In http mode every request must carry `Authorization: Bearer <MCP_AUTH_TOKEN>`
-    (constant-time compared); `/healthz` is the only unauthenticated path.
+    (constant-time compared). The only unauthenticated paths are `/healthz` and
+    `/files/<unguessable>` — capability URLs for `generate_report` output, where
+    the random path is itself the access token so a browser/Copilot can open the
+    report page inline.
+
+Beyond querying, two tools turn results into visuals over public data:
+`generate_chart` (a read-only SELECT → a PNG image) and `generate_report`
+(sections of SELECTs + prose → a self-contained HTML report served at a `/files/`
+URL). Rendering is matplotlib (Agg); the server still makes no LLM calls.
 
 Run:
     pip install mcp                       # one-time (free, open source)
@@ -35,13 +43,21 @@ from __future__ import annotations
 import argparse
 import hmac
 import os
+import secrets
+from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
+from pydantic import BaseModel, Field
 
 from . import warehouse_query as wq
 
 mcp = FastMCP("scprs-warehouse")
+
+# Where generate_report writes its HTML; served back at an unauthenticated
+# capability URL (/files/<unguessable>). Env-overridable so the container can
+# point at a writable dir (the image's WORKDIR is root-owned).
+REPORTS_DIR = Path(os.environ.get("REPORTS_DIR", "reports"))
 
 # All query logic lives in the shared, hardened `warehouse_query` module so the
 # read-only guard (SELECT-only, ?mode=ro, allowlisted object names) has exactly
@@ -90,26 +106,134 @@ def run_sql(query: str, max_rows: int = 200) -> dict:
     return wq.run_select(query, max_rows=max_rows)
 
 
+@mcp.tool()
+def generate_chart(sql: str, kind: str = "bar", title: str = "", x: str = "", y: str = ""):
+    """Render a chart PNG from one read-only ``SELECT`` and return it as an image.
+
+    ``kind`` is ``bar``, ``line``, or ``pie``. By default the first column is the
+    label axis and the first numeric column is the value axis; override with ``x``
+    / ``y`` (column names). The query runs through the same read-only guard as
+    ``run_sql`` — write the SQL to return the label + value columns you want
+    plotted, e.g. ``SELECT canonical_name, total_value FROM
+    gold_canonical_supplier_spend ORDER BY total_value DESC LIMIT 10``.
+    """
+    from mcp.server.fastmcp import Image
+
+    from . import charting
+
+    result = wq.run_select(sql, max_rows=100)
+    if "error" in result:
+        raise ValueError(result["error"])
+    png = charting.render_chart(
+        result["columns"], result["rows"], kind=kind, title=title, x=x or None, y=y or None
+    )
+    return Image(data=png, format="png")
+
+
+class ReportSection(BaseModel):
+    """One section of an executive report."""
+
+    heading: str = Field(description="Section title")
+    sql: str = Field(description="A single read-only SELECT/WITH for this section's data")
+    narrative: str = Field(default="", description="Optional prose commentary (you write this)")
+    chart: str = Field(default="none", description="bar | line | pie | none")
+
+
+@mcp.tool()
+def generate_report(title: str, sections: list[ReportSection]) -> dict:
+    """Build a self-contained HTML executive report and return its URL.
+
+    Each section carries a heading, a read-only ``SELECT``, optional ``narrative``
+    prose (which YOU, the calling model, should write to interpret the numbers),
+    and an optional ``chart`` (``bar``/``line``/``pie``). Each section's SQL is run
+    through the read-only guard; charts are embedded in the HTML (no external
+    assets). Returns ``{report_url, sections}`` — a link to a shareable report page.
+    """
+    from . import charting
+
+    built = []
+    for s in sections:
+        res = wq.run_select(s.sql, max_rows=200)
+        if "error" in res:
+            built.append(
+                {
+                    "heading": s.heading,
+                    "narrative": f"(query error: {res['error']})",
+                    "columns": [],
+                    "rows": [],
+                }
+            )
+            continue
+        png = None
+        if (s.chart or "none").lower() in charting.CHART_KINDS:
+            try:
+                png = charting.render_chart(
+                    res["columns"], res["rows"], kind=s.chart.lower(), title=s.heading
+                )
+            except ValueError:
+                png = None  # not chartable (e.g. no numeric column) — table only
+        built.append(
+            {
+                "heading": s.heading,
+                "narrative": s.narrative,
+                "columns": res["columns"],
+                "rows": res["rows"],
+                "chart_png": png,
+            }
+        )
+    html_doc = charting.build_report_html(title, built)
+    return {"report_url": _save_report(html_doc), "sections": len(built)}
+
+
+def _public_base_url() -> str:
+    """Best guess at this server's externally reachable base URL, for report links.
+
+    Prefer an explicit ``PUBLIC_BASE_URL``; else derive from the first
+    ``MCP_ALLOWED_HOSTS`` host (which the deploy sets to the real proxy hostname);
+    else fall back to localhost.
+    """
+    base = os.environ.get("PUBLIC_BASE_URL")
+    if base:
+        return base.rstrip("/")
+    hosts = os.environ.get("MCP_ALLOWED_HOSTS", "").strip()
+    if hosts:
+        return "https://" + hosts.split(",")[0].strip()
+    return f"http://127.0.0.1:{os.environ.get('PORT', '8000')}"
+
+
+def _save_report(html_doc: str) -> str:
+    """Write a report to REPORTS_DIR under an unguessable name; return its URL."""
+    REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+    name = secrets.token_urlsafe(18) + ".html"
+    (REPORTS_DIR / name).write_text(html_doc, encoding="utf-8")
+    return f"{_public_base_url()}/files/{name}"
+
+
 class BearerAuthMiddleware:
     """Pure-ASGI middleware gating every HTTP request behind a bearer token.
 
     Pure ASGI (not Starlette's BaseHTTPMiddleware) so it doesn't buffer or break
     the MCP Streamable HTTP / SSE responses. `/healthz` is exempt so the host's
-    health checks don't need the secret. The token is compared in constant time.
+    health checks don't need the secret; `/files/*` is exempt because those are
+    unguessable capability URLs (the path itself is the access token) so report
+    pages/images can be fetched inline by a browser or Copilot. The token is
+    compared in constant time.
     """
 
-    def __init__(self, app, token: str, health_path: str = "/healthz") -> None:
+    def __init__(self, app, token: str) -> None:
         self._app = app
         self._expected = f"Bearer {token}"
-        self._health_path = health_path
 
     async def __call__(self, scope, receive, send) -> None:
         if scope["type"] != "http":
             await self._app(scope, receive, send)
             return
         path = scope.get("path", "")
-        if path == self._health_path:
+        if path == "/healthz":
             await self._respond(send, 200, b"ok")
+            return
+        if path.startswith("/files/"):
+            await self._app(scope, receive, send)  # capability URL — no bearer needed
             return
         headers = dict(scope.get("headers") or [])
         provided = headers.get(b"authorization", b"").decode()
@@ -165,9 +289,23 @@ def _require_db() -> None:
         )
 
 
+def _serve_file(request):
+    """Serve a generated report from REPORTS_DIR by its capability-URL name."""
+    from starlette.responses import FileResponse, PlainTextResponse
+
+    name = request.path_params["name"]
+    if "/" in name or "\\" in name or ".." in name:  # no path traversal
+        return PlainTextResponse("bad request", status_code=400)
+    path = REPORTS_DIR / name
+    if not path.is_file():
+        return PlainTextResponse("not found", status_code=404)
+    return FileResponse(str(path), media_type="text/html")
+
+
 def serve_http() -> None:
     """Serve the tools over a bearer-token-gated Streamable HTTP endpoint."""
     import uvicorn
+    from starlette.routing import Route
 
     _require_db()
     token = os.environ.get("MCP_AUTH_TOKEN")
@@ -183,9 +321,12 @@ def serve_http() -> None:
     # stops/starts (or runs multiple machines) never strands a session.
     mcp.settings.stateless_http = True
     mcp.settings.transport_security = _transport_security()
-    app = BearerAuthMiddleware(mcp.streamable_http_app(), token)
-    # MCP endpoint is served at /mcp (FastMCP default); clients send the token as
-    # `Authorization: Bearer <MCP_AUTH_TOKEN>`.
+    # Add the /files/<name> capability-URL route directly onto the MCP app's router
+    # (not a Mount — a Mount wouldn't run the app's lifespan, which starts the MCP
+    # session manager). It serves generated reports; everything else is /mcp.
+    app = mcp.streamable_http_app()
+    app.router.routes.insert(0, Route("/files/{name}", _serve_file))
+    app = BearerAuthMiddleware(app, token)  # gates all but /healthz and /files/
     uvicorn.run(app, host=host, port=port)
 
 

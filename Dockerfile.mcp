@@ -25,8 +25,14 @@ COPY data/warehouse.db /data/warehouse.db
 ENV WAREHOUSE_DB=/data/warehouse.db \
     HOST=0.0.0.0 \
     PORT=8000 \
-    PYTHONUNBUFFERED=1
+    PYTHONUNBUFFERED=1 \
+    MPLCONFIGDIR=/tmp/mpl \
+    REPORTS_DIR=/app/reports
 # MCP_AUTH_TOKEN is NOT set here — provide it at deploy time.
+
+# Writable dir for generate_report output (/app is root-owned; the non-root
+# appuser needs its own writable folder). Matches REPORTS_DIR above.
+RUN mkdir -p /app/reports && chown appuser /app/reports
 
 USER appuser
 EXPOSE 8000

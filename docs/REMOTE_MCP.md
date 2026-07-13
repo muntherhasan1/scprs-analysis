@@ -127,6 +127,24 @@ Then just ask questions — e.g. *"Which canonical suppliers had the highest tot
 value, and what do they mostly supply?"* The client calls `list_marts` /
 `data_dictionary` / `run_sql` under the hood.
 
+## Charts & executive reports
+
+Two tools go beyond raw data (all over the same read-only guard):
+
+- **`generate_chart(sql, kind, title, x, y)`** — runs a `SELECT` and returns a
+  **PNG** (`kind` = `bar`/`line`/`pie`). MCP clients that render images show it
+  inline.
+- **`generate_report(title, sections)`** — each section is a heading + a `SELECT`
+  + optional prose + optional chart; returns a link to a **self-contained HTML
+  report** (charts embedded) served at an unauthenticated `/files/<unguessable>`
+  capability URL, so it opens in any browser or is embeddable in a Copilot card.
+
+Rendering is matplotlib (Agg backend); the server still makes no LLM calls — the
+calling model writes the SQL and the prose. This is what a **Microsoft 365 /
+Copilot Studio agent** uses to produce query results *and* executive reports:
+connect the agent to this MCP server, and it calls `run_sql` for numbers,
+`generate_chart` for a visual, and `generate_report` for a shareable summary.
+
 ## Refreshing the data
 
 The DB is a read-only snapshot baked into the image. To publish fresh data:

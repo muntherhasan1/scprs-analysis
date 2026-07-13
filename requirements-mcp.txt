@@ -1,5 +1,6 @@
-# Runtime deps for the remote MCP server image ONLY — deliberately minimal.
-# The server (src/mcp_server.py) imports just `mcp` + the standard library, so
-# the container needs none of the pipeline's heavy deps (pandas, playwright, …).
-# uvicorn/starlette come in transitively with mcp.
+# Runtime deps for the remote MCP server image ONLY — kept lean.
+# The server (src/mcp_server.py) needs `mcp` (uvicorn/starlette come transitively)
+# plus matplotlib for the generate_chart / generate_report tools. None of the
+# pipeline's heavy deps (pandas, playwright, …) are required.
 mcp>=1.28.1
+matplotlib>=3.8  # chart rendering (Agg backend) for generate_chart/generate_report
