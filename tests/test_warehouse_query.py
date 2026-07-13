@@ -131,3 +131,29 @@ def test_generate_sql_threads_history_and_date(monkeypatch):
     assert "who received those funds?" in captured["prompt"]
     assert "top spend category last fiscal year" in captured["prompt"]  # history threaded
     assert "current fiscal year" in captured["prompt"].lower()  # date anchor present
+
+
+def test_query_log_records_and_never_raises(tmp_path, monkeypatch):
+    import json
+    import threading
+
+    from src import query_log
+
+    class _Dummy:
+        lock = threading.Lock()
+
+    monkeypatch.setattr(query_log, "_LOCAL", tmp_path)
+    monkeypatch.setattr(query_log, "_LOGFILE", tmp_path / "queries.jsonl")
+    monkeypatch.setattr(query_log, "_scheduler_or_none", lambda: _Dummy())
+    query_log.record(
+        "How much did we spend?", {"sql": "SELECT 1", "result": {"row_count": 3}}, prior_turns=2
+    )
+    lines = (tmp_path / "queries.jsonl").read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 1
+    rec = json.loads(lines[0])
+    assert rec["question"] == "How much did we spend?"
+    assert rec["row_count"] == 3 and rec["empty"] is False and rec["prior_turns"] == 2
+
+    # Disabled (no dataset configured) is a silent no-op that must never raise.
+    monkeypatch.setattr(query_log, "_scheduler_or_none", lambda: None)
+    query_log.record("anything", {})

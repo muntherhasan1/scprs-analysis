@@ -59,6 +59,34 @@ the app shows a clear error until it's set). App URL:
 pins a model; otherwise the app auto-selects a current flash model the key can
 call (model aliases get retired over time, so this self-heals).
 
+## Capturing & testing real queries
+
+Turn what people actually ask into a regression corpus. This is **off by default**
+and a no-op until configured — capture never blocks or breaks a user's query.
+
+**Capture + store** (`src/query_log.py`). A Space filesystem is ephemeral, so each
+turn (question, generated SQL, row_count / error / empty flag) is appended locally
+and synced to a **private** HF Dataset via `CommitScheduler`. To enable:
+
+1. Create a private Dataset, e.g. `https://huggingface.co/new-dataset` →
+   `<user>/scprs-query-log` (Private).
+2. On the **chat** Space, add a secret `HF_TOKEN` (an HF **write** token) and a
+   variable `QUERY_LOG_DATASET=<user>/scprs-query-log` (optionally
+   `QUERY_LOG_EVERY_MIN`). The footer then notes that questions are logged.
+
+Only the question + SQL + outcome flags are stored — not the result rows.
+
+**Replay + test** (`scripts/replay_queries.py`). Pull the logged questions, run
+each back through the app, and flag the ones that error or come back empty:
+
+```bash
+GEMINI_API_KEY=...  python scripts/replay_queries.py --limit 100      # from the Dataset
+GEMINI_API_KEY=...  python scripts/replay_queries.py --file query_logs/queries.jsonl
+```
+
+Use the failures to add prompt rules (as in `nl_query._GUIDE`) or fix data grain,
+then re-run to confirm — the loop that hardened this app in the first place.
+
 ## Refreshing the data
 
 The DB is a read-only snapshot baked into the image. To publish fresh data,

@@ -41,6 +41,7 @@ COPIES = [
     ("app.py", "app.py"),
     ("src/web_app.py", "src/web_app.py"),
     ("src/nl_query.py", "src/nl_query.py"),
+    ("src/query_log.py", "src/query_log.py"),
     ("src/warehouse_query.py", "src/warehouse_query.py"),
     ("src/__init__.py", "src/__init__.py"),
     ("data/warehouse.db", "data/warehouse.db"),  # LFS via .gitattributes

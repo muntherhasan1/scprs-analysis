@@ -5,3 +5,4 @@
 # sqlite3 (read-only) via src/warehouse_query.py — no pandas/playwright/mcp here.
 gradio>=5.0,<6
 httpx>=0.27
+huggingface_hub>=0.25  # CommitScheduler, for optional query logging (src/query_log.py)

@@ -12,9 +12,11 @@ On a Hugging Face Gradio Space, ``app.py`` calls ``build_demo().launch()``.
 
 from __future__ import annotations
 
+import os
+
 import gradio as gr
 
-from . import nl_query
+from . import nl_query, query_log
 from . import warehouse_query as wq
 
 _INTRO = """# 🏛️ Ask the SCPRS procurement warehouse
@@ -69,6 +71,7 @@ def _respond(message: str, history) -> str:
             f"({type(exc).__name__}: {exc}). "
             "If this is a fresh deploy, the `GEMINI_API_KEY` secret may be missing."
         )
+    query_log.record(message, out, prior_turns=len(history or []) // 2)
     parts = [out["answer"]]
     if out.get("sql"):
         parts.append(f"<details><summary>SQL</summary>\n\n```sql\n{out['sql']}\n```\n</details>")
@@ -88,10 +91,13 @@ def build_demo() -> gr.Blocks:
             examples=_EXAMPLES,
             cache_examples=False,
         )
-        gr.Markdown(
+        note = (
             f"_Backed by {marts} analytical marts/tables. Answers are generated; "
             "verify anything material against the source SCPRS records._"
         )
+        if os.environ.get("QUERY_LOG_DATASET"):
+            note += "\n\n_Questions (and the generated SQL) are logged to improve the app._"
+        gr.Markdown(note)
     return demo
 
 
