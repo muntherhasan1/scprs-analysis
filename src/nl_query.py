@@ -3,20 +3,37 @@
 The model only *writes* SQL and phrases the final answer; every query it produces
 is executed through the hardened read-only guard in
 ``warehouse_query.run_select`` (single ``SELECT``/``WITH``, read-only
-connection — a write is impossible). The provider is Google Gemini by default,
-whose free tier is genuinely free: with no billing account attached the key can
-only be **rate-limited**, never billed. Set ``GEMINI_API_KEY`` (and optionally
+connection — a write is impossible). The provider is Google Gemini, whose free
+tier is genuinely free: with no billing account attached the key can only be
+**rate-limited**, never billed. Set ``GEMINI_API_KEY`` (and optionally
 ``GEMINI_MODEL``).
+
+We call the Gemini REST endpoint directly with a fresh, self-contained
+``httpx.Client`` per request rather than the ``google-genai`` SDK — the SDK keeps
+a stateful httpx client whose lifecycle breaks inside Gradio's threaded worker
+("Cannot send a request, as the client has been closed"). Stateless calls avoid
+that and drop a dependency.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import time
+
+import httpx
 
 from . import warehouse_query as wq
 
-GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
+_BASE = "https://generativelanguage.googleapis.com/v1beta/models"
+_GENERATE = _BASE + "/{model}:generateContent"
+
+# Ranked candidate model ids (best first), cached after the first ListModels
+# lookup so we don't re-list on every request.
+_ranked: list[str] = []
+
+# Status codes worth retrying / falling back on: rate limit and server overload.
+_TRANSIENT = {429, 500, 503}
 
 _GUIDE = """You translate questions about California SCPRS procurement data into SQLite SQL.
 
@@ -29,22 +46,98 @@ Rules:
   (gold_canonical_supplier_spend, gold_supplier_master); the per-supplier marts
   double-count vendors that registered more than once.
 - Dollar amounts are plain numbers. Use LIMIT for "top N" questions.
+- When filtering by a name or text the user typed, match LOOSELY, not with
+  equality: use WHERE UPPER(col) LIKE UPPER('%value%'). Stored names are often
+  longer and upper-cased (e.g. the user's "MAXIMUS" is "MAXIMUS HUMAN SERVICES
+  INC"), so `= 'MAXIMUS'` would wrongly find nothing.
 - If the question cannot be answered from these views, return exactly: NO_QUERY
 
 Output ONLY the SQL (or NO_QUERY) — no markdown code fences, no explanation."""
 
 
-def _client():
-    """A Gemini client from GEMINI_API_KEY (imported lazily so the web app can
-    start and report a clear error if the key is missing)."""
-    from google import genai
-
+def _require_key() -> str:
     key = os.environ.get("GEMINI_API_KEY")
     if not key:
         raise RuntimeError(
             "GEMINI_API_KEY is not set — get a free key at aistudio.google.com/apikey"
         )
-    return genai.Client(api_key=key)
+    return key
+
+
+def _available_models(key: str) -> list[str]:
+    """Model ids this key may call via generateContent (no ``models/`` prefix)."""
+    with httpx.Client(timeout=30) as client:
+        resp = client.get(_BASE, headers={"x-goog-api-key": key})
+    resp.raise_for_status()
+    return [
+        m["name"].removeprefix("models/")
+        for m in resp.json().get("models", [])
+        if "generateContent" in (m.get("supportedGenerationMethods") or [])
+    ]
+
+
+def _score(m: str):
+    ml = m.lower()
+    # Tuple sorts ascending: stable before preview, -latest before dated, full
+    # flash before lite, shorter (alias) before long dated ids.
+    return ("preview" in ml or "exp" in ml, "latest" not in ml, "lite" in ml, len(m))
+
+
+def _ranked_models(key: str) -> list[str]:
+    """Candidate models best-first: an explicit ``GEMINI_MODEL`` override, else a
+    ranked list of flash-tier models this key can call.
+
+    Model aliases get retired (``gemini-2.5-flash`` became unavailable to new
+    keys) and individual models get transiently overloaded, so we keep a ranked
+    fallback list rather than betting on one name — self-healing across both.
+    """
+    override = os.environ.get("GEMINI_MODEL")
+    if override:
+        return [override]
+    if not _ranked:
+        models = _available_models(key)
+        candidates = [m for m in models if "flash" in m.lower()] or models
+        _ranked.extend(sorted(candidates, key=_score))
+    return _ranked
+
+
+def _post(key: str, model: str, prompt: str) -> httpx.Response:
+    with httpx.Client(timeout=60) as client:
+        return client.post(
+            _GENERATE.format(model=model),
+            headers={"x-goog-api-key": key},  # header, not URL param — keeps the key out of logs
+            json={"contents": [{"parts": [{"text": prompt}]}]},
+        )
+
+
+def _text(resp: httpx.Response) -> str:
+    candidates = resp.json().get("candidates") or []
+    if not candidates:
+        return ""
+    parts = candidates[0].get("content", {}).get("parts") or []
+    return "".join(p.get("text", "") for p in parts).strip()
+
+
+def _generate(prompt: str) -> str:
+    """Call Gemini, retrying transient overloads and falling back across models.
+
+    Each candidate model is tried up to 3 times with linear backoff on a
+    transient status (429/500/503); a non-transient failure (e.g. 404) moves
+    straight to the next model. Raises with the last error if all are exhausted.
+    """
+    key = _require_key()
+    last = "no model available"
+    for model in _ranked_models(key)[:4]:
+        for attempt in range(3):
+            resp = _post(key, model, prompt)
+            if resp.status_code == 200:
+                return _text(resp)
+            last = f"{resp.status_code} (model {model}): {resp.text[:150]}"
+            if resp.status_code in _TRANSIENT:
+                time.sleep(1.5 * (attempt + 1))
+                continue
+            break  # non-transient — try the next model
+    raise RuntimeError(f"Gemini API unavailable after retries — {last}")
 
 
 def _extract_sql(text: str) -> str:
@@ -63,8 +156,7 @@ def generate_sql(question: str, schema: str) -> str:
         f"{_GUIDE}\n\nSchema (view (row count): columns):\n{schema}\n\n"
         f"Question: {question}\nSQL:"
     )
-    resp = _client().models.generate_content(model=GEMINI_MODEL, contents=prompt)
-    return _extract_sql(resp.text)
+    return _extract_sql(_generate(prompt))
 
 
 def summarize(question: str, result: dict) -> str:
@@ -80,8 +172,7 @@ def summarize(question: str, result: dict) -> str:
         "If there are no rows, say no matching records were found.\n\n"
         f"Question: {question}\nResults (JSON): {json.dumps(preview, default=str)}\nAnswer:"
     )
-    resp = _client().models.generate_content(model=GEMINI_MODEL, contents=prompt)
-    return (resp.text or "").strip()
+    return _generate(prompt).strip()
 
 
 def answer(question: str, max_rows: int = 200) -> dict:

@@ -28,4 +28,5 @@ Set one secret in **Settings → Variables and secrets**:
 - `GEMINI_API_KEY` — a free key from <https://aistudio.google.com/apikey>. With
   no billing account attached, the free tier rate-limits rather than charges.
 
-Optional: `GEMINI_MODEL` (default `gemini-2.5-flash`).
+Optional: `GEMINI_MODEL` to pin a specific model; otherwise the app asks the API
+which models the key can call and auto-selects a current flash model.

@@ -56,7 +56,8 @@ HF_SPACE=<user>/scprs-warehouse-chat \
 it as a Space secret (otherwise add it in **Settings → Variables and secrets** —
 the app shows a clear error until it's set). App URL:
 `https://<user>-scprs-warehouse-chat.hf.space`. Optional `GEMINI_MODEL` variable
-(default `gemini-2.5-flash`).
+pins a model; otherwise the app auto-selects a current flash model the key can
+call (model aliases get retired over time, so this self-heals).
 
 ## Refreshing the data
 
