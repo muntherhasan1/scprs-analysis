@@ -110,3 +110,24 @@ def test_history_context_extracts_prior_turn_and_sql():
     assert "spend the most" in ctx  # prior question carried forward
     assert "fiscal_year=2026" in ctx  # prior SQL carried forward
     assert nl_query._history_context([]) == ""
+
+
+def test_generate_sql_threads_history_and_date(monkeypatch):
+    # End-to-end wiring: a follow-up question's prompt must carry the prior turn
+    # and the current-date note (so "said funds" resolves and FY anchors right).
+    captured = {}
+
+    def fake_gen(prompt):
+        captured["prompt"] = prompt
+        return "SELECT 1"
+
+    monkeypatch.setattr(nl_query, "_generate", fake_gen)
+    history = [
+        {"role": "user", "content": "top spend category last fiscal year"},
+        {"role": "assistant", "content": "X.\n```sql\nSELECT 1 WHERE fiscal_year=2026\n```"},
+    ]
+    sql = nl_query.generate_sql("who received those funds?", "gold_x: a, b", history=history)
+    assert sql == "SELECT 1"
+    assert "who received those funds?" in captured["prompt"]
+    assert "top spend category last fiscal year" in captured["prompt"]  # history threaded
+    assert "current fiscal year" in captured["prompt"].lower()  # date anchor present
