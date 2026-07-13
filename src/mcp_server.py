@@ -217,12 +217,12 @@ class BearerAuthMiddleware:
     health checks don't need the secret; `/files/*` is exempt because those are
     unguessable capability URLs (the path itself is the access token) so report
     pages/images can be fetched inline by a browser or Copilot. The token is
-    compared in constant time.
+    accepted as ``Bearer <token>`` or bare ``<token>`` and compared in constant time.
     """
 
     def __init__(self, app, token: str) -> None:
         self._app = app
-        self._expected = f"Bearer {token}"
+        self._token = token
 
     async def __call__(self, scope, receive, send) -> None:
         if scope["type"] != "http":
@@ -235,9 +235,13 @@ class BearerAuthMiddleware:
         if path.startswith("/files/"):
             await self._app(scope, receive, send)  # capability URL — no bearer needed
             return
-        headers = dict(scope.get("headers") or [])
-        provided = headers.get(b"authorization", b"").decode()
-        if not provided or not hmac.compare_digest(provided, self._expected):
+        provided = dict(scope.get("headers") or []).get(b"authorization", b"").decode().strip()
+        # Accept "Bearer <token>" or a bare "<token>": some connector UIs (e.g.
+        # Copilot Studio's API-key-in-header) send the header value verbatim, so a
+        # user who omits the "Bearer " prefix should still authenticate.
+        if provided[:7].lower() == "bearer ":
+            provided = provided[7:].strip()
+        if not provided or not hmac.compare_digest(provided, self._token):
             await self._respond(
                 send, 401, b"unauthorized", extra=[(b"www-authenticate", b"Bearer")]
             )
