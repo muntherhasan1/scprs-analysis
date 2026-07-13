@@ -133,6 +133,14 @@ def test_warehouse_build(tmp_path):
         # Curated acquisition taxonomy on the line mart + its crosswalk to UNSPSC.
         assert {"acquisition_type", "acquisition_sub_type"} <= li_cols
         assert con.execute("SELECT COUNT(*) FROM gold_acquisition_unspsc").fetchone()[0] >= 1
+        # gold_document is the COMPLETE document-grain mart (dated + canonical +
+        # acquisition taxonomy): one row per document, unlike sparse gold_line_item.
+        doc_cols = {r[1] for r in con.execute("PRAGMA table_info(gold_document)")}
+        assert {"canonical_name", "acquisition_type", "fiscal_year", "grand_total"} <= doc_cols
+        assert (
+            con.execute("SELECT COUNT(*) FROM gold_document").fetchone()[0]
+            == con.execute("SELECT COUNT(*) FROM fact_document").fetchone()[0]
+        )
 
         # Star integrity: no orphan foreign keys (physical cols are abbreviated)
         assert (

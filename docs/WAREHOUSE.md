@@ -55,7 +55,12 @@ year it ends in), `dim_department`, `dim_supplier`, `dim_buyer`,
 facts. FKs use COALESCEd naturals so every fact row resolves to a real dimension
 member.
 
-**Marts (views):** `gold_supplier_spend`, `gold_monthly_spend`,
+**Marts (views):** `gold_document` (COMPLETE document-grain mart — one row per
+purchase document with grand_total + raw/canonical supplier + acquisition
+taxonomy + department + `start_date`/`calendar_year`/`fiscal_year`; the primary
+source for spend/supplier/category/time, since `gold_line_item` covers only the
+~13% of documents that were line-enriched), `gold_supplier_spend`,
+`gold_monthly_spend`,
 `gold_acquisition_spend`, `gold_unspsc_spend`, `gold_contract_vs_standalone`,
 `gold_line_item` (denormalized line items: free-text `item_description` + UNSPSC
 category + price + vendor + `start_date`/`calendar_year`/`fiscal_year` + the

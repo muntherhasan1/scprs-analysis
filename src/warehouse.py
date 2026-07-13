@@ -882,9 +882,29 @@ def _build_marts(con):
             FROM gold_supplier_profile p
             LEFT JOIN bronze_supplier_web w
               ON UPPER(w.supplier_name) = UPPER(p.supplier_name)""",
+        # Denormalized documents (current version) with COMPLETE coverage — one row
+        # per purchase document, carrying grand_total + supplier (raw & canonical) +
+        # acquisition taxonomy + department + fiscal year. This is the authoritative
+        # source for spend / supplier / category / time questions: every document has
+        # a grand_total, whereas gold_line_item only covers the ~13% of documents that
+        # were line-enriched (top vendors often have 0 lines), so line-level sums
+        # badly undercount. Use gold_line_item only for genuine item-level detail.
+        "gold_document": """
+            SELECT dep.business_unit, dep.department_name,
+                   s.supplier_id, s.supplier_name, s.canonical_id, s.canonical_name,
+                   aq.acquisition_type, aq.acquisition_sub_type, aq.acquisition_method,
+                   f.purchase_document, f.status,
+                   dd.full_date AS start_date, dd.year AS calendar_year, dd.fiscal_year,
+                   f.grand_total, f.line_count, f.associated_po_count
+            FROM fact_document f
+            JOIN dim_supplier s ON s.supplier_key = f.supplier_key
+            JOIN dim_department dep ON dep.dept_key = f.dept_key
+            JOIN dim_acquisition aq ON aq.acq_key = f.acq_key
+            LEFT JOIN dim_date dd ON dd.date_key = f.start_date_key""",
         # Denormalized line items: free-text description + category + price + vendor.
-        # The item_description is a degenerate attribute on fact_line (79% unique,
-        # so kept on the fact rather than forced into a dimension).
+        # COVERS ONLY LINE-ENRICHED DOCUMENTS (~13%) — for item-level detail, not spend
+        # totals (use gold_document for those). item_description is a degenerate
+        # attribute on fact_line (79% unique, kept on the fact, not a dimension).
         "gold_line_item": """
             SELECT dep.business_unit, s.supplier_id, s.supplier_name,
                    f.purchase_document, f.line_number, f.item_description,

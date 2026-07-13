@@ -48,40 +48,45 @@ Rules:
   refers to the last result ("who received those funds?", "break it down", "just
   for IT", "and last year?"), REUSE the previous query's mart and its EXACT WHERE
   filters — the same category string verbatim, the same fiscal_year, the same
-  document_type — and change ONLY what is newly asked (e.g. GROUP BY supplier_name
+  document_type, AND the same specific entity ("their"/"them"/"that supplier" =
+  the supplier/canonical_name from the prior turn) — changing ONLY what is newly
+  asked (e.g. GROUP BY supplier_name
   instead of category). Do NOT broaden a specific category to its parent, switch to
   an all-time/different mart, or drop the year. Your totals MUST reconcile with the
   previous answer: the recipients of a $61M category must sum to about $61M, not
   more. The previous SQL and result are given below when present — build on them.
-- For vendor/supplier spend totals use the CANONICAL marts
-  (gold_canonical_supplier_spend, gold_supplier_master); the per-supplier marts
-  double-count vendors that registered more than once.
-- Canonical marts are keyed by canonical_id/canonical_name (one row per real
-  company); per-supplier marts (gold_supplier_specialization, gold_supplier_profile,
-  ...) are keyed by supplier_id. canonical_id and supplier_id are DIFFERENT — never
-  join on them. To attach a per-supplier attribute (e.g. what they supply) to
-  canonical spend, LEFT JOIN on name (UPPER(canonical_name)=UPPER(supplier_name)) so
-  the top suppliers are not dropped.
+- gold_document is the PRIMARY, COMPLETE source for spend / supplier / category /
+  department / time questions: one row per purchase document with grand_total,
+  supplier_name, canonical_name, acquisition_type, acquisition_sub_type,
+  department_name, status, start_date, calendar_year, fiscal_year. Every document
+  has a grand_total — SUM(grand_total) for spend. fiscal_year is the California
+  fiscal year (Jul 1-Jun 30, labelled by the year it ends in).
+- gold_line_item covers ONLY line-enriched documents (~13%; the biggest vendors
+  often have ZERO lines), so NEVER use it for spend totals, "top suppliers", or
+  "what did X spend" — it badly undercounts and returns empty for major vendors.
+  Use it ONLY for genuine item-level detail (unspsc, item_description, unit_price).
+  For everything else use gold_document. The line-DERIVED supplier profiles
+  (gold_supplier_unspsc_profile, gold_supplier_specialization) share this ~13%
+  sparsity and are EMPTY for many big vendors.
+- "What does supplier X supply / buy / provide?" -> use gold_document
+  acquisition_type / acquisition_sub_type (complete), NOT the line-level UNSPSC
+  profiles (which are empty for many vendors).
+- Vendor rollups (one row per real company): GROUP BY canonical_name on
+  gold_document. gold_canonical_supplier_spend / gold_supplier_master give all-time
+  canonical totals when NO category/time filter is needed. Do not join canonical
+  marts (canonical_id) to per-supplier_id marts — the keys differ.
+- For procurement-CATEGORY questions ("IT Services", "IT Goods", "Telecom",
+  "NON-IT Services"...), filter gold_document.acquisition_type with '=' or a PREFIX
+  LIKE ('IT Services%') — NOT '%IT Services%', which also matches 'NON-IT Services'.
 - "Contracts" vs "purchases": gold_contract_vs_standalone has one row per
-  document_type; the values are 'contract (has POs)' and 'standalone'. When asked
-  specifically about contracts, filter WHERE document_type LIKE 'contract%' — do
-  NOT sum both rows (that counts all documents, not just contracts).
-- Line-level questions that combine supplier + category + time use gold_line_item
-  (supplier_name, category, unspsc, line_amount, start_date, calendar_year,
-  fiscal_year). fiscal_year is the California fiscal year (Jul 1–Jun 30, labelled
-  by the year it ends in, so July 2021 is fiscal_year 2022).
+  document_type ('contract (has POs)' / 'standalone'). When asked specifically
+  about contracts, filter WHERE document_type LIKE 'contract%' — don't sum both.
 - For fiscal-year windows ("last fiscal year", "this year", "past N fiscal
   years"), anchor to the CURRENT-DATE note below. Do NOT use MAX(fiscal_year) as
   "now" — the data has future-dated contracts, so MAX is a future year.
-- For procurement-CATEGORY questions ("IT Services", "IT Goods", "Telecom",
-  "NON-IT Services"...), PREFER the curated taxonomy columns acquisition_type /
-  acquisition_sub_type on gold_line_item over the granular UNSPSC category. Match
-  with '=' or a PREFIX LIKE ('IT Services%') — NOT '%IT Services%', which would
-  also match 'NON-IT Services'. Fall back to UNSPSC category LIKE-matching only
-  for item-level things the taxonomy doesn't capture.
-- gold_acquisition_unspsc bridges the two taxonomies: the UNSPSC codes that flow
-  through each acquisition_type/acquisition_sub_type, with line_count and
-  total_value (use it for "what UNSPSC codes are under X").
+- gold_acquisition_unspsc bridges the taxonomies: which UNSPSC codes flow through
+  each acquisition_type/acquisition_sub_type (item-level; use for "what UNSPSC
+  codes are under X").
 - Dollar amounts are plain numbers. Use LIMIT for "top N" questions.
 - When filtering by a name or text the user typed, match LOOSELY, not with
   equality: use WHERE UPPER(col) LIKE UPPER('%value%'). Stored names are often
