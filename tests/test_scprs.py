@@ -37,3 +37,36 @@ def test_to_csv_roundtrip(tmp_path: Path):
     csv = scprs.to_csv(f)
     assert csv.exists()
     assert "C MURPHY CONSULTING LLC" in csv.read_text(encoding="utf-8")
+
+
+def test_download_range_bisects_on_export_timeout(monkeypatch):
+    """A range too large to export in time must be split, not fail (regression:
+    huge BU/FY cells like CAL FIRE timed out before the row-cap bisection ran)."""
+    import pandas as pd
+
+    calls = []
+
+    def fake_extract(bu, frm, to, *, out_dir=None):
+        a, b = scprs._parse_date(frm), scprs._parse_date(to)
+        calls.append((frm, to))
+        if (b - a).days > 20:  # "too big" -> the site times out generating it
+            raise scprs.ExtractTimeout("simulated slow export")
+        return scprs.Extract(bu, frm, to, None, False, True)  # small enough: no records
+
+    monkeypatch.setattr(scprs, "download_extract", fake_extract)
+    df, warnings = scprs.download_range("3540", "07/01/2025", "06/30/2026")
+    assert isinstance(df, pd.DataFrame) and df.empty and warnings == []
+    assert len(calls) > 1  # it bisected instead of raising
+    # It reached small-enough slices (the leaves) rather than dying on the full range.
+    assert any((scprs._parse_date(t) - scprs._parse_date(f)).days <= 20 for f, t in calls)
+
+
+def test_download_range_reraises_when_single_day_times_out(monkeypatch):
+    import pytest
+
+    def always_timeout(bu, frm, to, *, out_dir=None):
+        raise scprs.ExtractTimeout("simulated")
+
+    monkeypatch.setattr(scprs, "download_extract", always_timeout)
+    with pytest.raises(scprs.ExtractTimeout):
+        scprs.download_range("3540", "07/01/2025", "07/01/2025")  # unsplittable single day

@@ -35,9 +35,16 @@ from playwright.sync_api import sync_playwright
 # PLAYWRIGHT_NO_SANDBOX env var there (the Dockerfile does). No effect locally.
 _CHROMIUM_ARGS = ["--no-sandbox"] if os.environ.get("PLAYWRIGHT_NO_SANDBOX") else []
 
-SEARCH_URL = "https://suppliers.fiscal.ca.gov/psc/psfpd1/SUPPLIER/ERP/c/" "ZZ_PO.ZZ_SCPRS1_CMP.GBL"
+SEARCH_URL = "https://suppliers.fiscal.ca.gov/psc/psfpd1/SUPPLIER/ERP/c/ZZ_PO.ZZ_SCPRS1_CMP.GBL"
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 ROW_CAP = 65000  # per-download export limit enforced by the site
+
+
+class ExtractTimeout(RuntimeError):
+    """The site took too long to generate an export — usually because the range
+    is too large. `download_range` treats this like a cap hit and bisects (a very
+    large range can time out before the row-cap truncation dialog ever appears)."""
+
 
 # Result-page controls
 _BU = "#ZZ_SCPRS_SP_WRK_BUSINESS_UNIT"
@@ -134,7 +141,7 @@ def download_extract(
             dl.save_as(str(dest))
             return Extract(business_unit, from_date, to_date, dest, truncated, False)
         except PWTimeout as e:
-            raise RuntimeError(f"Timed out driving SCPRS search: {e}") from e
+            raise ExtractTimeout(f"Timed out driving SCPRS search: {e}") from e
         finally:
             browser.close()
 
@@ -169,7 +176,18 @@ def download_range(
     warnings: list[str] = []
 
     def rec(a: date, b: date, depth: int) -> None:
-        res = download_extract(business_unit, _fmt_date(a), _fmt_date(b), out_dir=out_dir)
+        try:
+            res = download_extract(business_unit, _fmt_date(a), _fmt_date(b), out_dir=out_dir)
+        except ExtractTimeout:
+            # Too big to export in the time budget. Bisect like a cap hit; only a
+            # single day that still times out is a genuine failure worth raising.
+            if a == b or depth >= max_depth:
+                raise
+            mid = a + (b - a) / 2
+            log(f"  {_fmt_date(a)}..{_fmt_date(b)}: export timed out, split at {_fmt_date(mid)}")
+            rec(a, mid, depth + 1)
+            rec(mid + timedelta(days=1), b, depth + 1)
+            return
         if res.no_records:
             log(f"  {_fmt_date(a)}..{_fmt_date(b)}: no records")
             return
