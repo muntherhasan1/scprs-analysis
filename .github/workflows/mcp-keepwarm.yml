@@ -1,0 +1,98 @@
+name: MCP keep-warm
+
+# Pings the remote MCP Space's unauthenticated /healthz on a schedule so the
+# Space never idles to sleep. An asleep Space breaks the Copilot Studio MCP
+# connection (it caches the failed health check and shows the tools as stale),
+# so keeping it awake keeps that connection live. /healthz needs no token.
+#
+# On a failed ping it opens (or comments on) a tracked GitHub issue labeled
+# `mcp-keepwarm-alert`, and auto-closes that issue once a ping succeeds again.
+on:
+  schedule:
+    - cron: "*/10 * * * *" # every 10 minutes (GitHub may delay under load)
+  workflow_dispatch: # manual "wake it now" button
+
+permissions:
+  contents: read
+  issues: write # open/close the alert issue
+
+concurrency:
+  group: mcp-keepwarm
+  cancel-in-progress: true
+
+env:
+  URL: https://munther-hasan-scprs-warehouse-mcp.hf.space/healthz
+  ALERT_LABEL: mcp-keepwarm-alert
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping /healthz
+        id: ping
+        run: |
+          # Retry: if the Space was asleep, the first hit wakes it (slow), the
+          # next confirms it's up. --max-time covers a cold start. We record the
+          # result instead of exiting, so the alert/resolve steps always run.
+          result=down
+          codes=""
+          for attempt in 1 2 3; do
+            code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 120 "$URL" || echo 000)
+            echo "attempt $attempt: HTTP $code"
+            codes="$codes $code"
+            if [ "$code" = "200" ]; then result=up; break; fi
+            sleep 15
+          done
+          echo "result=$result" >> "$GITHUB_OUTPUT"
+          echo "codes=$codes" >> "$GITHUB_OUTPUT"
+
+      - name: Ensure alert label exists
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh label create "$ALERT_LABEL" -c B60205 \
+            -d "MCP Space keep-warm ping failure" 2>/dev/null || true
+
+      - name: Alert on failure
+        if: steps.ping.outputs.result == 'down'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          CODES: ${{ steps.ping.outputs.codes }}
+        run: |
+          body="Keep-warm ping to \`$URL\` failed (HTTP codes:$CODES).
+
+          The MCP Space may be asleep or down, which breaks the Copilot Studio
+          MCP connection. Check the Space, then refresh the tool in Copilot Studio.
+
+          Failing run: $RUN_URL"
+          existing=$(gh issue list --label "$ALERT_LABEL" --state open \
+            --json number --jq '.[0].number')
+          if [ -n "$existing" ]; then
+            echo "Commenting on existing alert issue #$existing"
+            gh issue comment "$existing" --body "$body"
+          else
+            echo "Opening new alert issue"
+            gh issue create --title "🔴 MCP Space keep-warm ping failing" \
+              --label "$ALERT_LABEL" --body "$body"
+          fi
+
+      - name: Resolve on recovery
+        if: steps.ping.outputs.result == 'up'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          # Close any open alert issue — the Space is back up.
+          for n in $(gh issue list --label "$ALERT_LABEL" --state open \
+            --json number --jq '.[].number'); do
+            echo "Resolving alert issue #$n"
+            gh issue close "$n" \
+              --comment "✅ Recovered — keep-warm ping returned 200. Run: $RUN_URL"
+          done
+
+      - name: Fail the run if the ping is down
+        if: steps.ping.outputs.result == 'down'
+        run: |
+          echo "::error::MCP Space /healthz did not return 200 after 3 attempts"
+          exit 1

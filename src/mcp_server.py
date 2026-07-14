@@ -17,7 +17,15 @@ Safety model — the server is query-only by construction:
     checking them against the live allowlist of `gold_*`/`lv_*`/`dim_*`/`fact_*`
     objects from `sqlite_master` — never raw client input.
   * In http mode every request must carry `Authorization: Bearer <MCP_AUTH_TOKEN>`
-    (constant-time compared); `/healthz` is the only unauthenticated path.
+    (constant-time compared). The only unauthenticated paths are `/healthz` and
+    `/files/<unguessable>` — capability URLs for `generate_report` output, where
+    the random path is itself the access token so a browser/Copilot can open the
+    report page inline.
+
+Beyond querying, two tools turn results into visuals over public data:
+`generate_chart` (a read-only SELECT → a PNG image) and `generate_report`
+(sections of SELECTs + prose → a self-contained HTML report served at a `/files/`
+URL). Rendering is matplotlib (Agg); the server still makes no LLM calls.
 
 Run:
     pip install mcp                       # one-time (free, open source)
@@ -26,7 +34,8 @@ Run:
     MCP_AUTH_TOKEN=... python -m src.mcp_server http   # remote HTTP endpoint
 
 Env overrides: WAREHOUSE_DB (db path), MCP_AUTH_TOKEN (required for http),
-HOST (default 0.0.0.0), PORT (default 8000).
+HOST (default 0.0.0.0), PORT (default 8000), MCP_ALLOWED_HOSTS (comma-separated
+Host allowlist; see `_transport_security` for the DNS-rebinding-guard rationale).
 """
 
 from __future__ import annotations
@@ -34,45 +43,25 @@ from __future__ import annotations
 import argparse
 import hmac
 import os
-import re
-import sqlite3
+import secrets
 from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
+from mcp.server.transport_security import TransportSecuritySettings
 
-# Same location as scprs.DATA_DIR, derived locally so this server has no
-# dependency on the scraping stack (Playwright et al.) just to find the DB.
-# WAREHOUSE_DB is env-overridable so the container can point at its baked-in copy.
-DATA_DIR = Path(__file__).resolve().parent.parent / "data"
-WAREHOUSE_DB = Path(os.environ.get("WAREHOUSE_DB", str(DATA_DIR / "warehouse.db")))
+from . import warehouse_query as wq
 
 mcp = FastMCP("scprs-warehouse")
 
-# A single SELECT or CTE query, nothing else.
-_SELECT_ONLY = re.compile(r"^\s*(select|with)\b", re.IGNORECASE)
+# Where generate_report writes its HTML; served back at an unauthenticated
+# capability URL (/files/<unguessable>). Env-overridable so the container can
+# point at a writable dir (the image's WORKDIR is root-owned).
+REPORTS_DIR = Path(os.environ.get("REPORTS_DIR", "reports"))
 
-
-def _connect() -> sqlite3.Connection:
-    """Open warehouse.db read-only. Writes are impossible on this connection."""
-    uri = f"file:{WAREHOUSE_DB.as_posix()}?mode=ro"
-    con = sqlite3.connect(uri, uri=True, timeout=30)
-    con.row_factory = sqlite3.Row
-    return con
-
-
-def _analytical_objects(con: sqlite3.Connection) -> set[str]:
-    """The set of queryable marts / star tables, straight from sqlite_master.
-
-    Used as an allowlist so object names interpolated into PRAGMA / COUNT
-    statements are always trusted, never client-supplied strings.
-    """
-    rows = con.execute(
-        "SELECT name FROM sqlite_master "
-        "WHERE type IN ('table', 'view') "
-        "AND (name LIKE 'gold_%' OR name LIKE 'lv_%' "
-        "OR name LIKE 'dim_%' OR name LIKE 'fact_%')"
-    ).fetchall()
-    return {r[0] for r in rows}
+# All query logic lives in the shared, hardened `warehouse_query` module so the
+# read-only guard (SELECT-only, ?mode=ro, allowlisted object names) has exactly
+# one implementation, reused by both this server and the web app. These tools are
+# thin MCP wrappers; their docstrings are what the MCP client sees.
 
 
 @mcp.tool()
@@ -84,29 +73,13 @@ def list_marts() -> list[dict]:
     ``gold_canonical_supplier_spend`` / ``gold_supplier_master`` — the
     per-supplier_id marts double-count vendors that registered more than once.
     """
-    with _connect() as con:
-        out = []
-        for name in sorted(_analytical_objects(con)):
-            # name comes from the sqlite_master allowlist, not the client.
-            count = con.execute(f'SELECT COUNT(*) FROM "{name}"').fetchone()[0]  # noqa: S608
-            out.append({"name": name, "rows": count})
-        return out
+    return wq.list_marts()
 
 
 @mcp.tool()
 def describe_table(name: str) -> dict:
     """Return the columns (logical names) and row count for one mart or table."""
-    with _connect() as con:
-        allowed = _analytical_objects(con) | {"gold_data_dictionary"}
-        if name not in allowed:
-            return {"error": f"Unknown or non-analytical object: {name!r}"}
-        # `name` is allowlisted above before any interpolation.
-        cols = [
-            {"name": r[1], "type": r[2]}
-            for r in con.execute(f'PRAGMA table_info("{name}")')  # noqa: S608
-        ]
-        count = con.execute(f'SELECT COUNT(*) FROM "{name}"').fetchone()[0]  # noqa: S608
-        return {"name": name, "row_count": count, "columns": cols}
+    return wq.describe(name)
 
 
 @mcp.tool()
@@ -118,14 +91,7 @@ def data_dictionary() -> list[dict]:
     use logical names directly, or consult this mapping when writing SQL
     straight against the star tables.
     """
-    with _connect() as con:
-        return [
-            {"table": r[0], "logical": r[1], "physical": r[2]}
-            for r in con.execute(
-                "SELECT table_name, logical_name, physical_name "
-                "FROM gold_data_dictionary ORDER BY table_name, logical_name"
-            )
-        ]
+    return wq.data_dictionary()
 
 
 @mcp.tool()
@@ -136,25 +102,130 @@ def run_sql(query: str, max_rows: int = 200) -> dict:
     read-only statement is permitted; the connection cannot write. Results are
     capped at ``max_rows`` (1–1000); ``truncated`` flags when the cap was hit.
     """
-    stripped = query.strip().rstrip(";").strip()
-    if not _SELECT_ONLY.match(stripped):
-        return {"error": "Only a single SELECT/WITH query is permitted."}
-    if ";" in stripped:
-        return {"error": "Multiple statements are not allowed."}
-    limit = max(1, min(max_rows, 1000))
+    return wq.run_select(query, max_rows=max_rows)
+
+
+@mcp.tool()
+def generate_chart(sql: str, kind: str = "bar", title: str = "", x: str = "", y: str = "") -> dict:
+    """Render a chart from one read-only ``SELECT`` and return a link to the PNG.
+
+    ``kind`` is ``bar``, ``line``, or ``pie``. By default the first column is the
+    label axis and the first numeric column is the value axis; override with ``x``
+    / ``y`` (column names). Write the SQL to return the label + value columns you
+    want plotted, e.g. ``SELECT canonical_name, total_value FROM
+    gold_canonical_supplier_spend ORDER BY total_value DESC LIMIT 10``.
+
+    Returns ``{"chart_url": ...}`` — a public image URL. Show it to the user (as a
+    Markdown image ``![title](chart_url)`` and/or a clickable link); a URL renders
+    in far more clients than inline MCP image content does.
+    """
+    from . import charting
+
+    result = wq.run_select(sql, max_rows=100)
+    if "error" in result:
+        raise ValueError(result["error"])
+    png = charting.render_chart(
+        result["columns"], result["rows"], kind=kind, title=title, x=x or None, y=y or None
+    )
+    return {"chart_url": _save_capability_file(png, ".png")}
+
+
+@mcp.tool()
+def generate_report(title: str, sections_json: str) -> dict:
+    """Build a self-contained HTML executive report and return its URL.
+
+    ``sections_json`` is a JSON **array string** — a flat string param (Copilot
+    Studio and most clients build these far more reliably than nested objects).
+    Each item is an object:
+      ``{"heading": str, "sql": str, "narrative": str, "chart": "bar|line|pie|none"}``
+    where ``sql`` is a single read-only ``SELECT``/``WITH`` and ``narrative`` is
+    prose YOU write to interpret the numbers. Example::
+
+        [{"heading":"Top suppliers","sql":"SELECT canonical_name, SUM(grand_total)
+          AS spend FROM gold_document GROUP BY canonical_name ORDER BY spend DESC
+          LIMIT 10","narrative":"Golden State Connect leads.","chart":"bar"}]
+
+    Each section's SQL runs through the read-only guard; charts are embedded in the
+    HTML (no external assets). Returns ``{report_url, sections}`` — a shareable link.
+    """
+    import json
+
+    from . import charting
+
     try:
-        with _connect() as con:
-            cur = con.execute(stripped)  # read-only connection; writes raise
-            rows = cur.fetchmany(limit)
-            cols = [d[0] for d in cur.description] if cur.description else []
-    except sqlite3.Error as exc:
-        return {"error": str(exc)}
+        sections = json.loads(sections_json)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"sections_json must be valid JSON: {exc}") from exc
+    if not isinstance(sections, list):
+        raise ValueError("sections_json must be a JSON array of {heading, sql, narrative, chart}")
+
+    built = []
+    for s in sections:
+        if not isinstance(s, dict):
+            continue
+        heading = str(s.get("heading", ""))
+        sql = str(s.get("sql", ""))
+        narrative = str(s.get("narrative", ""))
+        chart = str(s.get("chart", "none")).lower()
+        res = wq.run_select(sql, max_rows=200)
+        if "error" in res:
+            built.append(
+                {
+                    "heading": heading,
+                    "narrative": f"(query error: {res['error']})",
+                    "columns": [],
+                    "rows": [],
+                }
+            )
+            continue
+        png = None
+        if chart in charting.CHART_KINDS:
+            try:
+                png = charting.render_chart(res["columns"], res["rows"], kind=chart, title=heading)
+            except ValueError:
+                png = None  # not chartable (e.g. no numeric column) — table only
+        built.append(
+            {
+                "heading": heading,
+                "narrative": narrative,
+                "columns": res["columns"],
+                "rows": res["rows"],
+                "chart_png": png,
+            }
+        )
+    html_doc = charting.build_report_html(title, built)
     return {
-        "columns": cols,
-        "rows": [dict(r) for r in rows],
-        "row_count": len(rows),
-        "truncated": len(rows) == limit,
+        "report_url": _save_capability_file(html_doc.encode("utf-8"), ".html"),
+        "sections": len(built),
     }
+
+
+def _public_base_url() -> str:
+    """Best guess at this server's externally reachable base URL, for report links.
+
+    Prefer an explicit ``PUBLIC_BASE_URL``; else derive from the first
+    ``MCP_ALLOWED_HOSTS`` host (which the deploy sets to the real proxy hostname);
+    else fall back to localhost.
+    """
+    base = os.environ.get("PUBLIC_BASE_URL")
+    if base:
+        return base.rstrip("/")
+    hosts = os.environ.get("MCP_ALLOWED_HOSTS", "").strip()
+    if hosts:
+        return "https://" + hosts.split(",")[0].strip()
+    return f"http://127.0.0.1:{os.environ.get('PORT', '8000')}"
+
+
+def _save_capability_file(data: bytes, suffix: str) -> str:
+    """Write bytes to REPORTS_DIR under an unguessable name; return its /files/ URL.
+
+    The random name is the access token (the /files/ path is unauthenticated), so
+    charts/reports can be opened inline by a browser or Copilot.
+    """
+    REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+    name = secrets.token_urlsafe(18) + suffix
+    (REPORTS_DIR / name).write_bytes(data)
+    return f"{_public_base_url()}/files/{name}"
 
 
 class BearerAuthMiddleware:
@@ -162,25 +233,34 @@ class BearerAuthMiddleware:
 
     Pure ASGI (not Starlette's BaseHTTPMiddleware) so it doesn't buffer or break
     the MCP Streamable HTTP / SSE responses. `/healthz` is exempt so the host's
-    health checks don't need the secret. The token is compared in constant time.
+    health checks don't need the secret; `/files/*` is exempt because those are
+    unguessable capability URLs (the path itself is the access token) so report
+    pages/images can be fetched inline by a browser or Copilot. The token is
+    accepted as ``Bearer <token>`` or bare ``<token>`` and compared in constant time.
     """
 
-    def __init__(self, app, token: str, health_path: str = "/healthz") -> None:
+    def __init__(self, app, token: str) -> None:
         self._app = app
-        self._expected = f"Bearer {token}"
-        self._health_path = health_path
+        self._token = token
 
     async def __call__(self, scope, receive, send) -> None:
         if scope["type"] != "http":
             await self._app(scope, receive, send)
             return
         path = scope.get("path", "")
-        if path == self._health_path:
+        if path == "/healthz":
             await self._respond(send, 200, b"ok")
             return
-        headers = dict(scope.get("headers") or [])
-        provided = headers.get(b"authorization", b"").decode()
-        if not provided or not hmac.compare_digest(provided, self._expected):
+        if path.startswith("/files/"):
+            await self._app(scope, receive, send)  # capability URL — no bearer needed
+            return
+        provided = dict(scope.get("headers") or []).get(b"authorization", b"").decode().strip()
+        # Accept "Bearer <token>" or a bare "<token>": some connector UIs (e.g.
+        # Copilot Studio's API-key-in-header) send the header value verbatim, so a
+        # user who omits the "Bearer " prefix should still authenticate.
+        if provided[:7].lower() == "bearer ":
+            provided = provided[7:].strip()
+        if not provided or not hmac.compare_digest(provided, self._token):
             await self._respond(
                 send, 401, b"unauthorized", extra=[(b"www-authenticate", b"Bearer")]
             )
@@ -194,17 +274,62 @@ class BearerAuthMiddleware:
         await send({"type": "http.response.body", "body": body})
 
 
+def _transport_security() -> TransportSecuritySettings:
+    """DNS-rebinding-guard config for the Streamable HTTP transport.
+
+    The MCP SDK's guard defaults to accepting only ``localhost`` Host headers,
+    which rejects any real deployment behind a reverse proxy (e.g. HF Spaces →
+    ``421 Invalid Host header``). That guard exists to stop a malicious *web page*
+    from driving a browser's requests into a localhost MCP server; it is not our
+    threat model — this endpoint is remote, non-browser, and already gated by
+    ``BearerAuthMiddleware`` on every path but ``/healthz``.
+
+    So: if ``MCP_ALLOWED_HOSTS`` is set (comma-separated host or ``host:*``
+    patterns), keep the guard on with that explicit allowlist — the stricter,
+    preferred posture for a known hostname. Otherwise disable the Host/Origin
+    check (Content-Type is still validated) so the service works behind whatever
+    proxy host the platform assigns.
+    """
+    raw = os.environ.get("MCP_ALLOWED_HOSTS", "").strip()
+    if not raw:
+        return TransportSecuritySettings(enable_dns_rebinding_protection=False)
+    hosts = [h.strip() for h in raw.split(",") if h.strip()]
+    # Accept the bare host and any port on it, and the matching https origins.
+    allowed_hosts = [p for h in hosts for p in (h, f"{h}:*")]
+    allowed_origins = [p for h in hosts for p in (f"https://{h}", f"https://{h}:*")]
+    return TransportSecuritySettings(
+        enable_dns_rebinding_protection=True,
+        allowed_hosts=allowed_hosts,
+        allowed_origins=allowed_origins,
+    )
+
+
 def _require_db() -> None:
-    if not WAREHOUSE_DB.exists():
+    if not wq.WAREHOUSE_DB.exists():
         raise SystemExit(
-            f"warehouse.db not found at {WAREHOUSE_DB}. "
+            f"warehouse.db not found at {wq.WAREHOUSE_DB}. "
             "Run `python -m src.warehouse build` first (or set WAREHOUSE_DB)."
         )
+
+
+def _serve_file(request):
+    """Serve a generated report from REPORTS_DIR by its capability-URL name."""
+    from starlette.responses import FileResponse, PlainTextResponse
+
+    name = request.path_params["name"]
+    if "/" in name or "\\" in name or ".." in name:  # no path traversal
+        return PlainTextResponse("bad request", status_code=400)
+    path = REPORTS_DIR / name
+    if not path.is_file():
+        return PlainTextResponse("not found", status_code=404)
+    media = "image/png" if name.endswith(".png") else "text/html"
+    return FileResponse(str(path), media_type=media)
 
 
 def serve_http() -> None:
     """Serve the tools over a bearer-token-gated Streamable HTTP endpoint."""
     import uvicorn
+    from starlette.routing import Route
 
     _require_db()
     token = os.environ.get("MCP_AUTH_TOKEN")
@@ -219,9 +344,13 @@ def serve_http() -> None:
     # Stateless: each request is self-contained, so a scale-to-zero host that
     # stops/starts (or runs multiple machines) never strands a session.
     mcp.settings.stateless_http = True
-    app = BearerAuthMiddleware(mcp.streamable_http_app(), token)
-    # MCP endpoint is served at /mcp (FastMCP default); clients send the token as
-    # `Authorization: Bearer <MCP_AUTH_TOKEN>`.
+    mcp.settings.transport_security = _transport_security()
+    # Add the /files/<name> capability-URL route directly onto the MCP app's router
+    # (not a Mount — a Mount wouldn't run the app's lifespan, which starts the MCP
+    # session manager). It serves generated reports; everything else is /mcp.
+    app = mcp.streamable_http_app()
+    app.router.routes.insert(0, Route("/files/{name}", _serve_file))
+    app = BearerAuthMiddleware(app, token)  # gates all but /healthz and /files/
     uvicorn.run(app, host=host, port=port)
 
 

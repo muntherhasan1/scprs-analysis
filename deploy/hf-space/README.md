@@ -6,7 +6,7 @@ colorTo: gray
 sdk: docker
 app_port: 8000
 pinned: false
-short_description: Read-only, token-gated MCP endpoint for the SCPRS gold warehouse
+short_description: Read-only, token-gated MCP endpoint for the SCPRS warehouse
 ---
 
 # SCPRS Warehouse MCP (remote)

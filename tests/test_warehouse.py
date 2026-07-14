@@ -118,6 +118,30 @@ def test_warehouse_build(tmp_path):
         # dim_date spine populated (more than just the Unknown member)
         assert con.execute("SELECT COUNT(*) FROM dim_date").fetchone()[0] > 1
 
+        # California fiscal year (Jul-Jun, labelled by the year it ends in) holds
+        # for every real date; gold_line_item carries it for time+category queries.
+        # Physical dim_date cols are abbreviated: full_date->full_dt, year->yr, etc.
+        assert (
+            con.execute(
+                "SELECT COUNT(*) FROM dim_date WHERE full_dt IS NOT NULL AND "
+                "fiscal_yr <> yr + (CASE WHEN mth >= 7 THEN 1 ELSE 0 END)"
+            ).fetchone()[0]
+            == 0
+        )
+        li_cols = {r[1] for r in con.execute("PRAGMA table_info(gold_line_item)")}
+        assert "fiscal_year" in li_cols
+        # Curated acquisition taxonomy on the line mart + its crosswalk to UNSPSC.
+        assert {"acquisition_type", "acquisition_sub_type"} <= li_cols
+        assert con.execute("SELECT COUNT(*) FROM gold_acquisition_unspsc").fetchone()[0] >= 1
+        # gold_document is the COMPLETE document-grain mart (dated + canonical +
+        # acquisition taxonomy): one row per document, unlike sparse gold_line_item.
+        doc_cols = {r[1] for r in con.execute("PRAGMA table_info(gold_document)")}
+        assert {"canonical_name", "acquisition_type", "fiscal_year", "grand_total"} <= doc_cols
+        assert (
+            con.execute("SELECT COUNT(*) FROM gold_document").fetchone()[0]
+            == con.execute("SELECT COUNT(*) FROM fact_document").fetchone()[0]
+        )
+
         # Star integrity: no orphan foreign keys (physical cols are abbreviated)
         assert (
             con.execute(

@@ -39,8 +39,10 @@ Surrogate-keyed **conformed dimensions** and **fact tables** at declared grains,
 plus mart views.
 
 **Dimensions** (surrogate key + natural key + `dw_loaded_at`):
-`dim_date` (date spine + Unknown member), `dim_department`, `dim_supplier`,
-`dim_buyer`, `dim_acquisition`, `dim_unspsc`.
+`dim_date` (date spine + Unknown member; calendar `year`/`quarter`/`month` plus
+California `fiscal_year`/`fiscal_quarter` — FY runs Jul 1–Jun 30, labelled by the
+year it ends in), `dim_department`, `dim_supplier`, `dim_buyer`,
+`dim_acquisition`, `dim_unspsc`.
 
 **Facts:**
 | Fact | Grain | Key measures |
@@ -53,10 +55,20 @@ plus mart views.
 facts. FKs use COALESCEd naturals so every fact row resolves to a real dimension
 member.
 
-**Marts (views):** `gold_supplier_spend`, `gold_monthly_spend`,
+**Marts (views):** `gold_document` (COMPLETE document-grain mart — one row per
+purchase document with grand_total + raw/canonical supplier + acquisition
+taxonomy + department + `start_date`/`calendar_year`/`fiscal_year`; the primary
+source for spend/supplier/category/time, since `gold_line_item` covers only the
+~13% of documents that were line-enriched), `gold_supplier_spend`,
+`gold_monthly_spend`,
 `gold_acquisition_spend`, `gold_unspsc_spend`, `gold_contract_vs_standalone`,
 `gold_line_item` (denormalized line items: free-text `item_description` + UNSPSC
-category + price + vendor).
+category + price + vendor + `start_date`/`calendar_year`/`fiscal_year` + the
+curated `acquisition_type`/`acquisition_sub_type` taxonomy, so
+supplier×category×time questions resolve from this one mart),
+`gold_acquisition_unspsc` (crosswalk: which UNSPSC line codes flow through each
+acquisition type/sub-type — the curated taxonomy, e.g. `IT Services`, is often a
+cleaner category than the free-coded line UNSPSC).
 
 The free-text line description is a **degenerate attribute** on `fact_line`
 (`item_description`; 79% unique and `item_id` is a constant placeholder, so it is

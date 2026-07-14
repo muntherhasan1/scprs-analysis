@@ -1,0 +1,45 @@
+# Public natural-language web app image (Gradio) over the gold warehouse.
+#
+# Ships the read-only query surface + NL->SQL layer + Gradio UI plus the gold
+# warehouse DB baked in — no pandas/playwright/mcp. The DB is a read-only
+# snapshot: to publish fresh data, rebuild the warehouse locally and rebuild this
+# image. GEMINI_API_KEY is injected at deploy time (a Space secret), never baked.
+#
+# Build (BuildKit uses Dockerfile.web.dockerignore, which re-includes the DB):
+#   docker build -f Dockerfile.web -t scprs-web .
+# Run:
+#   docker run -e GEMINI_API_KEY=... -p 7860:7860 scprs-web
+FROM python:3.12-slim
+
+# Least privilege: run as a non-root user.
+RUN useradd --create-home --uid 10001 appuser
+WORKDIR /app
+
+COPY requirements-web.txt .
+RUN pip install --no-cache-dir -r requirements-web.txt
+
+# App code + the read-only data snapshot (world-readable; opened ?mode=ro).
+COPY src/ ./src/
+COPY app.py .
+COPY data/warehouse.db /data/warehouse.db
+
+ENV WAREHOUSE_DB=/data/warehouse.db \
+    GRADIO_SERVER_NAME=0.0.0.0 \
+    GRADIO_SERVER_PORT=7860 \
+    GRADIO_ANALYTICS_ENABLED=False \
+    PYTHONUNBUFFERED=1
+# GEMINI_API_KEY is NOT set here — provide it at deploy time (Space secret).
+
+# Writable staging dir for the optional query log (CommitScheduler): /app is
+# root-owned, so the non-root appuser needs its own writable folder or captures
+# fail silently. Matches the default QUERY_LOG_DIR ("query_logs").
+RUN mkdir -p /app/query_logs && chown appuser /app/query_logs
+
+USER appuser
+EXPOSE 7860
+
+# Liveness against the Gradio root page.
+HEALTHCHECK --interval=30s --timeout=3s --start-period=20s --retries=3 \
+  CMD python -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:7860/').status==200 else 1)"
+
+CMD ["python", "app.py"]

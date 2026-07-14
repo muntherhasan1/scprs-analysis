@@ -1,0 +1,8 @@
+# Runtime deps for the natural-language web app image ONLY.
+# Gradio provides the public chat UI; httpx makes stateless REST calls to the
+# free-tier Gemini API for the NL->SQL step (the google-genai SDK's stateful
+# client breaks inside Gradio's threaded worker). Query execution is stdlib
+# sqlite3 (read-only) via src/warehouse_query.py — no pandas/playwright/mcp here.
+gradio>=5.0,<6
+httpx>=0.27
+huggingface_hub>=0.25  # CommitScheduler, for optional query logging (src/query_log.py)

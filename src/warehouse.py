@@ -378,9 +378,12 @@ def build_gold(con: sqlite3.Connection, batch: str, ts: str) -> dict:
     con.execute("DROP TABLE IF EXISTS dim_date")
     con.execute(
         "CREATE TABLE dim_date (date_key INTEGER PRIMARY KEY, full_date TEXT, year INTEGER, "
-        "quarter INTEGER, month INTEGER, month_name TEXT, day INTEGER, day_of_week TEXT)"
+        "quarter INTEGER, month INTEGER, month_name TEXT, day INTEGER, day_of_week TEXT, "
+        "fiscal_year INTEGER, fiscal_quarter INTEGER)"
     )
-    con.execute("INSERT INTO dim_date VALUES (0, NULL, NULL, NULL, NULL, 'Unknown', NULL, NULL)")
+    con.execute(
+        "INSERT INTO dim_date VALUES (0, NULL, NULL, NULL, NULL, 'Unknown', NULL, NULL, NULL, NULL)"
+    )
     bounds = con.execute(
         "SELECT MIN(d), MAX(d) FROM ("
         "  SELECT start_date d FROM silver_document WHERE start_date LIKE '____-__-__'"
@@ -405,7 +408,12 @@ def build_gold(con: sqlite3.Connection, batch: str, ts: str) -> dict:
                    CAST(strftime('%d', dt) AS INTEGER),
                    CASE strftime('%w', dt)
                      WHEN '0' THEN 'Sun' WHEN '1' THEN 'Mon' WHEN '2' THEN 'Tue'
-                     WHEN '3' THEN 'Wed' WHEN '4' THEN 'Thu' WHEN '5' THEN 'Fri' ELSE 'Sat' END
+                     WHEN '3' THEN 'Wed' WHEN '4' THEN 'Thu' WHEN '5' THEN 'Fri' ELSE 'Sat' END,
+                   -- California fiscal year runs Jul 1 - Jun 30; FY label = the
+                   -- calendar year it ends in (so Jul 2021 -> FY2022).
+                   CAST(strftime('%Y', dt) AS INTEGER)
+                     + (CASE WHEN CAST(strftime('%m', dt) AS INTEGER) >= 7 THEN 1 ELSE 0 END),
+                   (((CAST(strftime('%m', dt) AS INTEGER) + 5) % 12) / 3) + 1
             FROM dates
             """,
             (bounds[0], bounds[1]),
@@ -874,18 +882,56 @@ def _build_marts(con):
             FROM gold_supplier_profile p
             LEFT JOIN bronze_supplier_web w
               ON UPPER(w.supplier_name) = UPPER(p.supplier_name)""",
+        # Denormalized documents (current version) with COMPLETE coverage — one row
+        # per purchase document, carrying grand_total + supplier (raw & canonical) +
+        # acquisition taxonomy + department + fiscal year. This is the authoritative
+        # source for spend / supplier / category / time questions: every document has
+        # a grand_total, whereas gold_line_item only covers the ~13% of documents that
+        # were line-enriched (top vendors often have 0 lines), so line-level sums
+        # badly undercount. Use gold_line_item only for genuine item-level detail.
+        "gold_document": """
+            SELECT dep.business_unit, dep.department_name,
+                   s.supplier_id, s.supplier_name, s.canonical_id, s.canonical_name,
+                   aq.acquisition_type, aq.acquisition_sub_type, aq.acquisition_method,
+                   f.purchase_document, f.status,
+                   dd.full_date AS start_date, dd.year AS calendar_year, dd.fiscal_year,
+                   f.grand_total, f.line_count, f.associated_po_count
+            FROM fact_document f
+            JOIN dim_supplier s ON s.supplier_key = f.supplier_key
+            JOIN dim_department dep ON dep.dept_key = f.dept_key
+            JOIN dim_acquisition aq ON aq.acq_key = f.acq_key
+            LEFT JOIN dim_date dd ON dd.date_key = f.start_date_key""",
         # Denormalized line items: free-text description + category + price + vendor.
-        # The item_description is a degenerate attribute on fact_line (79% unique,
-        # so kept on the fact rather than forced into a dimension).
+        # COVERS ONLY LINE-ENRICHED DOCUMENTS (~13%) — for item-level detail, not spend
+        # totals (use gold_document for those). item_description is a degenerate
+        # attribute on fact_line (79% unique, kept on the fact, not a dimension).
         "gold_line_item": """
             SELECT dep.business_unit, s.supplier_id, s.supplier_name,
                    f.purchase_document, f.line_number, f.item_description,
                    u.unspsc, u.unspsc_description AS category,
+                   aq.acquisition_type, aq.acquisition_sub_type,
+                   dd.full_date AS start_date, dd.fiscal_year, dd.year AS calendar_year,
                    f.quantity, f.unit_price, f.line_amount, f.line_status
             FROM fact_line f
             JOIN dim_supplier s ON s.supplier_key = f.supplier_key
             JOIN dim_department dep ON dep.dept_key = f.dept_key
-            JOIN dim_unspsc u ON u.unspsc_key = f.unspsc_key""",
+            JOIN dim_unspsc u ON u.unspsc_key = f.unspsc_key
+            JOIN dim_acquisition aq ON aq.acq_key = f.acq_key
+            LEFT JOIN dim_date dd ON dd.date_key = f.start_date_key""",
+        # Crosswalk: which UNSPSC line codes flow through each acquisition
+        # type/sub-type. The acquisition type/sub-type is the curated procurement
+        # taxonomy (document level, e.g. "IT Services") and is often a cleaner
+        # category than the granular, free-coded UNSPSC on the line -- this bridges
+        # the two, with line counts and spend.
+        "gold_acquisition_unspsc": """
+            SELECT aq.acquisition_type, aq.acquisition_sub_type,
+                   u.unspsc, u.unspsc_description,
+                   COUNT(*) AS line_count, ROUND(SUM(f.line_amount), 0) AS total_value
+            FROM fact_line f
+            JOIN dim_acquisition aq ON aq.acq_key = f.acq_key
+            JOIN dim_unspsc u ON u.unspsc_key = f.unspsc_key
+            GROUP BY aq.acquisition_type, aq.acquisition_sub_type,
+                     u.unspsc, u.unspsc_description""",
         # -- contract change capture (from the append-only dw_document_history) -- #
         # One row per observed transition of a document: version bump, value change,
         # status change, term extension -- with a human-readable summary.

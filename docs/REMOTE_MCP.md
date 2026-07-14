@@ -38,25 +38,37 @@ docker build -f Dockerfile.mcp -t scprs-mcp .
 docker run -e MCP_AUTH_TOKEN=$(openssl rand -hex 24) -p 8000:8000 scprs-mcp
 ```
 
-## Deploy to Hugging Face Spaces (recommended — genuinely free)
+## Deploy to Hugging Face Spaces
 
-Public Docker Spaces run free on HF's CPU hardware. The Space is a separate git
-repo; `deploy/hf-space/sync.sh` assembles it from this repo (reusing
-`Dockerfile.mcp` as the Space's `Dockerfile`) and pushes it, with the 24 MB DB
-tracked via git-LFS.
+**Cost note:** HF Docker Spaces on free cpu-basic now require a **PRO**
+subscription (~$9/mo) — only *static* Spaces are free (`create_repo` returns
+HTTP 402 without PRO). The Space still sleeps when idle and cold-starts on the
+next request. `deploy/hf-space/deploy.py` assembles the Space from this repo
+(reusing `Dockerfile.mcp` as the Space's `Dockerfile`) and pushes it through the
+HF API, with the 24 MB DB tracked via git-LFS.
 
 ```bash
-pip install huggingface_hub && huggingface-cli login   # one-time
-git lfs install
-# Create the Space once (Docker SDK): https://huggingface.co/new-space
+pip install huggingface_hub
+hf auth login                                          # or: huggingface-cli login
+# subscribe to PRO once: https://huggingface.co/pro    (Docker Spaces need it)
 python -m src.warehouse build                          # ensure data/warehouse.db exists
-HF_SPACE=<user>/scprs-warehouse-mcp bash deploy/hf-space/sync.sh
+HF_SPACE=<user>/scprs-warehouse-mcp \
+  MCP_AUTH_TOKEN=$(openssl rand -hex 24) \
+  python deploy/hf-space/deploy.py                     # creates + pushes the Space
 ```
 
-Then in the Space's **Settings → Variables and secrets**, add secret
-`MCP_AUTH_TOKEN` (a long random string). Endpoint:
-`https://<user>-scprs-warehouse-mcp.hf.space/mcp`. Free Spaces sleep after
-inactivity and cold-start on the next request.
+`deploy.py` also sets the `MCP_ALLOWED_HOSTS` **variable** to
+`<user>-<space>.hf.space` (so the MCP SDK's DNS-rebinding Host guard stays on
+behind HF's proxy — otherwise `/mcp` returns `421 Invalid Host header`) and, if
+`MCP_AUTH_TOKEN` is in the env, the `MCP_AUTH_TOKEN` **secret**. Otherwise add
+that secret yourself in **Settings → Variables and secrets** (the container
+refuses to start without it). Endpoint:
+`https://<user>-scprs-warehouse-mcp.hf.space/mcp`.
+
+> The older `deploy/hf-space/sync.sh` pushes via `git` instead of the API. It
+> needs a **classic Write token** that sets a git credential — an `hf auth login`
+> OAuth token authenticates the API but not git-over-HTTPS, so `sync.sh` fails
+> with "Invalid username or password." Prefer `deploy.py`.
 
 ## Deploy to Fly.io (alternative — usage-based, needs a card)
 
@@ -114,6 +126,24 @@ bridge in `claude_desktop_config.json`:
 Then just ask questions — e.g. *"Which canonical suppliers had the highest total
 value, and what do they mostly supply?"* The client calls `list_marts` /
 `data_dictionary` / `run_sql` under the hood.
+
+## Charts & executive reports
+
+Two tools go beyond raw data (all over the same read-only guard):
+
+- **`generate_chart(sql, kind, title, x, y)`** — runs a `SELECT` and returns a
+  **PNG** (`kind` = `bar`/`line`/`pie`). MCP clients that render images show it
+  inline.
+- **`generate_report(title, sections)`** — each section is a heading + a `SELECT`
+  + optional prose + optional chart; returns a link to a **self-contained HTML
+  report** (charts embedded) served at an unauthenticated `/files/<unguessable>`
+  capability URL, so it opens in any browser or is embeddable in a Copilot card.
+
+Rendering is matplotlib (Agg backend); the server still makes no LLM calls — the
+calling model writes the SQL and the prose. This is what a **Microsoft 365 /
+Copilot Studio agent** uses to produce query results *and* executive reports:
+connect the agent to this MCP server, and it calls `run_sql` for numbers,
+`generate_chart` for a visual, and `generate_report` for a shareable summary.
 
 ## Refreshing the data
 
