@@ -1,0 +1,36 @@
+name: MCP keep-warm
+
+# Pings the remote MCP Space's unauthenticated /healthz on a schedule so the
+# Space never idles to sleep. An asleep Space breaks the Copilot Studio MCP
+# connection (it caches the failed health check and shows the tools as stale),
+# so keeping it awake keeps that connection live. /healthz needs no token.
+on:
+  schedule:
+    - cron: "*/10 * * * *" # every 10 minutes (GitHub may delay under load)
+  workflow_dispatch: # manual "wake it now" button
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mcp-keepwarm
+  cancel-in-progress: true
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping /healthz
+        env:
+          URL: https://munther-hasan-scprs-warehouse-mcp.hf.space/healthz
+        run: |
+          # Retry: if the Space was asleep, the first hit wakes it (slow), the
+          # next confirms it's up. --max-time covers a cold start.
+          for attempt in 1 2 3; do
+            code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 120 "$URL" || echo 000)
+            echo "attempt $attempt: HTTP $code"
+            [ "$code" = "200" ] && exit 0
+            sleep 15
+          done
+          echo "::error::MCP Space /healthz did not return 200 after 3 attempts"
+          exit 1
