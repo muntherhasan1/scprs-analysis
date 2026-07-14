@@ -1,15 +1,20 @@
-"""Optional persistent capture of web-app queries, for building a regression /
-eval corpus from what people actually ask.
+"""Optional persistent capture of front-end queries — the NL web app's questions
+and the MCP tools' calls — for a regression/eval corpus and an audit trail of what
+each front end asked the warehouse.
 
 A Hugging Face Space filesystem is EPHEMERAL (wiped on restart/redeploy), so
 records are appended to a local JSONL and synced to a **private** HF Dataset via
 ``CommitScheduler``. This is a no-op unless ``QUERY_LOG_DATASET`` is set (e.g.
 ``munther-hasan/scprs-query-log``); the Space also needs an HF **write** token in
-``HF_TOKEN``. Capture must never break a user's query, so ``record`` swallows all
+``HF_TOKEN``. Capture must never break a user's query, so writes swallow all
 errors.
 
-We store the question, the generated SQL, and outcome flags (row_count / error /
-empty) — not the full result rows (leaner, and less to worry about privacy-wise).
+Each record carries a ``source`` (``"web"`` for the NL app via ``record``, ``"mcp"``
+for a tool call via ``record_tool``). We store the question or tool call, the SQL,
+and outcome flags (row_count / error / empty) — never the full result rows (leaner,
+and less to worry about privacy-wise). For the MCP path there is no natural-language
+question to capture (that stays on the client/Copilot side); the SQL the client sent
+is what we can see and record.
 """
 
 from __future__ import annotations
@@ -21,7 +26,27 @@ import threading
 from pathlib import Path
 
 _LOCAL = Path(os.environ.get("QUERY_LOG_DIR", "query_logs"))
-_LOGFILE = _LOCAL / "queries.jsonl"
+
+
+def _logfile_name() -> str:
+    """Per-writer log filename.
+
+    Independent Spaces (the web app and the MCP server) can point at the SAME
+    dataset, but ``CommitScheduler`` syncs a folder by overwriting each file
+    path — so if both wrote ``queries.jsonl`` they'd clobber each other's log.
+    Namespace the file by the HF ``SPACE_ID`` (auto-set per Space) so each writer
+    owns its own ``queries-<space>.jsonl``; records still carry ``source`` for
+    filtering once merged. Override explicitly with ``QUERY_LOG_FILE``."""
+    name = os.environ.get("QUERY_LOG_FILE")
+    if name:
+        return name
+    space = os.environ.get("SPACE_ID")
+    if space:
+        return "queries-" + space.replace("/", "-") + ".jsonl"
+    return "queries.jsonl"
+
+
+_LOGFILE = _LOCAL / _logfile_name()
 _scheduler = None
 _init_lock = threading.Lock()
 
@@ -51,15 +76,33 @@ def _scheduler_or_none():
     return _scheduler
 
 
-def record(question: str, out: dict, prior_turns: int = 0) -> None:
-    """Append one turn's capture to the log. Never raises."""
+def _now() -> str:
+    return datetime.datetime.now(datetime.timezone.utc).isoformat()
+
+
+def _append(rec: dict) -> None:
+    """Append one record to the JSONL and let the scheduler sync it. Never raises.
+
+    A no-op when ``QUERY_LOG_DATASET`` is unset (no scheduler)."""
     try:
         scheduler = _scheduler_or_none()
         if scheduler is None:
             return
-        result = out.get("result") or {}
-        rec = {
-            "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        # Hold the scheduler's lock so a commit never races a half-written line.
+        with scheduler.lock:
+            with _LOGFILE.open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(rec, default=str) + "\n")
+    except Exception:  # noqa: BLE001, S110  # nosec B110 — capture must not break the app
+        pass
+
+
+def record(question: str, out: dict, prior_turns: int = 0) -> None:
+    """Append one NL web-app turn's capture to the log. Never raises."""
+    result = out.get("result") or {}
+    _append(
+        {
+            "ts": _now(),
+            "source": "web",
             "question": question,
             "sql": out.get("sql"),
             "row_count": result.get("row_count"),
@@ -67,9 +110,14 @@ def record(question: str, out: dict, prior_turns: int = 0) -> None:
             "empty": ("error" not in result) and result.get("row_count") == 0,
             "prior_turns": prior_turns,
         }
-        # Hold the scheduler's lock so a commit never races a half-written line.
-        with scheduler.lock:
-            with _LOGFILE.open("a", encoding="utf-8") as fh:
-                fh.write(json.dumps(rec, default=str) + "\n")
-    except Exception:  # noqa: BLE001, S110  # nosec B110 — capture must not break the app
-        pass
+    )
+
+
+def record_tool(tool: str, *, source: str = "mcp", **fields) -> None:
+    """Append one MCP tool call to the audit log. Never raises.
+
+    ``fields`` are tool-specific — e.g. ``sql``, ``row_count``, ``error`` for
+    ``run_sql``; ``kind``/``title`` for ``generate_chart``; ``title``/``sqls`` for
+    ``generate_report``. Result rows are never recorded, mirroring ``record``'s
+    privacy posture."""
+    _append({"ts": _now(), "source": source, "tool": tool, **fields})

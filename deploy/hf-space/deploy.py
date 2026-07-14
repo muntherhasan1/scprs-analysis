@@ -44,6 +44,7 @@ COPIES = [
     ("requirements-mcp.txt", "requirements-mcp.txt"),
     ("src/mcp_server.py", "src/mcp_server.py"),
     ("src/warehouse_query.py", "src/warehouse_query.py"),  # shared query guard
+    ("src/query_log.py", "src/query_log.py"),  # optional tool-call audit log
     ("src/charting.py", "src/charting.py"),  # generate_chart / generate_report
     ("src/__init__.py", "src/__init__.py"),
     ("data/warehouse.db", "data/warehouse.db"),  # LFS via .gitattributes
@@ -84,6 +85,11 @@ def main() -> None:
     token = os.environ.get("MCP_AUTH_TOKEN")
     if token:
         api.add_space_secret(repo, "MCP_AUTH_TOKEN", token)
+    # Optional tool-call audit log: set the (non-secret) dataset id here; the HF
+    # **write** token it needs (HF_TOKEN) stays a Space secret you add yourself.
+    dataset = os.environ.get("QUERY_LOG_DATASET")
+    if dataset:
+        api.add_space_variable(repo, "QUERY_LOG_DATASET", dataset)
 
     print(f"Deployed: {commit.commit_url if hasattr(commit, 'commit_url') else commit}")
     print(f"Endpoint: https://{default_host}/mcp")

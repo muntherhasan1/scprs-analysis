@@ -157,3 +157,40 @@ def test_query_log_records_and_never_raises(tmp_path, monkeypatch):
     # Disabled (no dataset configured) is a silent no-op that must never raise.
     monkeypatch.setattr(query_log, "_scheduler_or_none", lambda: None)
     query_log.record("anything", {})
+
+
+def test_record_tool_captures_mcp_call(tmp_path, monkeypatch):
+    import json
+    import threading
+
+    from src import query_log
+
+    class _Dummy:
+        lock = threading.Lock()
+
+    monkeypatch.setattr(query_log, "_LOGFILE", tmp_path / "queries.jsonl")
+    monkeypatch.setattr(query_log, "_scheduler_or_none", lambda: _Dummy())
+    query_log.record_tool("run_sql", sql="SELECT 1", row_count=3, error=None)
+    rec = json.loads((tmp_path / "queries.jsonl").read_text(encoding="utf-8").splitlines()[0])
+    assert rec["source"] == "mcp" and rec["tool"] == "run_sql"
+    assert rec["sql"] == "SELECT 1" and rec["row_count"] == 3
+
+    # Disabled is a silent no-op that must never raise.
+    monkeypatch.setattr(query_log, "_scheduler_or_none", lambda: None)
+    query_log.record_tool("run_sql", sql="SELECT 1")
+
+
+def test_logfile_name_namespaced_per_space(monkeypatch):
+    from src import query_log
+
+    monkeypatch.delenv("QUERY_LOG_FILE", raising=False)
+    monkeypatch.delenv("SPACE_ID", raising=False)
+    assert query_log._logfile_name() == "queries.jsonl"
+    # Two different Spaces must not collide on one dataset path.
+    monkeypatch.setenv("SPACE_ID", "munther-hasan/scprs-warehouse-mcp")
+    assert query_log._logfile_name() == "queries-munther-hasan-scprs-warehouse-mcp.jsonl"
+    monkeypatch.setenv("SPACE_ID", "munther-hasan/scprs-warehouse-web")
+    assert query_log._logfile_name() == "queries-munther-hasan-scprs-warehouse-web.jsonl"
+    # Explicit override wins.
+    monkeypatch.setenv("QUERY_LOG_FILE", "custom.jsonl")
+    assert query_log._logfile_name() == "custom.jsonl"

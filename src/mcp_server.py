@@ -49,6 +49,7 @@ from pathlib import Path
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 
+from . import query_log
 from . import warehouse_query as wq
 
 mcp = FastMCP("scprs-warehouse")
@@ -102,7 +103,14 @@ def run_sql(query: str, max_rows: int = 200) -> dict:
     read-only statement is permitted; the connection cannot write. Results are
     capped at ``max_rows`` (1–1000); ``truncated`` flags when the cap was hit.
     """
-    return wq.run_select(query, max_rows=max_rows)
+    result = wq.run_select(query, max_rows=max_rows)
+    query_log.record_tool(
+        "run_sql",
+        sql=query,
+        row_count=result.get("row_count"),
+        error=result.get("error"),
+    )
+    return result
 
 
 @mcp.tool()
@@ -122,6 +130,14 @@ def generate_chart(sql: str, kind: str = "bar", title: str = "", x: str = "", y:
     from . import charting
 
     result = wq.run_select(sql, max_rows=100)
+    query_log.record_tool(
+        "generate_chart",
+        sql=sql,
+        row_count=result.get("row_count"),
+        error=result.get("error"),
+        kind=kind,
+        title=title,
+    )
     if "error" in result:
         raise ValueError(result["error"])
     png = charting.render_chart(
@@ -160,11 +176,13 @@ def generate_report(title: str, sections_json: str) -> dict:
         raise ValueError("sections_json must be a JSON array of {heading, sql, narrative, chart}")
 
     built = []
+    section_sqls = []
     for s in sections:
         if not isinstance(s, dict):
             continue
         heading = str(s.get("heading", ""))
         sql = str(s.get("sql", ""))
+        section_sqls.append(sql)
         narrative = str(s.get("narrative", ""))
         chart = str(s.get("chart", "none")).lower()
         res = wq.run_select(sql, max_rows=200)
@@ -194,6 +212,12 @@ def generate_report(title: str, sections_json: str) -> dict:
             }
         )
     html_doc = charting.build_report_html(title, built)
+    query_log.record_tool(
+        "generate_report",
+        title=title,
+        sections=len(built),
+        sqls=section_sqls,
+    )
     return {
         "report_url": _save_capability_file(html_doc.encode("utf-8"), ".html"),
         "sections": len(built),

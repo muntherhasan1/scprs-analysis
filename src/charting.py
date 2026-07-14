@@ -205,7 +205,60 @@ def _looks_numeric(rows: list[dict], col: str) -> bool:
     return bool(seen) and all(_to_float(v) is not None for v in seen)
 
 
+# Money columns get a $ and exactly two decimals; count-like columns that happen
+# to share a hint word (total_documents, line_count) stay plain integers.
+_MONEY_HINTS = (
+    "total",
+    "spend",
+    "amount",
+    "grand",
+    "value",
+    "price",
+    "cost",
+    "dollar",
+    "revenue",
+    "expenditure",
+    "budget",
+    "paid",
+)
+_COUNTISH = ("count", "documents", "lines", "records", "num", "qty", "quantity", "rows", "distinct")
+_YEAR_COLS = ("fiscal_year", "calendar_year", "year")
+
+
+def _fmt_cell(col: str, v) -> str:
+    """Format one table cell. Money → ``$1,234,567.89``; identifiers/years → raw
+    digits (no grouping); other numbers → grouped, 2 decimals only if fractional.
+    Non-numeric values are HTML-escaped as-is."""
+    if v is None:
+        return ""
+    f = _to_float(v)
+    if f is None:
+        return html.escape(str(v))
+    name = col.lower()
+    if name == "id" or name.endswith("_id") or "year" in name or "zip" in name or "fips" in name:
+        return html.escape(str(int(f)) if f == int(f) else str(v))
+    if any(h in name for h in _MONEY_HINTS) and not any(c in name for c in _COUNTISH):
+        return f"${f:,.2f}"
+    return f"{int(f):,}" if f == int(f) else f"{f:,.2f}"
+
+
+def _order_rows(columns: list[str], rows: list[dict]) -> list[dict]:
+    """Present year-keyed tables newest-first. Only reorders when exactly one year
+    column is a unique key (one row per year) — a time series — so multi-key tables
+    (e.g. supplier×year) keep the query's order and charts (built from the original
+    rows) are unaffected."""
+    year_cols = [c for c in columns if c.lower() in _YEAR_COLS]
+    if len(year_cols) != 1:
+        return rows
+    yc = year_cols[0]
+    yv = [_to_float(r.get(yc)) for r in rows]
+    if any(v is None for v in yv) or len(set(yv)) != len(yv):
+        return rows
+    return sorted(rows, key=lambda r: _to_float(r.get(yc)) or 0.0, reverse=True)
+
+
 def _html_table(columns: list[str], rows: list[dict], max_rows: int = 15) -> str:
+    rows = _order_rows(columns, rows)
     numeric = {c for c in columns if _looks_numeric(rows, c)}
     head = "".join(
         f'<th class="{"num" if c in numeric else ""}">{html.escape(str(c))}</th>' for c in columns
@@ -213,8 +266,7 @@ def _html_table(columns: list[str], rows: list[dict], max_rows: int = 15) -> str
     body = []
     for r in rows[:max_rows]:
         cells = "".join(
-            f'<td class="{"num" if c in numeric else ""}">'
-            f"{'' if r.get(c) is None else html.escape(str(r.get(c)))}</td>"
+            f'<td class="{"num" if c in numeric else ""}">{_fmt_cell(c, r.get(c))}</td>'
             for c in columns
         )
         body.append(f"<tr>{cells}</tr>")

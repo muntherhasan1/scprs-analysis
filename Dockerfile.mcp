@@ -27,12 +27,15 @@ ENV WAREHOUSE_DB=/data/warehouse.db \
     PORT=8000 \
     PYTHONUNBUFFERED=1 \
     MPLCONFIGDIR=/tmp/mpl \
-    REPORTS_DIR=/app/reports
-# MCP_AUTH_TOKEN is NOT set here — provide it at deploy time.
+    REPORTS_DIR=/app/reports \
+    QUERY_LOG_DIR=/app/query_logs
+# MCP_AUTH_TOKEN is NOT set here — provide it at deploy time. The tool-call audit
+# log stays off until QUERY_LOG_DATASET (+ an HF write token in HF_TOKEN) is set.
 
-# Writable dir for generate_report output (/app is root-owned; the non-root
-# appuser needs its own writable folder). Matches REPORTS_DIR above.
-RUN mkdir -p /app/reports && chown appuser /app/reports
+# Writable dirs for the non-root appuser (/app is root-owned): generate_report
+# output (REPORTS_DIR) and the optional query audit log (QUERY_LOG_DIR).
+RUN mkdir -p /app/reports /app/query_logs \
+    && chown appuser /app/reports /app/query_logs
 
 USER appuser
 EXPOSE 8000
