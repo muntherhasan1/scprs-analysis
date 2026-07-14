@@ -39,6 +39,12 @@ from pathlib import Path
 
 from . import scprs, supplier_master
 
+
+class DwBuildError(RuntimeError):
+    """An error-severity data-quality check failed; the build is gated so the bad
+    warehouse is never exported/published downstream."""
+
+
 SOURCE_DB = scprs.DATA_DIR / "scprs.db"
 WAREHOUSE_DB = scprs.DATA_DIR / "warehouse.db"
 SERVE_DB = scprs.DATA_DIR / "warehouse-serve.db"  # slim, serving-only copy (gold + star)
@@ -1240,20 +1246,28 @@ def build_all(
         log(f"[{batch}] data quality...")
         dq = run_dq(con, batch, ts)
         fin = datetime.now().isoformat(timespec="seconds")
+        # Error-severity checks GATE the build: record the batch as failed (not "ok")
+        # so downstream serve-export/publish and the CLI exit code refuse to proceed.
+        errors = [d for d in dq if not d["passed"] and d["severity"] == "error"]
+        status = "error" if errors else "ok"
         con.execute(
             "UPDATE dw_batch SET finished_at=?, status=?, row_counts=? WHERE batch_id=?",
-            (fin, "ok", json.dumps(counts), batch),
+            (fin, status, json.dumps(counts), batch),
         )
         con.commit()
     finally:
         con.close()
-    errors = [d for d in dq if not d["passed"] and d["severity"] == "error"]
     warns = [d for d in dq if not d["passed"] and d["severity"] == "warn"]
     log(f"[{batch}] done. rows={counts}")
     if warns:
         log(f"[{batch}] DQ warnings: {[(d['check'], d['failed']) for d in warns]}")
     if errors:
-        log(f"[{batch}] DQ ERRORS: {[(d['check'], d['failed']) for d in errors]}")
+        failed = [(d["check"], d["failed"]) for d in errors]
+        log(f"[{batch}] DQ ERRORS (build GATED, not exported): {failed}")
+        raise DwBuildError(
+            f"{len(errors)} error-severity data-quality check(s) failed: {failed}. "
+            "Batch recorded as 'error'; fix the source data and rebuild before publishing."
+        )
     return {"batch": batch, "counts": counts, "dq": dq, "errors": errors}
 
 

@@ -238,7 +238,8 @@ def build_details_db(
 ) -> dict:
     """Drill into each document's PO Details page and load the three detail tables.
 
-    Idempotent per document: reloading a document replaces its detail rows.
+    Idempotent per (business_unit, document): reloading a document replaces its
+    detail rows for that business unit only.
     """
     import pandas as pd
 
@@ -313,8 +314,11 @@ def build_details_db(
             ("document_pos", pos),
         ):
             # `table` is an internal constant (loop above), never user input; values parameterized.
-            q = f"DELETE FROM {table} WHERE purchase_document IN ({ph})"  # noqa: S608 # nosec
-            con.execute(q, loaded)
+            # Scope the delete to THIS business unit: the detail grain is
+            # (business_unit, purchase_document), so a document number shared across
+            # two BUs must not have one BU's reload wipe the other's rows.
+            q = f"DELETE FROM {table} WHERE business_unit = ? AND purchase_document IN ({ph})"  # noqa: S608 # nosec
+            con.execute(q, [business_unit, *loaded])
             frame = pd.DataFrame(rows).reindex(columns=_DETAILS_SCHEMA[table])
             frame.to_sql(table, con, if_exists="append", index=False)
         con.commit()

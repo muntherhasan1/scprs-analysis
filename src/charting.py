@@ -222,6 +222,9 @@ _MONEY_HINTS = (
     "paid",
 )
 _COUNTISH = ("count", "documents", "lines", "records", "num", "qty", "quantity", "rows", "distinct")
+# Percent columns (e.g. pct_noncompetitive_value, value_pct_change) share money hint
+# words but are percentages — render them with % rather than $.
+_PCTISH = ("pct", "percent", "share")
 _YEAR_COLS = ("fiscal_year", "calendar_year", "year")
 
 
@@ -237,6 +240,8 @@ def _fmt_cell(col: str, v) -> str:
     name = col.lower()
     if name == "id" or name.endswith("_id") or "year" in name or "zip" in name or "fips" in name:
         return html.escape(str(int(f)) if f == int(f) else str(v))
+    if any(p in name for p in _PCTISH):  # percentages before money (they share hints)
+        return f"{f:,.1f}%"
     if any(h in name for h in _MONEY_HINTS) and not any(c in name for c in _COUNTISH):
         return f"${f:,.2f}"
     return f"{int(f):,}" if f == int(f) else f"{f:,.2f}"

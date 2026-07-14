@@ -253,6 +253,34 @@ def test_warehouse_build(tmp_path):
     assert errors == []
 
 
+def test_build_gated_on_dq_error(tmp_path, monkeypatch):
+    import pytest
+
+    src, wh = tmp_path / "scprs.db", tmp_path / "warehouse.db"
+    _seed_source(src)
+    real_dq = warehouse.run_dq
+
+    def fake_dq(con, batch, ts):  # inject an error-severity failure
+        res = real_dq(con, batch, ts)
+        res.append(
+            {"check": "forced", "scope": "t", "passed": False, "failed": 1, "severity": "error"}
+        )
+        return res
+
+    monkeypatch.setattr(warehouse, "run_dq", fake_dq)
+    with pytest.raises(warehouse.DwBuildError):
+        warehouse.build_all(
+            wh_path=wh, source_path=src, enrichment_db=tmp_path / "n.db", log=lambda *a: None
+        )
+    # The batch is recorded as failed, not "ok", so downstream export/publish refuses it.
+    con = sqlite3.connect(wh)
+    status = con.execute("SELECT status FROM dw_batch ORDER BY started_at DESC LIMIT 1").fetchone()[
+        0
+    ]
+    con.close()
+    assert status == "error"
+
+
 def test_export_serve_db_is_slim_and_self_contained(tmp_path):
     src, wh = tmp_path / "scprs.db", tmp_path / "warehouse.db"
     serve = tmp_path / "warehouse-serve.db"

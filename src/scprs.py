@@ -191,16 +191,20 @@ def download_range(
         if res.no_records:
             log(f"  {_fmt_date(a)}..{_fmt_date(b)}: no records")
             return
-        if not res.truncated or a == b or depth >= max_depth:
-            df = load_extract(res.path)
-            if res.truncated:
-                warnings.append(f"{_fmt_date(a)}..{_fmt_date(b)} exceeds {ROW_CAP:,} rows; partial")
+        df = load_extract(res.path)
+        # The site's truncation dialog is detected by keyword match (download_extract);
+        # if FI$Cal ever rewords it, fall back to the row count so a cap-hit slice is
+        # never mistaken for a complete one (which would be silent data loss).
+        capped = res.truncated or len(df) >= ROW_CAP
+        if not capped or a == b or depth >= max_depth:
+            if capped:
+                warnings.append(f"{_fmt_date(a)}..{_fmt_date(b)} hit {ROW_CAP:,}-row cap; partial")
                 log(f"  {_fmt_date(a)}..{_fmt_date(b)}: TRUNCATED, kept first {ROW_CAP:,}")
             else:
                 log(f"  {_fmt_date(a)}..{_fmt_date(b)}: {len(df)} rows")
             frames.append(df)
             return
-        # Truncated and splittable: bisect on date into two disjoint halves.
+        # Over the cap and splittable: bisect on date into two disjoint halves.
         mid = a + (b - a) / 2
         log(f"  {_fmt_date(a)}..{_fmt_date(b)}: >cap, splitting at {_fmt_date(mid)}")
         rec(a, mid, depth + 1)

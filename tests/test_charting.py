@@ -76,6 +76,9 @@ def test_fmt_cell_money_years_and_ids():
     assert charting._fmt_cell("supplier_id", 12345.0) == "12345"
     # Count-like column that shares a hint word stays a plain grouped integer.
     assert charting._fmt_cell("total_documents", 1500) == "1,500"
+    # Percent columns share money hints ("value") but must render as % not $.
+    assert charting._fmt_cell("pct_noncompetitive_value", 100.0) == "100.0%"
+    assert charting._fmt_cell("value_pct_change", -12.5) == "-12.5%"
     # Non-numeric passes through (escaped).
     assert charting._fmt_cell("supplier", "Acme") == "Acme"
 

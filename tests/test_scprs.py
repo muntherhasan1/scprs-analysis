@@ -70,3 +70,30 @@ def test_download_range_reraises_when_single_day_times_out(monkeypatch):
     monkeypatch.setattr(scprs, "download_extract", always_timeout)
     with pytest.raises(scprs.ExtractTimeout):
         scprs.download_range("3540", "07/01/2025", "07/01/2025")  # unsplittable single day
+
+
+def test_download_range_splits_on_row_cap_without_dialog(monkeypatch):
+    """If the truncation dialog text ever changes, a cap-hit slice must still be
+    split (detected by row count) rather than silently kept as complete."""
+    import pandas as pd
+
+    monkeypatch.setattr(scprs, "ROW_CAP", 10)  # keep test frames tiny
+    calls = []
+
+    def fake_extract(bu, frm, to, *, out_dir=None):
+        a, b = scprs._parse_date(frm), scprs._parse_date(to)
+        calls.append((frm, to))
+        # truncated flag deliberately False (simulates a reworded dialog); path
+        # encodes the day span so fake_load can size the frame.
+        return scprs.Extract(bu, frm, to, str((b - a).days), False, False)
+
+    def fake_load(path):
+        days = int(path)
+        n = scprs.ROW_CAP if days > 15 else 3  # wide span hits the cap
+        return pd.DataFrame({"x": range(n)})
+
+    monkeypatch.setattr(scprs, "download_extract", fake_extract)
+    monkeypatch.setattr(scprs, "load_extract", fake_load)
+    df, warnings = scprs.download_range("3540", "07/01/2025", "06/30/2026")
+    assert len(calls) > 1  # bisected on the row count despite no dialog flag
+    assert warnings == []  # leaves are under the cap, so nothing kept partial

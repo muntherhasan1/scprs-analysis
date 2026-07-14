@@ -212,3 +212,35 @@ def test_enrich_acq_type_filter(tmp_path, monkeypatch):
     assert r["days_remaining"] == 0
     assert set(calls) == {"02/18/2021", "05/20/2021"}
     assert "07/01/2021" not in calls
+
+
+def test_build_details_delete_scoped_to_business_unit(tmp_path, monkeypatch):
+    """Two BUs sharing a document number must not clobber each other's detail rows:
+    reloading BU 2222's SHARED doc must leave BU 1111's SHARED rows intact."""
+    import sqlite3
+
+    db = tmp_path / "scprs.db"
+
+    def fake_docs(bu, frm, to, *, max_docs=None, log=print):
+        return [
+            {
+                "document": "SHARED",
+                "header": {"purchase_document": "SHARED", "version": "1", "grand_total": "$10"},
+                "lines": [{"line_number": "1", "item_description": f"item-for-{bu}"}],
+                "pos": [],
+            }
+        ]
+
+    monkeypatch.setattr(scprs, "collect_po_details", fake_docs)
+    model.build_details_db("1111", "01/01/2026", "01/31/2026", db_path=db, log=lambda *a: None)
+    model.build_details_db("2222", "01/01/2026", "01/31/2026", db_path=db, log=lambda *a: None)
+
+    con = sqlite3.connect(db)
+    bus = {
+        r[0]
+        for r in con.execute(
+            "SELECT DISTINCT business_unit FROM document_lines WHERE purchase_document='SHARED'"
+        )
+    }
+    con.close()
+    assert bus == {"1111", "2222"}  # BU 2222's reload did NOT delete BU 1111's shared-doc rows
