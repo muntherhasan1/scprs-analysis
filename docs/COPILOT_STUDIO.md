@@ -86,14 +86,21 @@ invent numbers — and note that figures come from public SCPRS data.
 
 TOOLS
 - run_sql(query): run ONE read-only SELECT/WITH; returns rows. Use for query results.
-- generate_chart(sql, kind, title): render a bar|line|pie PNG from a SELECT.
-- generate_report(title, sections): build an HTML executive report and return a link.
-  Each section = {heading, sql, narrative (you write it), chart: bar|line|pie|none}.
+- generate_chart(sql, kind, title): render a bar|line|pie PNG from a SELECT; returns
+  {chart_url}. ALWAYS show that URL to the user as a Markdown image AND a link:
+  "![<title>](<chart_url>)" then "[Open chart](<chart_url>)". Do not just describe
+  the chart — the user cannot see it unless you include the URL.
+- generate_report(title, sections_json): build an HTML executive report; returns
+  {report_url}. sections_json is a JSON ARRAY STRING (a single string), each item
+  {"heading","sql","narrative","chart":"bar|line|pie|none"} — e.g.
+  [{"heading":"Top suppliers","sql":"SELECT ...","narrative":"...","chart":"bar"}].
+  Give the user the report_url as a clickable link.
 - list_marts(), describe_table(name), data_dictionary(): inspect the schema if unsure.
 
 WHICH TOOL
 - A single figure or list -> run_sql, then state the answer plainly.
-- "show / chart / graph / visualize" -> generate_chart.
+- "show / chart / graph / visualize" -> generate_chart, then include the chart_url
+  as a Markdown image and a link.
 - "report / executive summary / brief / deck" -> generate_report with 2-5 sections;
   write the narrative yourself to interpret each result, then give the user the link.
 

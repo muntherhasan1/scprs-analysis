@@ -48,7 +48,6 @@ from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
-from pydantic import BaseModel, Field
 
 from . import warehouse_query as wq
 
@@ -107,18 +106,19 @@ def run_sql(query: str, max_rows: int = 200) -> dict:
 
 
 @mcp.tool()
-def generate_chart(sql: str, kind: str = "bar", title: str = "", x: str = "", y: str = ""):
-    """Render a chart PNG from one read-only ``SELECT`` and return it as an image.
+def generate_chart(sql: str, kind: str = "bar", title: str = "", x: str = "", y: str = "") -> dict:
+    """Render a chart from one read-only ``SELECT`` and return a link to the PNG.
 
     ``kind`` is ``bar``, ``line``, or ``pie``. By default the first column is the
     label axis and the first numeric column is the value axis; override with ``x``
-    / ``y`` (column names). The query runs through the same read-only guard as
-    ``run_sql`` — write the SQL to return the label + value columns you want
-    plotted, e.g. ``SELECT canonical_name, total_value FROM
+    / ``y`` (column names). Write the SQL to return the label + value columns you
+    want plotted, e.g. ``SELECT canonical_name, total_value FROM
     gold_canonical_supplier_spend ORDER BY total_value DESC LIMIT 10``.
-    """
-    from mcp.server.fastmcp import Image
 
+    Returns ``{"chart_url": ...}`` — a public image URL. Show it to the user (as a
+    Markdown image ``![title](chart_url)`` and/or a clickable link); a URL renders
+    in far more clients than inline MCP image content does.
+    """
     from . import charting
 
     result = wq.run_select(sql, max_rows=100)
@@ -127,37 +127,51 @@ def generate_chart(sql: str, kind: str = "bar", title: str = "", x: str = "", y:
     png = charting.render_chart(
         result["columns"], result["rows"], kind=kind, title=title, x=x or None, y=y or None
     )
-    return Image(data=png, format="png")
-
-
-class ReportSection(BaseModel):
-    """One section of an executive report."""
-
-    heading: str = Field(description="Section title")
-    sql: str = Field(description="A single read-only SELECT/WITH for this section's data")
-    narrative: str = Field(default="", description="Optional prose commentary (you write this)")
-    chart: str = Field(default="none", description="bar | line | pie | none")
+    return {"chart_url": _save_capability_file(png, ".png")}
 
 
 @mcp.tool()
-def generate_report(title: str, sections: list[ReportSection]) -> dict:
+def generate_report(title: str, sections_json: str) -> dict:
     """Build a self-contained HTML executive report and return its URL.
 
-    Each section carries a heading, a read-only ``SELECT``, optional ``narrative``
-    prose (which YOU, the calling model, should write to interpret the numbers),
-    and an optional ``chart`` (``bar``/``line``/``pie``). Each section's SQL is run
-    through the read-only guard; charts are embedded in the HTML (no external
-    assets). Returns ``{report_url, sections}`` — a link to a shareable report page.
+    ``sections_json`` is a JSON **array string** — a flat string param (Copilot
+    Studio and most clients build these far more reliably than nested objects).
+    Each item is an object:
+      ``{"heading": str, "sql": str, "narrative": str, "chart": "bar|line|pie|none"}``
+    where ``sql`` is a single read-only ``SELECT``/``WITH`` and ``narrative`` is
+    prose YOU write to interpret the numbers. Example::
+
+        [{"heading":"Top suppliers","sql":"SELECT canonical_name, SUM(grand_total)
+          AS spend FROM gold_document GROUP BY canonical_name ORDER BY spend DESC
+          LIMIT 10","narrative":"Golden State Connect leads.","chart":"bar"}]
+
+    Each section's SQL runs through the read-only guard; charts are embedded in the
+    HTML (no external assets). Returns ``{report_url, sections}`` — a shareable link.
     """
+    import json
+
     from . import charting
+
+    try:
+        sections = json.loads(sections_json)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"sections_json must be valid JSON: {exc}") from exc
+    if not isinstance(sections, list):
+        raise ValueError("sections_json must be a JSON array of {heading, sql, narrative, chart}")
 
     built = []
     for s in sections:
-        res = wq.run_select(s.sql, max_rows=200)
+        if not isinstance(s, dict):
+            continue
+        heading = str(s.get("heading", ""))
+        sql = str(s.get("sql", ""))
+        narrative = str(s.get("narrative", ""))
+        chart = str(s.get("chart", "none")).lower()
+        res = wq.run_select(sql, max_rows=200)
         if "error" in res:
             built.append(
                 {
-                    "heading": s.heading,
+                    "heading": heading,
                     "narrative": f"(query error: {res['error']})",
                     "columns": [],
                     "rows": [],
@@ -165,24 +179,25 @@ def generate_report(title: str, sections: list[ReportSection]) -> dict:
             )
             continue
         png = None
-        if (s.chart or "none").lower() in charting.CHART_KINDS:
+        if chart in charting.CHART_KINDS:
             try:
-                png = charting.render_chart(
-                    res["columns"], res["rows"], kind=s.chart.lower(), title=s.heading
-                )
+                png = charting.render_chart(res["columns"], res["rows"], kind=chart, title=heading)
             except ValueError:
                 png = None  # not chartable (e.g. no numeric column) — table only
         built.append(
             {
-                "heading": s.heading,
-                "narrative": s.narrative,
+                "heading": heading,
+                "narrative": narrative,
                 "columns": res["columns"],
                 "rows": res["rows"],
                 "chart_png": png,
             }
         )
     html_doc = charting.build_report_html(title, built)
-    return {"report_url": _save_report(html_doc), "sections": len(built)}
+    return {
+        "report_url": _save_capability_file(html_doc.encode("utf-8"), ".html"),
+        "sections": len(built),
+    }
 
 
 def _public_base_url() -> str:
@@ -201,11 +216,15 @@ def _public_base_url() -> str:
     return f"http://127.0.0.1:{os.environ.get('PORT', '8000')}"
 
 
-def _save_report(html_doc: str) -> str:
-    """Write a report to REPORTS_DIR under an unguessable name; return its URL."""
+def _save_capability_file(data: bytes, suffix: str) -> str:
+    """Write bytes to REPORTS_DIR under an unguessable name; return its /files/ URL.
+
+    The random name is the access token (the /files/ path is unauthenticated), so
+    charts/reports can be opened inline by a browser or Copilot.
+    """
     REPORTS_DIR.mkdir(parents=True, exist_ok=True)
-    name = secrets.token_urlsafe(18) + ".html"
-    (REPORTS_DIR / name).write_text(html_doc, encoding="utf-8")
+    name = secrets.token_urlsafe(18) + suffix
+    (REPORTS_DIR / name).write_bytes(data)
     return f"{_public_base_url()}/files/{name}"
 
 
@@ -303,7 +322,8 @@ def _serve_file(request):
     path = REPORTS_DIR / name
     if not path.is_file():
         return PlainTextResponse("not found", status_code=404)
-    return FileResponse(str(path), media_type="text/html")
+    media = "image/png" if name.endswith(".png") else "text/html"
+    return FileResponse(str(path), media_type=media)
 
 
 def serve_http() -> None:
