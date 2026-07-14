@@ -41,6 +41,7 @@ from . import scprs, supplier_master
 
 SOURCE_DB = scprs.DATA_DIR / "scprs.db"
 WAREHOUSE_DB = scprs.DATA_DIR / "warehouse.db"
+SERVE_DB = scprs.DATA_DIR / "warehouse-serve.db"  # slim, serving-only copy (gold + star)
 ENRICHMENT_DB = scprs.DATA_DIR / "supplier_enrichment.db"  # web-researched supplier profiles
 DEPARTMENTS_CSV = Path(__file__).resolve().parent.parent / "references" / "departments.csv"
 ABBREVIATIONS_CSV = Path(__file__).resolve().parent.parent / "references" / "abbreviations.csv"
@@ -218,14 +219,14 @@ def build_silver(con: sqlite3.Connection, batch: str, ts: str) -> dict:
         SELECT
           p.business_unit,
           p.purchase_document,
-          COALESCE({d_col('department_name')}, p.department_name, 'Unknown') AS department_name,
+          COALESCE({d_col("department_name")}, p.department_name, 'Unknown') AS department_name,
           COALESCE(p.supplier_id, 'UNKNOWN')                                 AS supplier_id,
-          COALESCE({d_col('supplier_name')}, p.supplier_name, 'Unknown')     AS supplier_name,
-          COALESCE({d_col('buyer_name')}, p.buyer_name, 'Unknown')           AS buyer_name,
-          COALESCE({d_col('buyer_email')}, p.buyer_email, '')                AS buyer_email,
+          COALESCE({d_col("supplier_name")}, p.supplier_name, 'Unknown')     AS supplier_name,
+          COALESCE({d_col("buyer_name")}, p.buyer_name, 'Unknown')           AS buyer_name,
+          COALESCE({d_col("buyer_email")}, p.buyer_email, '')                AS buyer_email,
           -- acquisition type: prefer drill-down; else split summary "type_subtype"
           COALESCE(
-            {d_col('acquisition_type')},
+            {d_col("acquisition_type")},
             CASE WHEN instr(p.acquisition_type_sub_type, '_') > 0
                  THEN substr(p.acquisition_type_sub_type, 1, instr(p.acquisition_type_sub_type,'_')-1)
                  ELSE p.acquisition_type_sub_type END,
@@ -235,23 +236,23 @@ def build_silver(con: sqlite3.Connection, batch: str, ts: str) -> dict:
                  THEN substr(p.acquisition_type_sub_type, instr(p.acquisition_type_sub_type,'_')+1)
                  ELSE NULL END,
             'N/A') AS acquisition_sub_type,
-          COALESCE({d_col('acquisition_method')}, p.acquisition_method, 'Unknown') AS acquisition_method,
+          COALESCE({d_col("acquisition_method")}, p.acquisition_method, 'Unknown') AS acquisition_method,
           CASE
-            WHEN COALESCE({d_col('acquisition_method')}, p.acquisition_method) LIKE '%NON-COMPETITIVELY BID%'
+            WHEN COALESCE({d_col("acquisition_method")}, p.acquisition_method) LIKE '%NON-COMPETITIVELY BID%'
               THEN 'Non-Competitive'
-            WHEN COALESCE({d_col('acquisition_method')}, p.acquisition_method) LIKE '%COMPETITIVE%'
+            WHEN COALESCE({d_col("acquisition_method")}, p.acquisition_method) LIKE '%COMPETITIVE%'
               THEN 'Competitive'
             ELSE 'Other' END AS competitive_flag,
-          COALESCE({d_col('status')}, p.status)               AS status,
-          CAST(COALESCE({d_col('version')}, p.version) AS INTEGER) AS version,
-          {d_col('bill_code')}                                AS bill_code,
-          COALESCE({d_col('lpa_contract_id')}, p.lpa_contract_id) AS lpa_contract_id,
-          COALESCE({d_col('start_date')}, p.start_date)       AS start_date,
-          COALESCE({d_col('end_date')}, p.end_date)           AS end_date,
-          {d_col('merchandise_amount')}                       AS merchandise_amount,
-          {d_col('freight_tax_misc')}                         AS freight_tax_misc,
-          COALESCE({d_col('grand_total')}, p.grand_total)     AS grand_total,
-          CASE WHEN {('d.purchase_document' if det else 'NULL')} IS NOT NULL THEN 1 ELSE 0 END
+          COALESCE({d_col("status")}, p.status)               AS status,
+          CAST(COALESCE({d_col("version")}, p.version) AS INTEGER) AS version,
+          {d_col("bill_code")}                                AS bill_code,
+          COALESCE({d_col("lpa_contract_id")}, p.lpa_contract_id) AS lpa_contract_id,
+          COALESCE({d_col("start_date")}, p.start_date)       AS start_date,
+          COALESCE({d_col("end_date")}, p.end_date)           AS end_date,
+          {d_col("merchandise_amount")}                       AS merchandise_amount,
+          {d_col("freight_tax_misc")}                         AS freight_tax_misc,
+          COALESCE({d_col("grand_total")}, p.grand_total)     AS grand_total,
+          CASE WHEN {("d.purchase_document" if det else "NULL")} IS NOT NULL THEN 1 ELSE 0 END
                                                               AS is_enriched,
           -- classification available for ALL docs (drill-down POs are enriched-only)
           CASE WHEN p.associated_pos IS NOT NULL AND TRIM(p.associated_pos) <> ''
@@ -611,7 +612,7 @@ def _build_dim(con, table, key, natural_cols, distinct_sql, ts, clob_cols=()):
     cols = ", ".join(natural_cols)
     # Explicit typed DDL (not CREATE AS SELECT) so the surrogate key is a real
     # INTEGER PRIMARY KEY and long-text columns can be declared CLOB.
-    coldefs = ", ".join(f'{c} {"CLOB" if c in clob_cols else "TEXT"}' for c in natural_cols)
+    coldefs = ", ".join(f"{c} {'CLOB' if c in clob_cols else 'TEXT'}" for c in natural_cols)
     con.execute(
         f"CREATE TABLE {table} ({key} INTEGER PRIMARY KEY, {coldefs}, "  # noqa: S608 - constants
         "dw_loaded_at TEXT)"
@@ -1256,16 +1257,91 @@ def build_all(
     return {"batch": batch, "counts": counts, "dq": dq, "errors": errors}
 
 
+def export_serve_db(wh_path: Path = WAREHOUSE_DB, serve_path: Path = SERVE_DB, log=print) -> dict:
+    """Write a slim, serving-only copy of the warehouse for the read-only front ends.
+
+    ``warehouse_query`` (and thus the MCP server + web app) only reaches
+    ``gold_*``/``lv_*``/``dim_*``/``fact_*``. This copies exactly those into a fresh
+    ``warehouse-serve.db`` and drops ``bronze_*``/``silver_*`` and the append-only
+    ``dw_document_history`` — ~95% of the file. A few ``gold_*`` marts are *views*
+    over those dropped layers (contract history, supplier master/enriched); they are
+    **materialized** into tables so the slim DB is self-contained and returns
+    identical results. Query-relevant indexes are recreated, then VACUUM compacts.
+    """
+    wh_path, serve_path = Path(wh_path), Path(serve_path)
+    if not wh_path.exists():
+        raise FileNotFoundError(f"{wh_path} not found — build the warehouse first")
+    serve_path.unlink(missing_ok=True)
+    drop_markers = ("bronze_", "silver_", "dw_document_history")
+    con = sqlite3.connect(wh_path)
+    try:
+        objs = con.execute(
+            "SELECT name, type, sql FROM sqlite_master WHERE type IN ('table','view') AND ("
+            "name LIKE 'gold_%' OR name LIKE 'lv_%' OR name LIKE 'dim_%' OR name LIKE 'fact_%')"
+        ).fetchall()
+        tables = [n for n, t, _ in objs if t == "table"]
+        views = [(n, sql) for n, t, sql in objs if t == "view"]
+        # Views over the dropped layers can't survive as views — materialize them.
+        dep_views = [n for n, sql in views if any(m in (sql or "") for m in drop_markers)]
+        pure_views = [(n, sql) for n, sql in views if n not in dep_views]
+        idx_ddl = [
+            sql
+            for (tbl, sql) in con.execute(
+                "SELECT tbl_name, sql FROM sqlite_master WHERE type='index' AND sql IS NOT NULL"
+            ).fetchall()
+            if tbl in set(tables)
+        ]
+        con.execute("ATTACH DATABASE ? AS serve", (str(serve_path),))
+        for n in tables + dep_views:  # dim/fact/gold-tables + the materialized marts
+            con.execute(f'CREATE TABLE serve."{n}" AS SELECT * FROM main."{n}"')  # noqa: S608
+        con.commit()
+        con.execute("DETACH DATABASE serve")
+    finally:
+        con.close()
+    # Recreate the self-contained views (lv_ + remaining gold_) from their DDL, then
+    # compact. SQLite creates views lazily, so order doesn't matter; references
+    # resolve within the slim DB at query time.
+    serve = sqlite3.connect(serve_path)
+    try:
+        for _, sql in pure_views:
+            serve.execute(sql)
+        for sql in idx_ddl:
+            serve.execute(sql)
+        serve.commit()
+        serve.execute("VACUUM")
+    finally:
+        serve.close()
+    before, after = wh_path.stat().st_size, serve_path.stat().st_size
+    log(
+        f"serve-export: {before / 1e6:.0f}MB -> {after / 1e6:.0f}MB "
+        f"({len(tables)} tables, {len(dep_views)} marts materialized, "
+        f"{len(pure_views)} views, {len(idx_ddl)} indexes)"
+    )
+    return {
+        "tables": len(tables),
+        "materialized": len(dep_views),
+        "views": len(pure_views),
+        "indexes": len(idx_ddl),
+        "bytes_before": before,
+        "bytes_after": after,
+    }
+
+
 def _cli() -> None:
     ap = argparse.ArgumentParser(description="SCPRS medallion warehouse (bronze/silver/gold).")
     sub = ap.add_subparsers(dest="cmd", required=True)
     sub.add_parser("build", help="Build all layers from data/scprs.db")
     sub.add_parser("dq", help="Run data-quality checks against the current warehouse")
     sub.add_parser("info", help="Show layer row counts and last batch")
+    sub.add_parser(
+        "serve-export", help="Write the slim serving-only DB (gold + star) for the front ends"
+    )
     args = ap.parse_args()
 
     if args.cmd == "build":
         build_all()
+    elif args.cmd == "serve-export":
+        export_serve_db()
     elif args.cmd == "dq":
         con = _connect()
         try:

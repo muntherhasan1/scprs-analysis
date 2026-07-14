@@ -253,6 +253,43 @@ def test_warehouse_build(tmp_path):
     assert errors == []
 
 
+def test_export_serve_db_is_slim_and_self_contained(tmp_path):
+    src, wh = tmp_path / "scprs.db", tmp_path / "warehouse.db"
+    serve = tmp_path / "warehouse-serve.db"
+    _seed_source(src)
+    warehouse.build_all(
+        wh_path=wh, source_path=src, enrichment_db=tmp_path / "no_enrich.db", log=lambda *a: None
+    )
+    stats = warehouse.export_serve_db(wh_path=wh, serve_path=serve, log=lambda *a: None)
+    assert stats["bytes_after"] < stats["bytes_before"]
+
+    full = sqlite3.connect(wh)
+    s = sqlite3.connect(serve)
+    try:
+        objs = {r[0]: r[1] for r in s.execute("SELECT name, type FROM sqlite_master")}
+        # Dropped layers are gone; serving objects remain.
+        assert not any(
+            n.startswith(("bronze_", "silver_")) or n == "dw_document_history" for n in objs
+        )
+        assert any(n.startswith("gold_") for n in objs)
+        assert any(n.startswith("dim_") for n in objs) and any(n.startswith("fact_") for n in objs)
+        # No surviving view still points at a dropped layer (would dangle at query time).
+        dropped = ("bronze_", "silver_", "dw_document_history")
+        for name, sql in s.execute("SELECT name, sql FROM sqlite_master WHERE type='view'"):
+            assert not any(m in (sql or "") for m in dropped), name
+        # A gold view over the history layer got materialized into a table.
+        assert objs.get("gold_contract_change_log") == "table"
+        # Identical results for a mart and a materialized mart.
+        for q in (
+            "SELECT COUNT(*) FROM gold_document",
+            "SELECT COUNT(*) FROM gold_supplier_master",
+        ):  # noqa: E501
+            assert s.execute(q).fetchone() == full.execute(q).fetchone()
+    finally:
+        s.close()
+        full.close()
+
+
 def test_contract_change_capture(tmp_path):
     """Append-only history records amendments; the change-log derives the transition."""
     src, wh = tmp_path / "scprs.db", tmp_path / "warehouse.db"
