@@ -27,7 +27,11 @@ param(
         "munther-hasan/scprs-warehouse-chat"
     )
 )
-$ErrorActionPreference = "Stop"
+# Continue, not Stop: these steps are native commands (python/powershell) and some
+# write normal progress to stderr (e.g. the HF upload bar). Under "Stop" PS 5.1
+# turns that stderr into a fatal error. We gate success on $LASTEXITCODE per step
+# instead, which is the correct signal for a native command.
+$ErrorActionPreference = "Continue"
 $root = Split-Path -Parent $PSScriptRoot
 $py = Join-Path $root ".venv\Scripts\python.exe"
 $log = Join-Path $root "data\refresh_pipeline.log"
@@ -53,18 +57,28 @@ try {
     Step "serve-export" { & $py -m src.warehouse serve-export }
     $env:WAREHOUSE_DATASET = $Dataset
     Step "publish to dataset" { & $py -m src.data_sync publish --dataset $Dataset }
+    # Best-effort: the data is already published (the critical step). Restarting the
+    # Spaces so they re-fetch needs a WRITE-scoped HF_TOKEN (repo-write / an OAuth
+    # login is not enough for the Space management API). If it's missing, the refresh
+    # still succeeds — the Spaces pick up the new DB on their next restart.
     $env:REFRESH_SPACES = ($Spaces -join ",")
-    Step "restart spaces" {
-        & $py -c @"
+    Log "START restart spaces (best-effort)"
+    & $py -c @"
 import os
 from huggingface_hub import HfApi
 api = HfApi()
+tok = os.environ.get('HF_TOKEN')
 for s in os.environ['REFRESH_SPACES'].split(','):
-    api.restart_space(s.strip())
+    api.restart_space(s.strip(), token=tok)
     print('restarted', s.strip())
 "@
+    if ($LASTEXITCODE -ne 0) {
+        Log ("WARN restart spaces failed (exit $LASTEXITCODE) — data IS published; " +
+            "the Spaces will serve it on their next restart. Set a write-scoped HF_TOKEN " +
+            "so the pipeline can restart them automatically.")
     }
-    Log "=== refresh done: Spaces will re-fetch the new serve DB on restart ==="
+    else { Log "OK    restart spaces" }
+    Log "=== refresh done: serve DB published; Spaces re-fetch on restart ==="
 }
 catch {
     Log "ABORT: $_"

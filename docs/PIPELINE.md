@@ -56,7 +56,11 @@ last-published data in between.
 | Env / var | Where | Purpose |
 |---|---|---|
 | `WAREHOUSE_DATASET` | Space **variable** + pipeline | The private dataset id to fetch/publish. |
-| `HF_TOKEN` | Space **secret** | HF token with **read** access to that dataset (the Space needs it to fetch). The pipeline publishes with the machine's cached HF login. |
+| `HF_TOKEN` (Space) | Space **secret** | HF token with **read** access to that dataset (the Space needs it to fetch). |
+| `HF_TOKEN` (machine) | env var on the pipeline box | A **write**-scoped HF token so the pipeline can publish *and* restart the Spaces. An interactive `hf auth login` (OAuth) can publish but **cannot** restart a Space (the management API needs a write token). Without it the refresh still publishes — the Spaces just pick up the new DB on their next restart (the restart step is best-effort and only warns). |
+
+Set the machine's `HF_TOKEN` as a **user environment variable** so the scheduled
+task inherits it (don't bake a token into the task definition).
 
 Unset `WAREHOUSE_DATASET` locally → `ensure_local_db` is a no-op and the local
 `data/warehouse.db` is used, so dev and tests are unaffected.
