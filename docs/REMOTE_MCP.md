@@ -145,6 +145,29 @@ Copilot Studio agent** uses to produce query results *and* executive reports:
 connect the agent to this MCP server, and it calls `run_sql` for numbers,
 `generate_chart` for a visual, and `generate_report` for a shareable summary.
 
+## Audit log (optional)
+
+The server can persist an **audit trail of every `run_sql` / `generate_chart` /
+`generate_report` call** — the SQL sent, row count, and error/outcome (never the
+result rows, and never any secret). This is what tells you what a Copilot Studio
+agent actually queried; the end user's natural-language prompt never reaches the
+server (it stays on the Copilot side), so the SQL is what we can see and record.
+
+It's **off by default** — a no-op unless you set two secrets on the Space
+(**Settings → Variables and secrets**), matching the web app's capture:
+
+- `QUERY_LOG_DATASET` — a **private** HF dataset id to sync to, e.g.
+  `muntherhasan1/scprs-query-log` (created on first write).
+- `HF_TOKEN` — an HF token with **write** access to that dataset (a Space's
+  filesystem is ephemeral, so records are appended locally and committed to the
+  dataset every few minutes via `CommitScheduler`).
+
+Records carry `source: "mcp"` (vs `"web"` for the NL app), so both front ends can
+share one dataset. To avoid the two Spaces clobbering each other's file (the
+`CommitScheduler` syncs by overwriting a path), each writer owns its own
+`data/queries-<space>.jsonl`, namespaced by the HF `SPACE_ID`. `QUERY_LOG_DIR`
+(the local staging dir) defaults to a writable `/app/query_logs` in the image.
+
 ## Refreshing the data
 
 The DB is a read-only snapshot baked into the image. To publish fresh data:
