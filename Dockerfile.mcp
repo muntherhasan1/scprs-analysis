@@ -18,9 +18,9 @@ WORKDIR /app
 COPY requirements-mcp.txt .
 RUN pip install --no-cache-dir -r requirements-mcp.txt
 
-# Server code + the read-only data snapshot (world-readable; opened ?mode=ro).
+# Server code only — no data is baked in. The slim serve DB is fetched from the
+# private HF Dataset (WAREHOUSE_DATASET) into /data at startup by data_sync.
 COPY src/ ./src/
-COPY data/warehouse.db /data/warehouse.db
 
 ENV WAREHOUSE_DB=/data/warehouse.db \
     HOST=0.0.0.0 \
@@ -31,11 +31,12 @@ ENV WAREHOUSE_DB=/data/warehouse.db \
     QUERY_LOG_DIR=/app/query_logs
 # MCP_AUTH_TOKEN is NOT set here — provide it at deploy time. The tool-call audit
 # log stays off until QUERY_LOG_DATASET (+ an HF write token in HF_TOKEN) is set.
+# WAREHOUSE_DATASET (+ HF_TOKEN) must be set for the startup DB fetch to work.
 
-# Writable dirs for the non-root appuser (/app is root-owned): generate_report
-# output (REPORTS_DIR) and the optional query audit log (QUERY_LOG_DIR).
-RUN mkdir -p /app/reports /app/query_logs \
-    && chown appuser /app/reports /app/query_logs
+# Writable dirs for the non-root appuser (/app is root-owned): the fetched serve
+# DB (/data), generate_report output (REPORTS_DIR), and the audit log (QUERY_LOG_DIR).
+RUN mkdir -p /data /app/reports /app/query_logs \
+    && chown appuser /data /app/reports /app/query_logs
 
 USER appuser
 EXPOSE 8000

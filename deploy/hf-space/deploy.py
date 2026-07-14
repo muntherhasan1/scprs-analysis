@@ -45,9 +45,12 @@ COPIES = [
     ("src/mcp_server.py", "src/mcp_server.py"),
     ("src/warehouse_query.py", "src/warehouse_query.py"),  # shared query guard
     ("src/query_log.py", "src/query_log.py"),  # optional tool-call audit log
+    ("src/data_sync.py", "src/data_sync.py"),  # fetch the serve DB from the dataset at boot
     ("src/charting.py", "src/charting.py"),  # generate_chart / generate_report
     ("src/__init__.py", "src/__init__.py"),
-    ("data/warehouse.db", "data/warehouse.db"),  # LFS via .gitattributes
+    # No warehouse.db is shipped — the Space fetches warehouse-serve.db from the
+    # private WAREHOUSE_DATASET at startup (publish it with `python -m src.data_sync
+    # publish`). Keeps the image tiny and data refreshes independent of code deploys.
 ]
 
 
@@ -55,9 +58,6 @@ def main() -> None:
     repo = os.environ.get("HF_SPACE")
     if not repo:
         sys.exit("set HF_SPACE=<user>/<space>, e.g. muntherhasan1/scprs-warehouse-mcp")
-    db = ROOT / "data" / "warehouse.db"
-    if not db.exists():
-        sys.exit(f"{db} not found — build it first: python -m src.warehouse build")
 
     api = HfApi()
     create_repo(repo, repo_type="space", space_sdk="docker", exist_ok=True)
@@ -90,6 +90,11 @@ def main() -> None:
     dataset = os.environ.get("QUERY_LOG_DATASET")
     if dataset:
         api.add_space_variable(repo, "QUERY_LOG_DATASET", dataset)
+    # The Space fetches the serve DB from this private dataset at startup; it also
+    # needs an HF read token in the HF_TOKEN secret (set once in Space Settings).
+    warehouse_dataset = os.environ.get("WAREHOUSE_DATASET")
+    if warehouse_dataset:
+        api.add_space_variable(repo, "WAREHOUSE_DATASET", warehouse_dataset)
 
     print(f"Deployed: {commit.commit_url if hasattr(commit, 'commit_url') else commit}")
     print(f"Endpoint: https://{default_host}/mcp")
@@ -98,6 +103,8 @@ def main() -> None:
             "Next: add the MCP_AUTH_TOKEN secret in Space Settings "
             "(the container won't start without it)."
         )
+    if not warehouse_dataset:
+        print("Note: set WAREHOUSE_DATASET (+ HF_TOKEN secret) so the Space can fetch its DB.")
 
 
 if __name__ == "__main__":

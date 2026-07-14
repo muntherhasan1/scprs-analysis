@@ -18,10 +18,10 @@ WORKDIR /app
 COPY requirements-web.txt .
 RUN pip install --no-cache-dir -r requirements-web.txt
 
-# App code + the read-only data snapshot (world-readable; opened ?mode=ro).
+# App code only — no data is baked in. The slim serve DB is fetched from the
+# private HF Dataset (WAREHOUSE_DATASET) into /data at startup by data_sync.
 COPY src/ ./src/
 COPY app.py .
-COPY data/warehouse.db /data/warehouse.db
 
 ENV WAREHOUSE_DB=/data/warehouse.db \
     GRADIO_SERVER_NAME=0.0.0.0 \
@@ -29,11 +29,11 @@ ENV WAREHOUSE_DB=/data/warehouse.db \
     GRADIO_ANALYTICS_ENABLED=False \
     PYTHONUNBUFFERED=1
 # GEMINI_API_KEY is NOT set here — provide it at deploy time (Space secret).
+# WAREHOUSE_DATASET (+ HF_TOKEN) must be set for the startup DB fetch to work.
 
-# Writable staging dir for the optional query log (CommitScheduler): /app is
-# root-owned, so the non-root appuser needs its own writable folder or captures
-# fail silently. Matches the default QUERY_LOG_DIR ("query_logs").
-RUN mkdir -p /app/query_logs && chown appuser /app/query_logs
+# Writable dirs for the non-root appuser (/app is root-owned): the fetched serve
+# DB (/data) and the optional query-log staging dir (QUERY_LOG_DIR).
+RUN mkdir -p /data /app/query_logs && chown appuser /data /app/query_logs
 
 USER appuser
 EXPOSE 7860

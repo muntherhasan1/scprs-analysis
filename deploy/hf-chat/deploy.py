@@ -43,8 +43,11 @@ COPIES = [
     ("src/nl_query.py", "src/nl_query.py"),
     ("src/query_log.py", "src/query_log.py"),
     ("src/warehouse_query.py", "src/warehouse_query.py"),
+    ("src/data_sync.py", "src/data_sync.py"),  # fetch the serve DB from the dataset at boot
     ("src/__init__.py", "src/__init__.py"),
-    ("data/warehouse.db", "data/warehouse.db"),  # LFS via .gitattributes
+    # No warehouse.db is shipped — the Space fetches warehouse-serve.db from the
+    # private WAREHOUSE_DATASET at startup (publish it with `python -m src.data_sync
+    # publish`). Keeps the image tiny and data refreshes independent of code deploys.
 ]
 
 
@@ -52,9 +55,6 @@ def main() -> None:
     repo = os.environ.get("HF_SPACE")
     if not repo:
         sys.exit("set HF_SPACE=<user>/<space>, e.g. munther-hasan/scprs-warehouse-chat")
-    db = ROOT / "data" / "warehouse.db"
-    if not db.exists():
-        sys.exit(f"{db} not found — build it first: python -m src.warehouse build")
 
     api = HfApi()
     create_repo(repo, repo_type="space", space_sdk="docker", exist_ok=True)
@@ -77,6 +77,11 @@ def main() -> None:
     key = os.environ.get("GEMINI_API_KEY")
     if key:
         api.add_space_secret(repo, "GEMINI_API_KEY", key)
+    # The Space fetches the serve DB from this private dataset at startup; it also
+    # needs an HF read token in the HF_TOKEN secret (set once in Space Settings).
+    warehouse_dataset = os.environ.get("WAREHOUSE_DATASET")
+    if warehouse_dataset:
+        api.add_space_variable(repo, "WAREHOUSE_DATASET", warehouse_dataset)
 
     user, name = repo.split("/", 1)
     print(f"Deployed: {commit.commit_url if hasattr(commit, 'commit_url') else commit}")
@@ -86,6 +91,8 @@ def main() -> None:
             "Next: add the GEMINI_API_KEY secret in Space Settings "
             "(free key at https://aistudio.google.com/apikey)."
         )
+    if not warehouse_dataset:
+        print("Note: set WAREHOUSE_DATASET (+ HF_TOKEN secret) so the Space can fetch its DB.")
 
 
 if __name__ == "__main__":

@@ -329,10 +329,16 @@ def _transport_security() -> TransportSecuritySettings:
 
 
 def _require_db() -> None:
+    from . import data_sync
+
+    # On a Space, fetch the slim serve DB from the private dataset (no-op locally,
+    # where WAREHOUSE_DATASET is unset and the local warehouse.db is used).
+    data_sync.ensure_local_db(wq.WAREHOUSE_DB)
     if not wq.WAREHOUSE_DB.exists():
         raise SystemExit(
             f"warehouse.db not found at {wq.WAREHOUSE_DB}. "
-            "Run `python -m src.warehouse build` first (or set WAREHOUSE_DB)."
+            "Run `python -m src.warehouse build` first (or set WAREHOUSE_DB), "
+            "or set WAREHOUSE_DATASET + HF_TOKEN to fetch it from the dataset."
         )
 
 

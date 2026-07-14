@@ -193,8 +193,9 @@ def test_enrich_acq_type_filter(tmp_path, monkeypatch):
     monkeypatch.setattr(
         model,
         "build_details_db",
-        lambda bu, f, t, *, db_path, log=print, **k: calls.append(t)
-        or {"documents": 1, "lines": 1, "pos": 0},
+        lambda bu, f, t, *, db_path, log=print, **k: (
+            calls.append(t) or {"documents": 1, "lines": 1, "pos": 0}
+        ),
     )
 
     r = model.enrich_details(
