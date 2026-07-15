@@ -85,9 +85,11 @@ def build_demo() -> gr.Blocks:
     marts = len(wq.list_marts())
     with gr.Blocks(title="SCPRS Warehouse Chat", fill_height=True) as demo:
         gr.Markdown(_INTRO)
+        # Gradio 6 dropped ChatInterface's `type` kwarg — the OpenAI-style
+        # "messages" history format (list of {role, content}) is now the default,
+        # which is what _respond / nl_query.answer already expect.
         gr.ChatInterface(
             fn=_respond,
-            type="messages",
             examples=_EXAMPLES,
             cache_examples=False,
         )
