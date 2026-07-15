@@ -41,7 +41,14 @@ jobs:
         run: bandit -c pyproject.toml -r src -q
 
       - name: Dependency vulnerability scan (pip-audit)
-        run: pip-audit -r requirements.txt
+        # Scan every requirements file, including the deps that ship to the
+        # public-facing MCP + web app Spaces (gradio, httpx, matplotlib, hf_hub).
+        run: >
+          pip-audit
+          -r requirements.txt
+          -r requirements-mcp.txt
+          -r requirements-web.txt
+          -r requirements-dev.txt
 
       # Same scanner + baseline as the local pre-commit hook, so CI and dev
       # agree. Layered behind GitHub's native secret scanning + push protection

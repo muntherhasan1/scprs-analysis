@@ -5,3 +5,4 @@
 mcp>=1.28.1
 matplotlib>=3.8  # chart rendering (Agg backend) for generate_chart/generate_report
 huggingface_hub>=0.25  # CommitScheduler for the optional tool-call audit log (query_log.py)
+sentry-sdk>=2.0  # optional error tracking (src/observability.py); no-op unless SENTRY_DSN set

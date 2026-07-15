@@ -6,3 +6,4 @@
 gradio>=5.0,<6
 httpx>=0.27
 huggingface_hub>=0.25  # CommitScheduler, for optional query logging (src/query_log.py)
+sentry-sdk>=2.0  # optional error tracking (src/observability.py); no-op unless SENTRY_DSN set

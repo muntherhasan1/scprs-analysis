@@ -361,6 +361,9 @@ def serve_http() -> None:
     import uvicorn
     from starlette.routing import Route
 
+    from . import observability
+
+    observability.init_sentry("mcp")  # optional; no-op unless SENTRY_DSN is set
     _require_db()
     token = os.environ.get("MCP_AUTH_TOKEN")
     if not token:

@@ -44,6 +44,7 @@ COPIES = [
     ("src/query_log.py", "src/query_log.py"),
     ("src/warehouse_query.py", "src/warehouse_query.py"),
     ("src/data_sync.py", "src/data_sync.py"),  # fetch the serve DB from the dataset at boot
+    ("src/observability.py", "src/observability.py"),  # optional Sentry error tracking
     ("src/__init__.py", "src/__init__.py"),
     # No warehouse.db is shipped — the Space fetches warehouse-serve.db from the
     # private WAREHOUSE_DATASET at startup (publish it with `python -m src.data_sync

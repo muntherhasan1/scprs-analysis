@@ -58,6 +58,19 @@ def test_run_select_rejects_multiple_statements(tiny_db):
     assert "error" in out and "Multiple" in out["error"]
 
 
+def test_run_select_rejects_blob_bombs(tiny_db):
+    out = wq.run_select("SELECT randomblob(1000000)")
+    assert "error" in out and "blob" in out["error"].lower()
+
+
+def test_run_select_times_out_on_runaway_query(tiny_db, monkeypatch):
+    monkeypatch.setattr(wq, "QUERY_TIMEOUT_S", 0.05)
+    out = wq.run_select(
+        "WITH RECURSIVE r(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM r) SELECT COUNT(*) FROM r"
+    )
+    assert "error" in out and "time limit" in out["error"].lower()
+
+
 def test_run_select_readonly_blocks_writes_even_if_they_slip_through(tiny_db):
     # A CTE-shaped statement passes the SELECT_ONLY prefix but any write still
     # fails on the read-only connection.
