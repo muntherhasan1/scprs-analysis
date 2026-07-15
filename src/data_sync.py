@@ -23,28 +23,42 @@ from pathlib import Path
 SERVE_FILENAME = "warehouse-serve.db"
 
 
+class WarehouseFetchError(RuntimeError):
+    """Fetching the serve DB from the dataset failed — usually the Space's HF_TOKEN
+    lacks READ access to the (private) dataset, or WAREHOUSE_DATASET is wrong."""
+
+
 def ensure_local_db(dest: Path) -> bool:
     """Fetch the serve DB from the ``WAREHOUSE_DATASET`` dataset into ``dest``.
 
     Returns True if a fetch happened, False when disabled (no ``WAREHOUSE_DATASET``)
     so the caller falls back to whatever is already at ``dest``. Atomic: downloads
     to a temp file then renames into place, so a reader never sees a half-written DB.
+    Raises ``WarehouseFetchError`` with an actionable message if the download fails
+    (so a token/config mistake shows a clear boot error, not a raw traceback).
     """
     repo = os.environ.get("WAREHOUSE_DATASET")
     if not repo:
         return False
     from huggingface_hub import hf_hub_download
 
-    # nosec B615 — intentionally track the latest revision (main) of our OWN private,
-    # access-controlled dataset; pinning an immutable commit would defeat the
-    # fetch-newest-on-restart refresh model this whole design is built around.
-    cached = hf_hub_download(  # nosec B615
-        repo_id=repo,
-        filename=SERVE_FILENAME,
-        repo_type="dataset",
-        revision="main",
-        token=os.environ.get("HF_TOKEN"),
-    )
+    try:
+        # nosec B615 — intentionally track the latest revision (main) of our OWN
+        # private, access-controlled dataset; pinning an immutable commit would
+        # defeat the fetch-newest-on-restart refresh model this design is built on.
+        cached = hf_hub_download(  # nosec B615
+            repo_id=repo,
+            filename=SERVE_FILENAME,
+            repo_type="dataset",
+            revision="main",
+            token=os.environ.get("HF_TOKEN"),
+        )
+    except Exception as exc:  # noqa: BLE001 — re-raised as an actionable error below
+        raise WarehouseFetchError(
+            f"Could not fetch {SERVE_FILENAME!r} from dataset {repo!r}: "
+            f"{type(exc).__name__}: {exc}. Check that HF_TOKEN has READ access to "
+            f"that (private) dataset and that WAREHOUSE_DATASET is correct."
+        ) from exc
     dest = Path(dest)
     dest.parent.mkdir(parents=True, exist_ok=True)
     tmp = dest.with_name(dest.name + ".tmp")

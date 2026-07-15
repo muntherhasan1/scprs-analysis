@@ -26,6 +26,20 @@ def test_ensure_local_db_atomic_fetch(tmp_path, monkeypatch):
     assert not (dest.parent / (dest.name + ".tmp")).exists()  # temp renamed away, not left behind
 
 
+def test_ensure_local_db_wraps_fetch_error_with_actionable_message(tmp_path, monkeypatch):
+    import huggingface_hub
+
+    monkeypatch.setenv("WAREHOUSE_DATASET", "acme/data")
+
+    def boom(**kw):
+        raise RuntimeError("401 Client Error: Repository Not Found")
+
+    monkeypatch.setattr(huggingface_hub, "hf_hub_download", boom)
+    with pytest.raises(data_sync.WarehouseFetchError) as ei:
+        data_sync.ensure_local_db(tmp_path / "warehouse.db")
+    assert "HF_TOKEN" in str(ei.value) and "READ" in str(ei.value)  # names the likely cause
+
+
 def test_publish_serve_db_missing_file(tmp_path):
     with pytest.raises(FileNotFoundError):
         data_sync.publish_serve_db(tmp_path / "nope.db", "acme/data")

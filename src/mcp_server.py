@@ -333,7 +333,10 @@ def _require_db() -> None:
 
     # On a Space, fetch the slim serve DB from the private dataset (no-op locally,
     # where WAREHOUSE_DATASET is unset and the local warehouse.db is used).
-    data_sync.ensure_local_db(wq.WAREHOUSE_DB)
+    try:
+        data_sync.ensure_local_db(wq.WAREHOUSE_DB)
+    except data_sync.WarehouseFetchError as exc:
+        raise SystemExit(str(exc)) from exc  # clear boot error, not a raw traceback
     if not wq.WAREHOUSE_DB.exists():
         raise SystemExit(
             f"warehouse.db not found at {wq.WAREHOUSE_DB}. "

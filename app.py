@@ -13,7 +13,10 @@ from src.web_app import build_demo
 observability.init_sentry("web")  # optional error tracking; no-op unless SENTRY_DSN is set
 # On a Space, fetch the slim serve DB from the private dataset before serving
 # (no-op locally, where WAREHOUSE_DATASET is unset and the local DB is used).
-data_sync.ensure_local_db(warehouse_query.WAREHOUSE_DB)
+try:
+    data_sync.ensure_local_db(warehouse_query.WAREHOUSE_DB)
+except data_sync.WarehouseFetchError as exc:
+    raise SystemExit(str(exc)) from exc  # clear boot error, not a raw traceback
 demo = build_demo()
 # Cap concurrent work + queue depth so a burst of requests (or a bot) can't
 # exhaust the shared Space or the Gemini free-tier quota. Pairs with the query
