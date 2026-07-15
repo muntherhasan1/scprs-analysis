@@ -8,3 +8,4 @@ pip-audit>=2.10.1    # scans dependencies for known CVEs
 pre-commit>=4.6.0    # runs local hooks before each commit
 pytest>=9.1.1
 matplotlib>=3.8      # exercised by tests for src/charting.py (chart/report tools)
+huggingface_hub>=0.25  # exercised by tests for src/data_sync.py (serve-DB fetch/publish)
