@@ -56,7 +56,8 @@ last-published data in between.
 | Env / var | Where | Purpose |
 |---|---|---|
 | `WAREHOUSE_DATASET` | Space **variable** + pipeline | The private dataset id to fetch/publish. |
-| `HF_TOKEN` (Space) | Space **secret** | HF token with **read** access to that dataset (the Space needs it to fetch). |
+| `HF_TOKEN` (Space) | Space **secret** | Fine-grained token with **Read** on the (private) `scprs-warehouse-data` dataset — the Space needs it to fetch the serve-DB at boot. Keep it **read-only**; a wrong scope here fails boot (`RUNTIME_ERROR`). |
+| `QUERY_LOG_TOKEN` (Space) | Space **secret** (optional) | Fine-grained token with **Write** on `scprs-query-log`, used only by `query_log`. Split out so `HF_TOKEN` can stay read-only (least privilege). Falls back to `HF_TOKEN` if unset. |
 | `HF_TOKEN` (machine) | env var on the pipeline box | A **write**-scoped HF token so the pipeline can publish *and* restart the Spaces. An interactive `hf auth login` (OAuth) can publish but **cannot** restart a Space (the management API needs a write token). Without it the refresh still publishes — the Spaces just pick up the new DB on their next restart (the restart step is best-effort and only warns). |
 
 Set the machine's `HF_TOKEN` as a **user environment variable** so the scheduled

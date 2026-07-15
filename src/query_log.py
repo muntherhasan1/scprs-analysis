@@ -5,9 +5,11 @@ each front end asked the warehouse.
 A Hugging Face Space filesystem is EPHEMERAL (wiped on restart/redeploy), so
 records are appended to a local JSONL and synced to a **private** HF Dataset via
 ``CommitScheduler``. This is a no-op unless ``QUERY_LOG_DATASET`` is set (e.g.
-``munther-hasan/scprs-query-log``); the Space also needs an HF **write** token in
-``HF_TOKEN``. Capture must never break a user's query, so writes swallow all
-errors.
+``munther-hasan/scprs-query-log``); the Space also needs an HF **write** token —
+prefer a dedicated, write-scoped ``QUERY_LOG_TOKEN`` so the Space's ``HF_TOKEN``
+can stay read-only (it only needs read on the serve-DB dataset for ``data_sync``),
+falling back to ``HF_TOKEN``. Capture must never break a user's query, so writes
+swallow all errors.
 
 Each record carries a ``source`` (``"web"`` for the NL app via ``record``, ``"mcp"``
 for a tool call via ``record_tool``). We store the question or tool call, the SQL,
@@ -71,9 +73,16 @@ def _scheduler_or_none():
                     path_in_repo="data",
                     every=int(os.environ.get("QUERY_LOG_EVERY_MIN", "5")),
                     private=True,
-                    token=os.environ.get("HF_TOKEN"),
+                    token=_write_token(),
                 )
     return _scheduler
+
+
+def _write_token() -> str | None:
+    """The HF token used to WRITE the log dataset. Prefer a dedicated, write-scoped
+    ``QUERY_LOG_TOKEN`` so ``HF_TOKEN`` can stay read-only (it only needs read on the
+    serve-DB dataset for data_sync). Falls back to ``HF_TOKEN`` for simple setups."""
+    return os.environ.get("QUERY_LOG_TOKEN") or os.environ.get("HF_TOKEN")
 
 
 def _now() -> str:

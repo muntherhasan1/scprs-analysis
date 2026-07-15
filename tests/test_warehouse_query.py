@@ -193,6 +193,18 @@ def test_record_tool_captures_mcp_call(tmp_path, monkeypatch):
     query_log.record_tool("run_sql", sql="SELECT 1")
 
 
+def test_write_token_prefers_dedicated_query_log_token(monkeypatch):
+    from src import query_log
+
+    monkeypatch.delenv("QUERY_LOG_TOKEN", raising=False)
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+    assert query_log._write_token() is None
+    monkeypatch.setenv("HF_TOKEN", "read-only")
+    assert query_log._write_token() == "read-only"  # falls back to HF_TOKEN
+    monkeypatch.setenv("QUERY_LOG_TOKEN", "write-scoped")
+    assert query_log._write_token() == "write-scoped"  # dedicated token wins
+
+
 def test_logfile_name_namespaced_per_space(monkeypatch):
     from src import query_log
 

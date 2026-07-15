@@ -158,9 +158,11 @@ It's **off by default** — a no-op unless you set two secrets on the Space
 
 - `QUERY_LOG_DATASET` — a **private** HF dataset id to sync to, e.g.
   `muntherhasan1/scprs-query-log` (created on first write).
-- `HF_TOKEN` — an HF token with **write** access to that dataset (a Space's
+- `QUERY_LOG_TOKEN` — an HF token with **write** access to that dataset (a Space's
   filesystem is ephemeral, so records are appended locally and committed to the
-  dataset every few minutes via `CommitScheduler`).
+  dataset every few minutes via `CommitScheduler`). Dedicated so `HF_TOKEN` can
+  stay **read-only** (it only needs read on the serve-DB dataset for `data_sync`);
+  falls back to `HF_TOKEN` if unset.
 
 Records carry `source: "mcp"` (vs `"web"` for the NL app), so both front ends can
 share one dataset. To avoid the two Spaces clobbering each other's file (the
