@@ -16,17 +16,21 @@ def init_sentry(component: str) -> bool:
     raises — error tracking must not break startup."""
     dsn = os.environ.get("SENTRY_DSN")
     if not dsn:
+        print(f"[observability] Sentry disabled (SENTRY_DSN not set) for component={component}")
         return False
     try:
         import sentry_sdk
 
+        env = os.environ.get("SENTRY_ENV", "production")
         sentry_sdk.init(
             dsn=dsn,
             traces_sample_rate=0.0,
             send_default_pii=False,
-            environment=os.environ.get("SENTRY_ENV", "production"),
+            environment=env,
         )
         sentry_sdk.set_tag("component", component)
+        print(f"[observability] Sentry enabled for component={component} env={env}")
         return True
-    except Exception:  # noqa: BLE001, S110  # nosec B110 — telemetry must not break startup
+    except Exception as exc:  # noqa: BLE001  # telemetry must not break startup
+        print(f"[observability] Sentry init failed ({type(exc).__name__}: {exc}); continuing")
         return False
