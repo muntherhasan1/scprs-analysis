@@ -30,7 +30,13 @@ $now = Get-Date
 $fyStart = if ($now.Month -ge 7) { $now.Year } else { $now.Year - 1 }
 if ([string]::IsNullOrEmpty($From)) { $From = "07/01/{0}" -f ($fyStart - 5) }
 $to = "06/30/{0}" -f ($fyStart + 2)
-$newest = if ($OldestFirst) { @() } else { @("--newest-first") }
+# Keep this a [string[]] so the `@newest` splat passes it as one argument.
+# A single-element array returned from an `if` *expression* gets unwrapped to a
+# scalar string, and splatting a string iterates its characters (so
+# `--newest-first` would arrive as `-`, `-`, `n`, ...). Cast + statement form
+# avoids that.
+[string[]]$newest = @()
+if (-not $OldestFirst) { $newest = @("--newest-first") }
 
 Set-Location $root
 function Log($msg) { $msg | Out-File -FilePath $log -Append -Encoding utf8 }
