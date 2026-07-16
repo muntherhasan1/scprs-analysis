@@ -50,3 +50,13 @@ catch {
     Log "$(Get-Date -Format o)  ERROR: $($_.Exception.Message)"
     throw
 }
+
+# Freshness gate: independent of whether the enrich call above "succeeded",
+# verify the store is actually advancing. This is what turns a silent failure
+# (a job that runs but records nothing) into a loud one. Advisory — a stale
+# finding is logged prominently but does not fail the job.
+$health = & $py -m src.health 2>&1
+$health | Out-File -FilePath $log -Append -Encoding utf8
+if ($LASTEXITCODE -ne 0) {
+    Log "$(Get-Date -Format o)  !! HEALTH ALERT: freshness check reported error(s) above"
+}
