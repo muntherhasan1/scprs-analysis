@@ -734,10 +734,10 @@ def _build_marts(con):
             FROM fact_document f JOIN dim_date d ON d.date_key = f.start_date_key
             GROUP BY d.year, d.month, d.month_name""",
         "gold_acquisition_spend": """
-            SELECT a.acquisition_method, a.competitive_flag,
+            SELECT a.acquisition_type, a.acquisition_method, a.competitive_flag,
                    COUNT(*) AS document_count, SUM(f.grand_total) AS total_value
             FROM fact_document f JOIN dim_acquisition a ON a.acq_key = f.acq_key
-            GROUP BY a.acquisition_method, a.competitive_flag""",
+            GROUP BY a.acquisition_type, a.acquisition_method, a.competitive_flag""",
         "gold_unspsc_spend": """
             SELECT u.unspsc, u.unspsc_description,
                    COUNT(*) AS line_count, SUM(f.line_amount) AS total_value

@@ -57,9 +57,9 @@ MART_DESCRIPTIONS: dict[str, str] = {
         "split vendors); for a canonical rollup, sum gold_document by canonical_name."
     ),
     "gold_acquisition_spend": (
-        "Spend by acquisition_method + competitive_flag ONLY — no acquisition_type "
-        "here. For acquisition_type questions use gold_supplier_acquisition_profile "
-        "or gold_document, not this mart."
+        "Spend (document_count + total_value) by acquisition_type + acquisition_method "
+        "+ competitive_flag. Has no supplier dimension — for 'top suppliers for "
+        "<category>' use gold_supplier_acquisition_profile or gold_document."
     ),
     "gold_supplier_unspsc_profile": (
         "Supplier spend by UNSPSC commodity code, built from ENRICHED line items only "
