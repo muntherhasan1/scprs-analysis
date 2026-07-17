@@ -86,6 +86,15 @@ def main() -> None:
     token = os.environ.get("MCP_AUTH_TOKEN")
     if token:
         api.add_space_secret(repo, "MCP_AUTH_TOKEN", token)
+    # Optional per-user tokens ("label:token,label2:token2") — revocable access
+    # with per-user audit; either this or MCP_AUTH_TOKEN must end up set.
+    tokens = os.environ.get("MCP_AUTH_TOKENS")
+    if tokens:
+        api.add_space_secret(repo, "MCP_AUTH_TOKENS", tokens)
+    # Optional per-user request/min cap (0/unset = off).
+    rate_limit = os.environ.get("MCP_RATE_LIMIT_PER_MIN")
+    if rate_limit:
+        api.add_space_variable(repo, "MCP_RATE_LIMIT_PER_MIN", rate_limit)
     # Optional tool-call audit log: set the (non-secret) dataset id here; the HF
     # **write** token it needs (HF_TOKEN) stays a Space secret you add yourself.
     dataset = os.environ.get("QUERY_LOG_DATASET")
@@ -99,10 +108,11 @@ def main() -> None:
 
     print(f"Deployed: {commit.commit_url if hasattr(commit, 'commit_url') else commit}")
     print(f"Endpoint: https://{default_host}/mcp")
-    if not token:
+    if not token and not tokens:
         print(
-            "Next: add the MCP_AUTH_TOKEN secret in Space Settings "
-            "(the container won't start without it)."
+            "Next: add MCP_AUTH_TOKEN (or MCP_AUTH_TOKENS=label:token,... for "
+            "per-user access) as a secret in Space Settings — the container "
+            "won't start without one."
         )
     if not warehouse_dataset:
         print("Note: set WAREHOUSE_DATASET (+ HF_TOKEN secret) so the Space can fetch its DB.")

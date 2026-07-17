@@ -16,7 +16,8 @@ Safety model — the server is query-only by construction:
   * `describe_table` / row counts interpolate object names, but only after
     checking them against the live allowlist of `gold_*`/`lv_*`/`dim_*`/`fact_*`
     objects from `sqlite_master` — never raw client input.
-  * In http mode every request must carry `Authorization: Bearer <MCP_AUTH_TOKEN>`
+  * In http mode every request must carry `Authorization: Bearer <token>` where
+    <token> is `MCP_AUTH_TOKEN` or one of the `MCP_AUTH_TOKENS` named tokens
     (constant-time compared). The only unauthenticated paths are `/healthz` and
     `/files/<unguessable>` — capability URLs for `generate_report` output, where
     the random path is itself the access token so a browser/Copilot can open the
@@ -33,23 +34,26 @@ Run:
     python -m src.mcp_server              # stdio (local Claude Code)
     MCP_AUTH_TOKEN=... python -m src.mcp_server http   # remote HTTP endpoint
 
-Env overrides: WAREHOUSE_DB (db path), MCP_AUTH_TOKEN (required for http),
-HOST (default 0.0.0.0), PORT (default 8000), MCP_ALLOWED_HOSTS (comma-separated
-Host allowlist; see `_transport_security` for the DNS-rebinding-guard rationale).
+Env overrides: WAREHOUSE_DB (db path); MCP_AUTH_TOKEN and/or MCP_AUTH_TOKENS
+(one required for http — MCP_AUTH_TOKENS holds `label:token` pairs for per-user,
+revocable access, and the matched label is recorded in the audit log);
+MCP_RATE_LIMIT_PER_MIN (optional per-user request cap, 0/unset = off); HOST
+(default 0.0.0.0), PORT (default 8000), MCP_ALLOWED_HOSTS (comma-separated Host
+allowlist; see `_transport_security` for the DNS-rebinding-guard rationale).
 """
 
 from __future__ import annotations
 
 import argparse
-import hmac
 import os
 import secrets
+import time
 from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 
-from . import query_log
+from . import auth, query_log
 from . import warehouse_query as wq
 
 mcp = FastMCP("scprs-warehouse")
@@ -261,11 +265,18 @@ class BearerAuthMiddleware:
     unguessable capability URLs (the path itself is the access token) so report
     pages/images can be fetched inline by a browser or Copilot. The token is
     accepted as ``Bearer <token>`` or bare ``<token>`` and compared in constant time.
+
+    ``tokens`` is a ``{token: principal}`` map (see `auth.parse_tokens`), so one or
+    many named tokens are supported uniformly. The matched principal is set on
+    `auth.current_principal` (for the audit log) and is the rate-limit key.
     """
 
-    def __init__(self, app, token: str) -> None:
+    def __init__(
+        self, app, tokens: dict[str, str], limiter: auth.RateLimiter | None = None
+    ) -> None:
         self._app = app
-        self._token = token
+        self._tokens = tokens
+        self._limiter = limiter
 
     async def __call__(self, scope, receive, send) -> None:
         if scope["type"] != "http":
@@ -284,11 +295,17 @@ class BearerAuthMiddleware:
         # user who omits the "Bearer " prefix should still authenticate.
         if provided[:7].lower() == "bearer ":
             provided = provided[7:].strip()
-        if not provided or not hmac.compare_digest(provided, self._token):
+        principal = auth.identify(provided, self._tokens) if provided else None
+        if principal is None:
             await self._respond(
                 send, 401, b"unauthorized", extra=[(b"www-authenticate", b"Bearer")]
             )
             return
+        if self._limiter is not None and not self._limiter.allow(principal, time.monotonic()):
+            # One principal over its budget; others are unaffected (per-key window).
+            await self._respond(send, 429, b"rate limit exceeded", extra=[(b"retry-after", b"60")])
+            return
+        auth.current_principal.set(principal)  # flows to the audit log via ContextVar
         await self._app(scope, receive, send)
 
     @staticmethod
@@ -368,12 +385,15 @@ def serve_http() -> None:
 
     observability.init_sentry("mcp")  # optional; no-op unless SENTRY_DSN is set
     _require_db()
-    token = os.environ.get("MCP_AUTH_TOKEN")
-    if not token:
+    tokens = auth.parse_tokens(os.environ.get("MCP_AUTH_TOKEN"), os.environ.get("MCP_AUTH_TOKENS"))
+    if not tokens:
         raise SystemExit(
-            "MCP_AUTH_TOKEN is required in http mode — refusing to expose the "
-            "endpoint unauthenticated. Set it to a long random secret."
+            "MCP_AUTH_TOKEN or MCP_AUTH_TOKENS is required in http mode — refusing to "
+            "expose the endpoint unauthenticated. Set one to a long random secret "
+            "(MCP_AUTH_TOKENS takes label:token pairs for per-user, revocable access)."
         )
+    # Optional per-principal rate limit (requests/min); 0 or unset disables it.
+    limiter = auth.RateLimiter(int(os.environ.get("MCP_RATE_LIMIT_PER_MIN", "0")))
     # Bind all interfaces: intended for a containerized, token-gated service.
     host = os.environ.get("HOST", "0.0.0.0")  # noqa: S104  # nosec B104
     port = int(os.environ.get("PORT", "8000"))
@@ -386,7 +406,7 @@ def serve_http() -> None:
     # session manager). It serves generated reports; everything else is /mcp.
     app = mcp.streamable_http_app()
     app.router.routes.insert(0, Route("/files/{name}", _serve_file))
-    app = BearerAuthMiddleware(app, token)  # gates all but /healthz and /files/
+    app = BearerAuthMiddleware(app, tokens, limiter)  # gates all but /healthz and /files/
     uvicorn.run(app, host=host, port=port)
 
 

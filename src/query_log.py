@@ -127,6 +127,13 @@ def record_tool(tool: str, *, source: str = "mcp", **fields) -> None:
 
     ``fields`` are tool-specific — e.g. ``sql``, ``row_count``, ``error`` for
     ``run_sql``; ``kind``/``title`` for ``generate_chart``; ``title``/``sqls`` for
-    ``generate_report``. Result rows are never recorded, mirroring ``record``'s
-    privacy posture."""
-    _append({"ts": _now(), "source": source, "tool": tool, **fields})
+    ``generate_report``. The authenticated ``principal`` (which named token made
+    the call) is stamped automatically when known. Result rows are never
+    recorded, mirroring ``record``'s privacy posture."""
+    from . import auth
+
+    entry = {"ts": _now(), "source": source, "tool": tool, **fields}
+    principal = auth.current_principal.get()
+    if principal:
+        entry.setdefault("principal", principal)
+    _append(entry)
