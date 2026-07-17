@@ -13,12 +13,18 @@ a Streamable HTTP transport and a bearer-token gate.
 
 - **Read-only by construction** — SQLite opened `?mode=ro`; `run_sql` takes a
   single `SELECT`/`WITH`; table names are allowlisted from `sqlite_master`.
-- **Token-gated** — every request needs `Authorization: Bearer $MCP_AUTH_TOKEN`
-  (constant-time compared). `/healthz` is the only open path. The server
-  **refuses to start** in http mode without a token.
+- **Token-gated** — every request needs `Authorization: Bearer <token>`
+  (constant-time compared). `/healthz` (and the `/files/` report URLs) are the
+  only open paths. The server **refuses to start** in http mode without a token.
+- **Per-user, revocable tokens** — set `MCP_AUTH_TOKENS` (`label:token` pairs) to
+  give each user their own token; the matched *label* is the principal recorded
+  in the audit log and used for per-user rate limiting. See "Issuing & managing
+  access tokens" below. A single shared `MCP_AUTH_TOKEN` still works (principal
+  `default`); the two merge if both are set.
 - **Public data** — SCPRS is a public portal and `data/` holds no PII, so the
-  exposure risk is low; the token is there to prevent abuse and runaway cost.
-- The `MCP_AUTH_TOKEN` is a deploy-time secret — never baked into the image.
+  exposure risk is low; the token is there to attribute usage, prevent abuse, and
+  cap runaway cost.
+- Tokens are deploy-time **secrets** — never baked into the image or committed.
 
 ## Test locally
 
@@ -57,18 +63,94 @@ HF_SPACE=<user>/scprs-warehouse-mcp \
   python deploy/hf-space/deploy.py                     # creates + pushes the Space
 ```
 
+The example above sets a single shared `MCP_AUTH_TOKEN` for a first deploy. For
+**per-user, revocable** access pass `MCP_AUTH_TOKENS=alice:tok1,bob:tok2` instead
+(or as well) — see **Issuing & managing access tokens** below, which is the way
+you add/remove users day-to-day without a redeploy.
+
 `deploy.py` also sets the `MCP_ALLOWED_HOSTS` **variable** to
 `<user>-<space>.hf.space` (so the MCP SDK's DNS-rebinding Host guard stays on
 behind HF's proxy — otherwise `/mcp` returns `421 Invalid Host header`) and, if
-`MCP_AUTH_TOKEN` is in the env, the `MCP_AUTH_TOKEN` **secret**. Otherwise add
-that secret yourself in **Settings → Variables and secrets** (the container
-refuses to start without it). Endpoint:
+`MCP_AUTH_TOKEN` / `MCP_AUTH_TOKENS` is in the env, the matching **secret**.
+Otherwise add the token secret yourself in **Settings → Variables and secrets**
+(the container refuses to start without at least one token). Endpoint:
 `https://<user>-scprs-warehouse-mcp.hf.space/mcp`.
 
 > The older `deploy/hf-space/sync.sh` pushes via `git` instead of the API. It
 > needs a **classic Write token** that sets a git credential — an `hf auth login`
 > OAuth token authenticates the API but not git-over-HTTPS, so `sync.sh` fails
 > with "Invalid username or password." Prefer `deploy.py`.
+
+## Issuing & managing access tokens
+
+Each user gets their **own** token so you can attribute queries in the audit log,
+rate-limit per person, and revoke one user without disrupting the rest. Tokens
+live only in the Space secret `MCP_AUTH_TOKENS` — never in the repo or the image.
+
+### The format
+
+`MCP_AUTH_TOKENS` is a comma-separated list of `label:token` pairs:
+
+```
+alice:9f3c…, bob:1a7e…, dana:c02b…
+```
+
+- **label** — a short principal name (the person/agent). Appears in the audit log
+  and is the rate-limit key. Keep it human-readable: `alice`, `copilot-prod`.
+- **token** — the secret the user puts in their client. Generate a strong random
+  one **per user** (never reuse):
+
+  ```powershell
+  python -c "import secrets; print(secrets.token_hex(24))"   # 48-hex-char secret
+  ```
+
+A malformed pair (missing `:`, empty label/token) makes the server **fail at
+boot** rather than silently lock someone out — so a typo is caught immediately.
+
+### Where they're set
+
+`MCP_AUTH_TOKENS` is a **secret** on the Space: **Settings → Variables and secrets
+→ New secret**. Editing it there and saving triggers a Space restart, so changes
+take effect within a minute. (`deploy.py` can also set it if `MCP_AUTH_TOKENS` is
+in the deploy environment, but for day-to-day user churn, edit the secret directly
+in the Space UI — no redeploy needed, and no token ever touches your shell history
+or the repo.)
+
+### Add a user
+
+1. Generate a token: `python -c "import secrets; print(secrets.token_hex(24))"`.
+2. In **Space → Settings → Variables and secrets**, edit `MCP_AUTH_TOKENS` and
+   append `,newlabel:newtoken`.
+3. Save (the Space restarts). Send the user **only their token** and the endpoint
+   URL — over a secure channel, not email/chat in the clear.
+
+### Revoke a user
+
+Edit `MCP_AUTH_TOKENS`, delete that user's `label:token` pair, save. Their token
+stops working on the next restart; everyone else's keeps working. (Rotate instead
+of revoke by replacing just their token value.)
+
+### Rate limiting (optional)
+
+Set the **variable** `MCP_RATE_LIMIT_PER_MIN` (e.g. `30`) to cap requests **per
+principal** per minute — one heavy user can't starve the others. `0` or unset
+disables it. It's a per-process in-memory fixed window (fine for the single-worker
+Space); it is not a defense against a distributed flood — that's the host's job.
+
+### Verify a token works
+
+```powershell
+$env:TOK="alice-token-here"
+# 200 — open health check, no token needed:
+curl.exe -s -o NUL -w "%{http_code}`n" https://munther-hasan-scprs-warehouse-mcp.hf.space/healthz
+# 401 without a token, 200/406 with one (406 = MCP handshake needs the right Accept header; auth still passed):
+curl.exe -s -o NUL -w "%{http_code}`n" -X POST https://munther-hasan-scprs-warehouse-mcp.hf.space/mcp
+curl.exe -s -o NUL -w "%{http_code}`n" -X POST -H "Authorization: Bearer $env:TOK" https://munther-hasan-scprs-warehouse-mcp.hf.space/mcp
+```
+
+A `401` with the token means the token isn't in `MCP_AUTH_TOKENS` (or the Space
+hasn't restarted yet). Anything **other than 401** with the token means auth
+passed — the real client handshake will then succeed.
 
 ## Deploy to Fly.io (alternative — usage-based, needs a card)
 
@@ -108,24 +190,64 @@ claude mcp add --transport http scprs-warehouse-remote https://<app>.fly.dev/mcp
   --header "Authorization: Bearer <your-token>"
 ```
 
-**Claude Desktop** — if it lacks native remote-MCP config, use the `mcp-remote`
-bridge in `claude_desktop_config.json`:
+**Claude Desktop (end-user setup).** Claude Desktop has no native remote-MCP
+field, so it connects through the **`mcp-remote`** bridge (a small npm helper that
+speaks stdio to Desktop and forwards to the HTTP endpoint with your bearer token).
 
-```json
-{
-  "mcpServers": {
-    "scprs-warehouse-remote": {
-      "command": "npx",
-      "args": ["-y", "mcp-remote", "https://<app>.fly.dev/mcp",
-               "--header", "Authorization: Bearer <your-token>"]
-    }
-  }
-}
-```
+*Prerequisite:* **Node.js** installed (provides `npx`). Get it from
+<https://nodejs.org> (LTS) if `node -v` fails in a terminal.
 
-Then just ask questions — e.g. *"Which canonical suppliers had the highest total
-value, and what do they mostly supply?"* The client calls `list_marts` /
-`data_dictionary` / `run_sql` under the hood.
+1. **Open the config file.** Easiest: Claude Desktop → **Settings → Developer →
+   Edit Config** — this opens the correct file regardless of how Desktop was
+   installed. (On the **Microsoft Store / MSIX** build the file is *not* at
+   `%APPDATA%\Claude\...`; it lives under the package container at
+   `%LOCALAPPDATA%\Packages\Claude_pzs8sxrjxfjjc\LocalCache\Roaming\Claude\claude_desktop_config.json`.
+   Editing the `%APPDATA%` path on that build looks fine but does nothing.)
+
+2. **Add the server.** On **Windows** wrap the launch in `cmd /c` so the sandbox
+   can find `npx` (a bare `"command": "npx"` often fails to spawn on the Store
+   build):
+
+   ```json
+   {
+     "mcpServers": {
+       "scprs-warehouse-remote": {
+         "command": "cmd",
+         "args": ["/c", "npx", "-y", "mcp-remote",
+                  "https://munther-hasan-scprs-warehouse-mcp.hf.space/mcp",
+                  "--header", "Authorization: Bearer YOUR_TOKEN_HERE"]
+       }
+     }
+   }
+   ```
+
+   On **macOS/Linux** drop the `cmd /c` wrapper — use `"command": "npx"` with the
+   args from `"-y"` onward. Replace `YOUR_TOKEN_HERE` with the token you were
+   issued (the label is *not* included — just the secret).
+
+3. **Fully restart Claude Desktop** (quit from the tray/menu, not just close the
+   window) so it reloads the config and launches the bridge.
+
+4. **Confirm it connected** — the server appears with a tools/plug icon in the
+   chat; you should see `list_marts`, `data_dictionary`, `describe_table`,
+   `run_sql`, `generate_chart`, `generate_report`. Then just ask, e.g. *"Which
+   canonical suppliers had the highest total value, and what do they mostly
+   supply?"* — the model calls `list_marts` / `data_dictionary` / `run_sql` for you.
+
+**First-call cold start:** the Space sleeps when idle, so the very first query
+after a quiet period can take ~30–60 s to wake the container, then it's fast.
+
+**Troubleshooting:**
+
+- *Server shows an error / won't start* → check the bridge log at
+  `…\LocalCache\Roaming\Claude\logs\mcp-server-scprs-warehouse-remote.log` (MSIX)
+  or `%APPDATA%\Claude\logs\...` (standard installer).
+- *401 in the log* → the token is wrong, or not in the Space's `MCP_AUTH_TOKENS`
+  yet (ask the admin; the Space must have restarted after being added).
+- *`npx` not found / spawn error* → Node isn't installed or the `cmd /c` wrapper
+  is missing on Windows.
+- *`421 Invalid Host header`* → server-side `MCP_ALLOWED_HOSTS` misconfig, not a
+  client problem — tell the admin.
 
 ## Charts & executive reports
 
