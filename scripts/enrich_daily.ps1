@@ -60,3 +60,13 @@ $health | Out-File -FilePath $log -Append -Encoding utf8
 if ($LASTEXITCODE -ne 0) {
     Log "$(Get-Date -Format o)  !! HEALTH ALERT: freshness check reported error(s) above"
 }
+
+# Contract-delta gate: snapshot the store's metrics and compare to the previous
+# run. Append-only metrics (line items, POs, progress) must never shrink; a drop
+# means data was lost or overwritten, which no internal-consistency check sees.
+& $py -m src.contracts capture 2>&1 | Out-File -FilePath $log -Append -Encoding utf8
+$contracts = & $py -m src.contracts check 2>&1
+$contracts | Out-File -FilePath $log -Append -Encoding utf8
+if ($LASTEXITCODE -ne 0) {
+    Log "$(Get-Date -Format o)  !! CONTRACT ALERT: metric-delta check reported error(s) above"
+}
