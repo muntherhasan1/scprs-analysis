@@ -43,6 +43,7 @@ COPIES = [
     ("Dockerfile.mcp", "Dockerfile"),  # HF builds ./Dockerfile
     ("requirements-mcp.txt", "requirements-mcp.txt"),
     ("src/mcp_server.py", "src/mcp_server.py"),
+    ("src/auth.py", "src/auth.py"),  # multi-token auth: mcp_server imports this at module level
     ("src/warehouse_query.py", "src/warehouse_query.py"),  # shared query guard
     ("src/query_log.py", "src/query_log.py"),  # optional tool-call audit log
     ("src/data_sync.py", "src/data_sync.py"),  # fetch the serve DB from the dataset at boot
