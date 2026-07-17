@@ -38,6 +38,45 @@ QUERY_TIMEOUT_S = float(os.environ.get("QUERY_TIMEOUT_S", "10"))
 # bound. No analytical use — reject outright.
 _BLOB_DENY = re.compile(r"\b(randomblob|zeroblob)\s*\(", re.IGNORECASE)
 
+# Curated, human-authored hints surfaced by `list_marts` and `schema_for_llm` so an
+# NL/MCP model picks the right mart *and dimension* instead of guessing (e.g. it must
+# not answer "top suppliers for IT Services" off UNSPSC — that's a sparse enriched
+# slice; "IT Services" is an `acquisition_type`). Internal constants only, never
+# caller input. Keyed by object name; objects without an entry report "".
+MART_DESCRIPTIONS: dict[str, str] = {
+    "gold_document": (
+        "Document grain (current version) with acquisition_type, acquisition_method, "
+        "canonical_name, department_name, fiscal_year, grand_total — the base for most "
+        "spend rollups. For 'top suppliers for <category>' filter acquisition_type and "
+        "group by canonical_name."
+    ),
+    "gold_supplier_acquisition_profile": (
+        "Supplier spend by acquisition_type — e.g. 'IT Services', 'IT Goods', "
+        "'NON-IT Services', 'NON-IT Goods', 'Telecom'. The mart for "
+        "'top suppliers for <category>' questions. Per supplier_id (double-counts "
+        "split vendors); for a canonical rollup, sum gold_document by canonical_name."
+    ),
+    "gold_acquisition_spend": (
+        "Spend by acquisition_method + competitive_flag ONLY — no acquisition_type "
+        "here. For acquisition_type questions use gold_supplier_acquisition_profile "
+        "or gold_document, not this mart."
+    ),
+    "gold_supplier_unspsc_profile": (
+        "Supplier spend by UNSPSC commodity code, built from ENRICHED line items only "
+        "(~9.7k lines) — a sparse slice, NOT full document spend. Not the same as the "
+        "'IT Services' acquisition_type; don't use it for acquisition-category questions."
+    ),
+    "gold_unspsc_spend": (
+        "Spend by UNSPSC commodity code — enriched line items only (sparse). A product "
+        "taxonomy, distinct from acquisition_type procurement categories."
+    ),
+    "gold_canonical_supplier_spend": (
+        "Total spend per real company (canonical vendor, deduped registrations). "
+        "Prefer over per-supplier_id marts, which double-count split vendors."
+    ),
+    "gold_supplier_master": "One row per canonical vendor (id/name crosswalk); deduped rollups.",
+}
+
 
 def connect() -> sqlite3.Connection:
     """Open warehouse.db read-only. Writes are impossible on this connection."""
@@ -63,13 +102,15 @@ def analytical_objects(con: sqlite3.Connection) -> set[str]:
 
 
 def list_marts() -> list[dict]:
-    """Analytical marts / star tables with row counts (sorted by name)."""
+    """Analytical marts / star tables with row counts + curated hints (by name)."""
     with connect() as con:
         out = []
         for name in sorted(analytical_objects(con)):
             # name comes from the sqlite_master allowlist, not the caller.
             count = con.execute(f'SELECT COUNT(*) FROM "{name}"').fetchone()[0]  # noqa: S608
-            out.append({"name": name, "rows": count})
+            out.append(
+                {"name": name, "rows": count, "description": MART_DESCRIPTIONS.get(name, "")}
+            )
         return out
 
 
@@ -86,6 +127,40 @@ def describe(name: str) -> dict:
         ]
         count = con.execute(f'SELECT COUNT(*) FROM "{name}"').fetchone()[0]  # noqa: S608
         return {"name": name, "row_count": count, "columns": cols}
+
+
+def distinct_values(table: str, column: str, max_values: int = 100) -> dict:
+    """Distinct values of one column with row counts — the vocabulary of a
+    low-cardinality categorical (e.g. ``acquisition_type``), so a model can filter
+    on real values instead of guessing labels that don't exist.
+
+    Both identifiers are validated first — ``table`` against the live allowlist and
+    ``column`` against that table's real columns — so nothing caller-supplied is
+    ever interpolated raw. High-cardinality columns are capped: ``truncated`` true
+    means the column has more than ``max_values`` distinct values (i.e. it isn't a
+    small categorical and a GROUP BY over it isn't meaningful here).
+    """
+    with connect() as con:
+        if table not in analytical_objects(con):
+            return {"error": f"Unknown or non-analytical object: {table!r}"}
+        # `table` is allowlisted above before this interpolation.
+        cols = {r[1] for r in con.execute(f'PRAGMA table_info("{table}")')}  # noqa: S608
+        if column not in cols:
+            return {"error": f"Column {column!r} not found on {table!r}."}
+        limit = max(1, min(max_values, 500))
+        # Both identifiers validated above (allowlist + real columns); the limit is
+        # a bound parameter. Values are returned as data, never interpolated.
+        rows = con.execute(
+            f'SELECT "{column}" AS value, COUNT(*) AS n FROM "{table}" '  # noqa: S608
+            f'GROUP BY "{column}" ORDER BY n DESC LIMIT ?',
+            (limit + 1,),
+        ).fetchall()
+        return {
+            "table": table,
+            "column": column,
+            "values": [{"value": r[0], "count": r[1]} for r in rows[:limit]],
+            "truncated": len(rows) > limit,
+        }
 
 
 def data_dictionary() -> list[dict]:
@@ -114,7 +189,9 @@ def schema_for_llm() -> str:
             # name is from the sqlite_master allowlist, not caller input.
             cols = [r[1] for r in con.execute(f'PRAGMA table_info("{name}")')]  # noqa: S608
             count = con.execute(f'SELECT COUNT(*) FROM "{name}"').fetchone()[0]  # noqa: S608
-            lines.append(f"{name} ({count} rows): {', '.join(cols)}")
+            desc = MART_DESCRIPTIONS.get(name)
+            hint = f"  -- {desc}" if desc else ""
+            lines.append(f"{name} ({count} rows): {', '.join(cols)}{hint}")
     return "\n".join(lines)
 
 

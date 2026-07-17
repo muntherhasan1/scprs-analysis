@@ -89,6 +89,35 @@ def test_schema_for_llm_lists_gold_views(tiny_db):
     assert "supplier" in text and "total" in text
 
 
+def test_list_marts_includes_description_field(tiny_db):
+    marts = wq.list_marts()
+    assert marts and all("description" in m for m in marts)
+    # gold_spend isn't a curated mart -> empty hint, but the key is always present.
+    spend = next(m for m in marts if m["name"] == "gold_spend")
+    assert spend["description"] == ""
+
+
+def test_distinct_values_lists_categorical_with_counts(tiny_db):
+    out = wq.distinct_values("gold_spend", "supplier")
+    assert "error" not in out
+    assert out["table"] == "gold_spend" and out["column"] == "supplier"
+    assert {v["value"] for v in out["values"]} == {"Acme", "Beta", "Gamma"}
+    assert all(v["count"] == 1 for v in out["values"])
+    assert out["truncated"] is False
+
+
+def test_distinct_values_flags_truncation(tiny_db):
+    out = wq.distinct_values("gold_spend", "supplier", max_values=2)
+    assert len(out["values"]) == 2 and out["truncated"] is True
+
+
+def test_distinct_values_guards_table_and_column(tiny_db):
+    # Non-allowlisted table and a fabricated column are both rejected before any
+    # interpolation — the same guard the other query surfaces rely on.
+    assert "error" in wq.distinct_values("sqlite_master", "name")
+    assert "error" in wq.distinct_values("gold_spend", "no_such_col")
+
+
 def test_extract_sql_strips_fences():
     assert nl_query._extract_sql("```sql\nSELECT 1\n```") == "SELECT 1"
     assert nl_query._extract_sql("SELECT 1;") == "SELECT 1"

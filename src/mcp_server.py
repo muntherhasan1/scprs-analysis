@@ -71,12 +71,15 @@ REPORTS_DIR = Path(os.environ.get("REPORTS_DIR", "reports"))
 
 @mcp.tool()
 def list_marts() -> list[dict]:
-    """List the analytical marts and star-schema tables with row counts.
+    """List the analytical marts and star-schema tables with row counts + a hint.
 
-    Prefer the friendly ``gold_*`` mart views for most questions. Canonical
+    Each row has a ``description`` steering you to the right mart *and dimension* —
+    read it before writing SQL. Prefer the friendly ``gold_*`` views. Canonical
     vendor rollups (one row per real company) are
     ``gold_canonical_supplier_spend`` / ``gold_supplier_master`` — the
     per-supplier_id marts double-count vendors that registered more than once.
+    For a question about a procurement category (e.g. "IT Services"), that's an
+    ``acquisition_type`` value — use ``distinct_values`` to see the exact labels.
     """
     return wq.list_marts()
 
@@ -85,6 +88,21 @@ def list_marts() -> list[dict]:
 def describe_table(name: str) -> dict:
     """Return the columns (logical names) and row count for one mart or table."""
     return wq.describe(name)
+
+
+@mcp.tool()
+def distinct_values(table: str, column: str, max_values: int = 100) -> dict:
+    """List the distinct values (with counts) of one column — the real vocabulary
+    of a categorical, so you filter on values that exist instead of guessing.
+
+    Use this before filtering an unfamiliar category column. E.g. for
+    "top suppliers for IT Services", call ``distinct_values("gold_document",
+    "acquisition_type")`` to confirm the label is ``'IT Services'`` (note
+    ``'NON-IT Services'`` also contains that text — anchor the filter, don't use
+    ``LIKE '%IT Services%'``). ``truncated`` true means the column is
+    high-cardinality (not a small categorical).
+    """
+    return wq.distinct_values(table, column, max_values=max_values)
 
 
 @mcp.tool()
