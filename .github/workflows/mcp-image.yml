@@ -43,7 +43,12 @@ jobs:
 
       - name: Boot + auth smoke test
         run: |
-          docker run -d --name mcp -e MCP_AUTH_TOKEN=ci-secret -p 8000:8000 scprs-mcp
+          # The image bakes in no data: WAREHOUSE_DB is fetched at boot from the
+          # private dataset, which CI has no token for. Mount the stub there
+          # instead so the server boots and the auth gate is what's exercised.
+          docker run -d --name mcp \
+            -v "$PWD/data/warehouse.db:/data/warehouse.db:ro" \
+            -e MCP_AUTH_TOKEN=ci-secret -p 8000:8000 scprs-mcp
           for _ in $(seq 1 20); do
             [ "$(curl -s -o /dev/null -w '%{http_code}' localhost:8000/healthz || true)" = "200" ] && break
             sleep 1
