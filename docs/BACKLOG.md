@@ -4,15 +4,20 @@ Small, deferred enhancements. Each entry: what, why, and where to start.
 
 ## Open
 
-### Web app (Model B) keep-warm + failure alert
-Give the public NL web app Space the same watchdog the MCP Space already has, so
-its Copilot/browser sessions don't hit a slept Space and its downtime is visible.
-- **Why:** the MCP Space is covered by `.github/workflows/mcp-keepwarm.yml` (pings
-  `/healthz` every 10 min, opens/auto-closes a `mcp-keepwarm-alert` GitHub issue on
-  failure). The web app Space has no equivalent.
-- **Start:** copy `mcp-keepwarm.yml` to a `webapp-keepwarm.yml`, point `URL` at the
-  web app Space's health endpoint (confirm its path — Gradio may not expose
-  `/healthz`; may need `/` or a lightweight route), and use a distinct alert label.
+### Auto-restart the Spaces after a data refresh
+`scripts/refresh_pipeline.ps1` publishes the serve DB unattended, but the Spaces
+only re-fetch it at boot — so a **manual** Factory reboot is currently required to
+go live (deferred by choice when the publish automation shipped).
+- **Why:** removes the one manual step in an otherwise hands-off refresh; lets the
+  scheduled task make new data live without a human.
+- **Start:** add a `restart-spaces` subcommand to `src/data_sync.py` — try
+  `HfApi().restart_space(repo, token)`, and on failure fall back to writing a
+  rotating value to a marker secret via `add_space_secret` (a changed secret
+  triggers a Space restart — see `deploy/hf-space/set_tokens.py:129`). Read a
+  settings-write token from `.env` (`HF_DEPLOY_TOKEN`) that covers **both**
+  `scprs-warehouse-mcp` and `scprs-warehouse-chat`; call it from
+  `refresh_pipeline.ps1` (best-effort — warn, never fail). A full design was
+  scoped 2026-07-17 (see the plan agent output that session).
 
 ### Capture per-section row counts in `generate_report` audit records
 The `generate_report` audit record logs the report `title` and section SQLs but
