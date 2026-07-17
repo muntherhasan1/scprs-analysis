@@ -1,9 +1,10 @@
 <#
 End-to-end online-data refresh (Phase 3 of the data pipeline).
 
-Rebuilds the warehouse from data/scprs.db, exports the slim serving DB, publishes
-it to the private HF Dataset, and restarts the Spaces so they re-fetch it on boot.
-Optionally drills a newest-first enrichment slice first (-Enrich).
+Rebuilds the warehouse from data/scprs.db, exports the slim serving DB, and
+publishes it to the private HF Dataset. The always-on Spaces fetch the serve DB only
+at boot, so reboot them (Space UI -> Settings -> Factory reboot) afterward to serve
+the new data. Optionally drills a newest-first enrichment slice first (-Enrich).
 
 Built for Windows Task Scheduler on the (intermittent) collection machine: the
 always-on Spaces serve whatever was last published, so a missed/late run only
@@ -55,30 +56,15 @@ try {
     }
     Step "warehouse build" { & $py -m src.warehouse build }
     Step "serve-export" { & $py -m src.warehouse serve-export }
-    $env:WAREHOUSE_DATASET = $Dataset
+    # publish reads the write-scoped HF_WAREHOUSE_TOKEN from the repo-root .env (via
+    # src/config); no HF token is set in this process's environment.
     Step "publish to dataset" { & $py -m src.data_sync publish --dataset $Dataset }
-    # Best-effort: the data is already published (the critical step). Restarting the
-    # Spaces so they re-fetch needs a WRITE-scoped HF_TOKEN (repo-write / an OAuth
-    # login is not enough for the Space management API). If it's missing, the refresh
-    # still succeeds — the Spaces pick up the new DB on their next restart.
-    $env:REFRESH_SPACES = ($Spaces -join ",")
-    Log "START restart spaces (best-effort)"
-    & $py -c @"
-import os
-from huggingface_hub import HfApi
-api = HfApi()
-tok = os.environ.get('HF_TOKEN')
-for s in os.environ['REFRESH_SPACES'].split(','):
-    api.restart_space(s.strip(), token=tok)
-    print('restarted', s.strip())
-"@
-    if ($LASTEXITCODE -ne 0) {
-        Log ("WARN restart spaces failed (exit $LASTEXITCODE) — data IS published; " +
-            "the Spaces will serve it on their next restart. Set a write-scoped HF_TOKEN " +
-            "so the pipeline can restart them automatically.")
-    }
-    else { Log "OK    restart spaces" }
-    Log "=== refresh done: serve DB published; Spaces re-fetch on restart ==="
+    # The serve DB is published (the critical step). The always-on Spaces only fetch
+    # it at boot, so they keep serving the previous snapshot until rebooted. We do NOT
+    # auto-restart here (that needs a Spaces-management token) — reboot them manually.
+    Log ("MANUAL STEP: factory-reboot these Spaces (Space UI -> Settings -> Factory " +
+        "reboot) to serve the new data: " + ($Spaces -join ', '))
+    Log "=== refresh done: serve DB published; reboot the Spaces to serve it ==="
 }
 catch {
     Log "ABORT: $_"

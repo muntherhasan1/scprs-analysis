@@ -20,6 +20,8 @@ import os
 import shutil
 from pathlib import Path
 
+from . import config  # noqa: F401 — imported for its load_dotenv() side-effect (.env in local dev)
+
 SERVE_FILENAME = "warehouse-serve.db"
 
 
@@ -91,6 +93,13 @@ def publish_serve_db(serve_path: Path, repo: str, token: str | None = None) -> s
     return getattr(info, "commit_url", str(info))
 
 
+def _publish_token() -> str | None:
+    """Token for publishing the serve DB: prefer the dedicated warehouse-data write
+    token, fall back to ``HF_TOKEN`` / the cached HF login. Read from the git-ignored
+    ``.env`` (loaded via the ``config`` import) so unattended runs need no cached login."""
+    return os.environ.get("HF_WAREHOUSE_TOKEN") or os.environ.get("HF_TOKEN")
+
+
 def _cli() -> None:
     import argparse
 
@@ -104,7 +113,7 @@ def _cli() -> None:
     if args.cmd == "publish":
         if not args.dataset:
             raise SystemExit("set --dataset or the WAREHOUSE_DATASET env var")
-        url = publish_serve_db(warehouse.SERVE_DB, args.dataset)
+        url = publish_serve_db(warehouse.SERVE_DB, args.dataset, token=_publish_token())
         print(f"Published {warehouse.SERVE_DB.name} -> {args.dataset}: {url}")
 
 
