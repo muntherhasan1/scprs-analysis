@@ -31,15 +31,20 @@ drops bronze/silver/history and materializes the few view-marts that depend on t
 python -m src.warehouse build            # scprs.db -> warehouse.db
 python -m src.warehouse serve-export     # -> warehouse-serve.db (slim)
 python -m src.data_sync publish --dataset munther-hasan/scprs-warehouse-data
-# then restart the Spaces so they re-fetch (or let the scheduled task do it)
+# then factory-reboot the Spaces (Space UI -> Settings) so they re-fetch the new DB
 ```
 
-Or all of it, with the Spaces restarted for you:
+Or the whole build → export → publish chain in one script:
 
 ```powershell
-powershell -File scripts\refresh_pipeline.ps1            # build → export → publish → restart
+powershell -File scripts\refresh_pipeline.ps1            # build → export → publish
 powershell -File scripts\refresh_pipeline.ps1 -Enrich    # also drill newest-first line items first
 ```
+
+The script publishes, then logs a `MANUAL STEP` reminder — it does **not**
+auto-restart the Spaces (that needs a Spaces-management token; intentionally out of
+scope). Reboot each Space once via the UI (Settings → Factory reboot) to serve the
+new data.
 
 ## Scheduling (intermittent machine)
 
@@ -58,10 +63,14 @@ last-published data in between.
 | `WAREHOUSE_DATASET` | Space **variable** + pipeline | The private dataset id to fetch/publish. |
 | `HF_TOKEN` (Space) | Space **secret** | Fine-grained token with **Read** on the (private) `scprs-warehouse-data` dataset — the Space needs it to fetch the serve-DB at boot. Keep it **read-only**; a wrong scope here fails boot (`RUNTIME_ERROR`). |
 | `QUERY_LOG_TOKEN` (Space) | Space **secret** (optional) | Fine-grained token with **Write** on `scprs-query-log`, used only by `query_log`. Split out so `HF_TOKEN` can stay read-only (least privilege). Falls back to `HF_TOKEN` if unset. |
-| `HF_TOKEN` (machine) | env var on the pipeline box | A **write**-scoped HF token so the pipeline can publish *and* restart the Spaces. An interactive `hf auth login` (OAuth) can publish but **cannot** restart a Space (the management API needs a write token). Without it the refresh still publishes — the Spaces just pick up the new DB on their next restart (the restart step is best-effort and only warns). |
+| `HF_WAREHOUSE_TOKEN` (machine) | repo-root `.env` | Fine-grained token with **Write** on `scprs-warehouse-data`, used by `data_sync publish` to push the serve DB. Loaded from `.env` (via `src/config`); falls back to `HF_TOKEN` if unset. The Space-deploy token is **not** enough — publishing to the dataset needs dataset write. |
 
-Set the machine's `HF_TOKEN` as a **user environment variable** so the scheduled
-task inherits it (don't bake a token into the task definition).
+Put the machine's pipeline tokens (`HF_WAREHOUSE_TOKEN`, and any others) in the
+**repo-root git-ignored `.env`** — the scheduled task runs with `-WorkingDirectory`
+at the repo root, so `src/config` loads them; no machine-wide token env var or cached
+`hf auth login` is needed. The **Space reboot stays manual**: a scheduled run
+publishes fresh data, but the Spaces keep serving the previous snapshot until you
+factory-reboot them (Space UI → Settings → Factory reboot).
 
 Unset `WAREHOUSE_DATASET` locally → `ensure_local_db` is a no-op and the local
 `data/warehouse.db` is used, so dev and tests are unaffected.

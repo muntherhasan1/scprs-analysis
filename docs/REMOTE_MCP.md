@@ -294,11 +294,13 @@ share one dataset. To avoid the two Spaces clobbering each other's file (the
 
 ## Refreshing the data
 
-The DB is a read-only snapshot baked into the image. To publish fresh data:
+On Hugging Face the DB is **not** baked into the image — the Space fetches
+`warehouse-serve.db` from the private `WAREHOUSE_DATASET` at boot
+(`src/data_sync.ensure_local_db`), so refreshing data is decoupled from code
+deploys. The flow is: rebuild the warehouse → export the slim serve DB → publish it
+to the dataset → factory-reboot the Space so it re-fetches.
 
-```bash
-python -m src.warehouse build      # rebuild data/warehouse.db locally
-fly deploy                         # rebuild + ship the image with the new DB
-```
+See **[docs/PIPELINE.md](PIPELINE.md)** for the full procedure, the token model
+(`HF_WAREHOUSE_TOKEN`), and the `scripts/refresh_pipeline.ps1` automation.
 
-(The scraper stays local — only the built warehouse is shipped.)
+(The scraper stays local — only the built serve DB is shipped to the dataset.)
