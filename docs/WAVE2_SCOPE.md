@@ -1,7 +1,8 @@
 # Wave 2 scope — cloud orchestration (device-free pipeline)
 
 > Part of the platform-hardening roadmap. Wave 1 (observability: `health`/`canary`/
-> `contracts`) shipped in PR #13. This is the scope for Wave 2.
+> `contracts`) was authored in PR #13 but never merged; it lands on `main` as the
+> prerequisite for this wave (the enrichment canary gates on those checks).
 
 ## Goal
 

@@ -44,3 +44,23 @@ catch {
     Log "$(Get-Date -Format o)  ERROR: $($_.Exception.Message)"
     throw
 }
+
+# Freshness gate: independent of whether the enrich call above "succeeded",
+# verify the store is actually advancing. This is what turns a silent failure
+# (a job that runs but records nothing) into a loud one. Advisory — a stale
+# finding is logged prominently but does not fail the job.
+$health = & $py -m src.health 2>&1
+$health | Out-File -FilePath $log -Append -Encoding utf8
+if ($LASTEXITCODE -ne 0) {
+    Log "$(Get-Date -Format o)  !! HEALTH ALERT: freshness check reported error(s) above"
+}
+
+# Contract-delta gate: snapshot the store's metrics and compare to the previous
+# run. Append-only metrics (line items, POs, progress) must never shrink; a drop
+# means data was lost or overwritten, which no internal-consistency check sees.
+& $py -m src.contracts capture 2>&1 | Out-File -FilePath $log -Append -Encoding utf8
+$contracts = & $py -m src.contracts check 2>&1
+$contracts | Out-File -FilePath $log -Append -Encoding utf8
+if ($LASTEXITCODE -ne 0) {
+    Log "$(Get-Date -Format o)  !! CONTRACT ALERT: metric-delta check reported error(s) above"
+}
