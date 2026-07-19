@@ -1,17 +1,24 @@
-"""Sync the slim serving DB between the data pipeline and the deployed front ends.
+"""Sync SQLite stores between the data pipeline and the deployed front ends / CI.
 
-The always-on Spaces (MCP server, web app) do **not** bake the warehouse into
-their image; they FETCH ``warehouse-serve.db`` from a private HF Dataset at
-startup (``ensure_local_db``). The data pipeline PUBLISHES the freshly built serve
-DB to that same Dataset (``publish_serve_db``). This decouples data refreshes (a
-dataset push + a cheap Space restart) from code deploys (an image rebuild), and
-keeps the always-on Spaces independent of the sometimes-off machine that collects
-the data — the Space pulls from the Dataset (HF infra), never from that machine.
+Two databases move through private HF Datasets:
 
-Both functions are no-ops of a sort for local dev: ``ensure_local_db`` does nothing
-unless ``WAREHOUSE_DATASET`` is set, so a local checkout keeps using its own
-``data/warehouse.db``. The Space needs an HF token with read access to the private
-dataset in ``HF_TOKEN``.
+* **Serve DB** (``warehouse-serve.db``) — the slim, gold-only serving copy. The
+  always-on Spaces (MCP server, web app) do **not** bake it into their image; they
+  FETCH it from a private HF Dataset at startup (``ensure_local_db``). The pipeline
+  PUBLISHES the freshly built serve DB to that same Dataset (``publish_serve_db``).
+  This decouples data refreshes (a dataset push + a cheap Space restart) from code
+  deploys (an image rebuild), and keeps the Spaces independent of the sometimes-off
+  collection machine — the Space pulls from the Dataset (HF infra), never the laptop.
+
+* **Operational DB** (``scprs.db``) — the full operational store. Wave 2 moves the
+  recurring enrichment off the laptop into GitHub Actions; CI becomes the single
+  writer of ``scprs.db`` via a **download → mutate → upload-on-success** contract
+  (``fetch_operational_db`` / ``publish_operational_db``), so the pipeline advances
+  24/7 with no local machine running.
+
+Both fetch functions are no-ops for local dev unless their dataset env var is set,
+so a local checkout keeps using its own ``data/*.db``. A fetch needs an HF token with
+read access to the private dataset; a publish needs read+write.
 """
 
 from __future__ import annotations
@@ -23,49 +30,81 @@ from pathlib import Path
 from . import config  # noqa: F401 — imported for its load_dotenv() side-effect (.env in local dev)
 
 SERVE_FILENAME = "warehouse-serve.db"
+OPERATIONAL_FILENAME = "scprs.db"
 
 
 class WarehouseFetchError(RuntimeError):
-    """Fetching the serve DB from the dataset failed — usually the Space's HF_TOKEN
-    lacks READ access to the (private) dataset, or WAREHOUSE_DATASET is wrong."""
+    """Fetching a DB from its dataset failed — usually the caller's HF token lacks
+    READ access to the (private) dataset, or the dataset env var is wrong."""
 
 
-def ensure_local_db(dest: Path) -> bool:
-    """Fetch the serve DB from the ``WAREHOUSE_DATASET`` dataset into ``dest``.
+def _download_db(repo: str, filename: str, dest: Path, token: str | None) -> None:
+    """Atomically fetch ``filename`` from dataset ``repo`` into ``dest``.
 
-    Returns True if a fetch happened, False when disabled (no ``WAREHOUSE_DATASET``)
-    so the caller falls back to whatever is already at ``dest``. Atomic: downloads
-    to a temp file then renames into place, so a reader never sees a half-written DB.
-    Raises ``WarehouseFetchError`` with an actionable message if the download fails
-    (so a token/config mistake shows a clear boot error, not a raw traceback).
+    Downloads to a temp file then renames into place, so a reader never sees a
+    half-written DB. Raises ``WarehouseFetchError`` with an actionable message if the
+    download fails (so a token/config mistake shows a clear error, not a raw traceback).
     """
-    repo = os.environ.get("WAREHOUSE_DATASET")
-    if not repo:
-        return False
     from huggingface_hub import hf_hub_download
 
     try:
         # nosec B615 — intentionally track the latest revision (main) of our OWN
         # private, access-controlled dataset; pinning an immutable commit would
-        # defeat the fetch-newest-on-restart refresh model this design is built on.
+        # defeat the fetch-newest refresh model this design is built on.
         cached = hf_hub_download(  # nosec B615
             repo_id=repo,
-            filename=SERVE_FILENAME,
+            filename=filename,
             repo_type="dataset",
             revision="main",
-            token=os.environ.get("HF_TOKEN"),
+            token=token,
         )
     except Exception as exc:  # noqa: BLE001 — re-raised as an actionable error below
         raise WarehouseFetchError(
-            f"Could not fetch {SERVE_FILENAME!r} from dataset {repo!r}: "
-            f"{type(exc).__name__}: {exc}. Check that HF_TOKEN has READ access to "
-            f"that (private) dataset and that WAREHOUSE_DATASET is correct."
+            f"Could not fetch {filename!r} from dataset {repo!r}: "
+            f"{type(exc).__name__}: {exc}. Check that the HF token (HF_TOKEN) has READ "
+            f"access to that (private) dataset and that the dataset id is correct."
         ) from exc
     dest = Path(dest)
     dest.parent.mkdir(parents=True, exist_ok=True)
     tmp = dest.with_name(dest.name + ".tmp")
     shutil.copyfile(cached, tmp)
     os.replace(tmp, dest)  # atomic on the same filesystem
+
+
+def _upload_db(path: Path, repo: str, filename: str, token: str | None, message: str) -> str:
+    """Upload ``path`` to the private HF Dataset ``repo`` as ``filename`` (repo created
+    if missing). Returns the commit URL."""
+    from huggingface_hub import HfApi, create_repo
+
+    path = Path(path)
+    if not path.exists():
+        raise FileNotFoundError(f"{path} not found")
+    create_repo(repo, repo_type="dataset", private=True, exist_ok=True, token=token)
+    info = HfApi().upload_file(
+        path_or_fileobj=str(path),
+        path_in_repo=filename,
+        repo_id=repo,
+        repo_type="dataset",
+        token=token,
+        commit_message=message,
+    )
+    return getattr(info, "commit_url", str(info))
+
+
+# --------------------------------------------------------------------------- serve DB
+
+
+def ensure_local_db(dest: Path) -> bool:
+    """Fetch the serve DB from the ``WAREHOUSE_DATASET`` dataset into ``dest``.
+
+    Returns True if a fetch happened, False when disabled (no ``WAREHOUSE_DATASET``)
+    so the caller falls back to whatever is already at ``dest``. The Space provides
+    read access via ``HF_TOKEN``.
+    """
+    repo = os.environ.get("WAREHOUSE_DATASET")
+    if not repo:
+        return False
+    _download_db(repo, SERVE_FILENAME, dest, os.environ.get("HF_TOKEN"))
     return True
 
 
@@ -75,22 +114,49 @@ def publish_serve_db(serve_path: Path, repo: str, token: str | None = None) -> s
     Returns the commit URL. Called by the pipeline after a build; the token defaults
     to ``HF_TOKEN`` / the caller's cached HF login.
     """
-    from huggingface_hub import HfApi, create_repo
-
     serve_path = Path(serve_path)
     if not serve_path.exists():
         raise FileNotFoundError(f"{serve_path} not found — run `warehouse serve-export` first")
-    token = token or os.environ.get("HF_TOKEN")
-    create_repo(repo, repo_type="dataset", private=True, exist_ok=True, token=token)
-    info = HfApi().upload_file(
-        path_or_fileobj=str(serve_path),
-        path_in_repo=SERVE_FILENAME,
-        repo_id=repo,
-        repo_type="dataset",
-        token=token,
-        commit_message="Publish serve DB",
+    return _upload_db(
+        serve_path, repo, SERVE_FILENAME, token or os.environ.get("HF_TOKEN"), "Publish serve DB"
     )
-    return getattr(info, "commit_url", str(info))
+
+
+# --------------------------------------------------------------- operational DB (Wave 2)
+
+
+def fetch_operational_db(dest: Path, repo: str | None = None, token: str | None = None) -> bool:
+    """Fetch the operational store (``scprs.db``) from its dataset into ``dest``.
+
+    ``repo`` defaults to the ``SCPRS_DATASET`` env var; ``token`` to the dedicated
+    operational token / ``HF_TOKEN``. Returns True if a fetch happened, False when no
+    dataset is configured (local dev keeps its own ``data/scprs.db``). This is the
+    "download" half of CI's download → mutate → upload-on-success contract.
+    """
+    repo = repo or os.environ.get("SCPRS_DATASET")
+    if not repo:
+        return False
+    _download_db(repo, OPERATIONAL_FILENAME, dest, token or _operational_token())
+    return True
+
+
+def publish_operational_db(db_path: Path, repo: str, token: str | None = None) -> str:
+    """Upload the operational store (``scprs.db``) to the private HF Dataset ``repo``.
+
+    Returns the commit URL. Called by CI **only on a successful, gated run** so a
+    failed/partial enrichment leaves the dataset untouched and the day unrecorded,
+    letting the next run safely retry (the incremental design guarantees this).
+    """
+    db_path = Path(db_path)
+    if not db_path.exists():
+        raise FileNotFoundError(f"{db_path} not found — nothing to publish")
+    return _upload_db(
+        db_path,
+        repo,
+        OPERATIONAL_FILENAME,
+        token or _operational_token(),
+        "Publish operational DB (CI enrichment)",
+    )
 
 
 def _publish_token() -> str | None:
@@ -100,21 +166,49 @@ def _publish_token() -> str | None:
     return os.environ.get("HF_WAREHOUSE_TOKEN") or os.environ.get("HF_TOKEN")
 
 
+def _operational_token() -> str | None:
+    """Token for fetching/publishing the operational DB: prefer the dedicated
+    scprs-operational-db read+write token, fall back to ``HF_TOKEN``. In Actions this
+    is the ``HF_SCPRS_TOKEN`` secret; the single writer of ``scprs.db``."""
+    return os.environ.get("HF_SCPRS_TOKEN") or os.environ.get("HF_TOKEN")
+
+
 def _cli() -> None:
     import argparse
 
-    from . import warehouse
+    from . import model, warehouse
 
-    ap = argparse.ArgumentParser(description="Sync the slim serving DB with a private HF Dataset.")
+    ap = argparse.ArgumentParser(description="Sync pipeline SQLite stores with private HF Datasets")
     sub = ap.add_subparsers(dest="cmd", required=True)
+
     pub = sub.add_parser("publish", help="Upload data/warehouse-serve.db to the dataset")
     pub.add_argument("--dataset", default=os.environ.get("WAREHOUSE_DATASET"))
+
+    fop = sub.add_parser("fetch-operational", help="Download scprs.db from its dataset")
+    fop.add_argument("--dataset", default=os.environ.get("SCPRS_DATASET"))
+    fop.add_argument("--dest", default=str(model.DB_PATH))
+
+    pop = sub.add_parser("publish-operational", help="Upload scprs.db to its dataset (CI writer)")
+    pop.add_argument("--dataset", default=os.environ.get("SCPRS_DATASET"))
+    pop.add_argument("--path", default=str(model.DB_PATH))
+
     args = ap.parse_args()
+
     if args.cmd == "publish":
         if not args.dataset:
             raise SystemExit("set --dataset or the WAREHOUSE_DATASET env var")
         url = publish_serve_db(warehouse.SERVE_DB, args.dataset, token=_publish_token())
         print(f"Published {warehouse.SERVE_DB.name} -> {args.dataset}: {url}")
+    elif args.cmd == "fetch-operational":
+        if not args.dataset:
+            raise SystemExit("set --dataset or the SCPRS_DATASET env var")
+        fetch_operational_db(Path(args.dest), repo=args.dataset)
+        print(f"Fetched {OPERATIONAL_FILENAME} <- {args.dataset} into {args.dest}")
+    elif args.cmd == "publish-operational":
+        if not args.dataset:
+            raise SystemExit("set --dataset or the SCPRS_DATASET env var")
+        url = publish_operational_db(Path(args.path), args.dataset)
+        print(f"Published {OPERATIONAL_FILENAME} -> {args.dataset}: {url}")
 
 
 if __name__ == "__main__":
