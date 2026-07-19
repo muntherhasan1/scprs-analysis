@@ -1,5 +1,5 @@
 # Runtime dependencies. Pin versions for reproducible, auditable deploys.
-pandas>=3.0        # upgraded to 3.x (2026-07): new default string dtype + Copy-on-Write; load_extract handles both dtypes
+pandas>=3.0.3      # upgraded to 3.x (2026-07): new default string dtype + Copy-on-Write; load_extract handles both dtypes
 python-dotenv>=1.2.2
 
 # --- Web scraping / CSV downloads ---
