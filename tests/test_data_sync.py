@@ -272,8 +272,9 @@ def test_fetch_operational_cli(tmp_path, monkeypatch):
         return True
 
     monkeypatch.setattr(data_sync, "fetch_operational_db", recorder)
-    # The CLI also best-effort fetches the supplier side input — stub it offline.
+    # The CLI also best-effort fetches the optional side inputs — stub them offline.
     monkeypatch.setattr(data_sync, "fetch_supplier_db", lambda dest, repo=None: False)
+    monkeypatch.setattr(data_sync, "fetch_cmas_db", lambda dest, repo=None: False)
     dest = tmp_path / "scprs.db"
     monkeypatch.setattr(
         sys,
@@ -283,3 +284,66 @@ def test_fetch_operational_cli(tmp_path, monkeypatch):
     data_sync._cli()
     assert captured["repo"] == "acme/op"
     assert captured["dest"] == str(dest)
+
+
+def test_fetch_cmas_db_noop_without_dataset(tmp_path, monkeypatch):
+    monkeypatch.delenv("SCPRS_DATASET", raising=False)
+    assert data_sync.fetch_cmas_db(tmp_path / "cmas.db") is False
+
+
+def test_fetch_cmas_db_absent_file_is_false_not_error(tmp_path, monkeypatch):
+    """The CMAS side input is optional — a failed fetch returns False, not raises,
+    so `fetch-operational` still succeeds and the build just skips CMAS."""
+    import huggingface_hub
+
+    def boom(**kw):
+        raise RuntimeError("404 Entry Not Found")
+
+    monkeypatch.setattr(huggingface_hub, "hf_hub_download", boom)
+    dest = tmp_path / "cmas.db"
+    assert data_sync.fetch_cmas_db(dest, repo="acme/scprs-operational-db") is False
+    assert not dest.exists()
+
+
+def test_fetch_cmas_db_fetches_with_operational_token(tmp_path, monkeypatch):
+    import huggingface_hub
+
+    remote = tmp_path / "remote.db"
+    remote.write_bytes(b"cmas-bytes")
+    monkeypatch.setenv("HF_SCPRS_TOKEN", "op-token")
+    captured = {}
+
+    def fake_download(**kw):
+        captured.update(kw)
+        return str(remote)
+
+    monkeypatch.setattr(huggingface_hub, "hf_hub_download", fake_download)
+    dest = tmp_path / "cmas.db"
+    assert data_sync.fetch_cmas_db(dest, repo="acme/scprs-operational-db") is True
+    assert dest.read_bytes() == b"cmas-bytes"
+    assert captured["filename"] == "cmas.db"
+    assert captured["token"] == "op-token"  # noqa: S105 — test literal
+
+
+def test_publish_cmas_db_missing_file(tmp_path):
+    with pytest.raises(FileNotFoundError):
+        data_sync.publish_cmas_db(tmp_path / "nope.db", "acme/scprs-operational-db")
+
+
+def test_publish_cmas_cli(tmp_path, monkeypatch):
+    monkeypatch.setenv("HF_SCPRS_TOKEN", "scprs-write")
+    db = tmp_path / "cmas.db"
+    db.write_bytes(b"x")
+    captured = {}
+
+    def recorder(db_path, repo, token=None):
+        captured.update(repo=repo, path=str(db_path))
+        return "https://hf/commit/abc"
+
+    monkeypatch.setattr(data_sync, "publish_cmas_db", recorder)
+    monkeypatch.setattr(
+        sys, "argv", ["data_sync", "publish-cmas", "--dataset", "acme/op", "--path", str(db)]
+    )
+    data_sync._cli()
+    assert captured["repo"] == "acme/op"
+    assert captured["path"] == str(db)

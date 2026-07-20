@@ -97,3 +97,19 @@ CMAS agreements) — expected, since CMAS is statewide while the SCPRS spend dat
 covers a priority subset of departments. Both marts flow into the slim serve DB
 (materialized, since they read `bronze_cmas`), so the MCP server and web app serve
 them automatically.
+
+## Device-free refresh (CI)
+
+CMAS refreshes itself in GitHub Actions — no laptop, like the rest of Wave 2.
+`.github/workflows/cmas-refresh.yml` runs daily (`37 6 * * *`): `src.cmas extract`
+(pure HTTP, no browser) → a non-empty sanity check → `data_sync publish-cmas`,
+which uploads `cmas.db` **alongside `scprs.db`** in the operational dataset
+(`munther-hasan/scprs-operational-db`). It shares the `scprs-operational-writer`
+concurrency group with the enrich workflow, so two commits never race the dataset,
+and only a non-empty extract is published (upload-on-success — a run blocked by
+cloud IPs never overwrites good data).
+
+The enrich workflow's `data_sync fetch-operational` then pulls `cmas.db` (best
+effort, alongside `scprs.db` and `supplier_enrichment.db`) before `warehouse
+build`, so the CI-built gold — and the served marts — carry real CMAS data. Absent
+the file (before the first successful refresh), the build skips CMAS cleanly.
