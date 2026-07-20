@@ -23,6 +23,7 @@ param(
     [switch]$Enrich,
     [int]$EnrichDays = 200,
     [string]$Dataset = "munther-hasan/scprs-warehouse-data",
+    [string]$OperationalDataset = "munther-hasan/scprs-operational-db",
     [string[]]$Spaces = @(
         "munther-hasan/scprs-warehouse-mcp",
         "munther-hasan/scprs-warehouse-chat"
@@ -48,10 +49,23 @@ function Step($label, [scriptblock]$body) {
 
 Log "=== refresh start (enrich=$Enrich) ==="
 try {
+    # Wave 2c single-writer model: CI owns scprs.db (the HF dataset copy is the
+    # source of truth). Always refresh the local copy first so the warehouse
+    # builds on CI's latest enrichment, not a stale local file.
+    Step "fetch operational store" {
+        & $py -m src.data_sync fetch-operational --dataset $OperationalDataset
+    }
     if ($Enrich) {
         Step "enrich (newest-first)" {
             & powershell -NoProfile -ExecutionPolicy Bypass `
                 -File (Join-Path $root "scripts\enrich_batch.ps1") -Days $EnrichDays
+        }
+        # Local enrichment must flow back to the dataset, or the next fetch
+        # (here or in CI) would discard it. The CI cron's concurrency group does
+        # not cover this local publish — avoid running during a scheduled slot
+        # (17 past 02/08/14/20 UTC).
+        Step "publish operational store" {
+            & $py -m src.data_sync publish-operational --dataset $OperationalDataset
         }
     }
     Step "warehouse build" { & $py -m src.warehouse build }
@@ -60,11 +74,13 @@ try {
     # src/config); no HF token is set in this process's environment.
     Step "publish to dataset" { & $py -m src.data_sync publish --dataset $Dataset }
     # The serve DB is published (the critical step). The always-on Spaces only fetch
-    # it at boot, so they keep serving the previous snapshot until rebooted. We do NOT
-    # auto-restart here (that needs a Spaces-management token) — reboot them manually.
-    Log ("MANUAL STEP: factory-reboot these Spaces (Space UI -> Settings -> Factory " +
-        "reboot) to serve the new data: " + ($Spaces -join ', '))
-    Log "=== refresh done: serve DB published; reboot the Spaces to serve it ==="
+    # it at boot; try a best-effort restart so the new data goes live (needs
+    # HF_DEPLOY_TOKEN in .env — without it each Space prints FAILED and the exit
+    # code stays 0). Never gates the run: the publish already succeeded.
+    (& $py -m src.data_sync restart-spaces 2>&1) | Tee-Object -FilePath $log -Append
+    Log ("If a restart FAILED above, reboot manually (Space UI -> Settings -> " +
+        "Factory reboot): " + ($Spaces -join ', '))
+    Log "=== refresh done: serve DB published ==="
 }
 catch {
     Log "ABORT: $_"

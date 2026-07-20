@@ -171,6 +171,96 @@ def test_publish_operational_cli(tmp_path, monkeypatch):
     assert captured["path"] == str(db)
 
 
+def test_fetch_supplier_db_noop_without_dataset(tmp_path, monkeypatch):
+    monkeypatch.delenv("SCPRS_DATASET", raising=False)
+    assert data_sync.fetch_supplier_db(tmp_path / "supplier_enrichment.db") is False
+
+
+def test_fetch_supplier_db_absent_file_is_false_not_error(tmp_path, monkeypatch):
+    """The side input is optional (absent until first published) — a failed fetch
+    must return False, not raise, so `fetch-operational` still succeeds."""
+    import huggingface_hub
+
+    def boom(**kw):
+        raise RuntimeError("404 Entry Not Found")
+
+    monkeypatch.setattr(huggingface_hub, "hf_hub_download", boom)
+    dest = tmp_path / "supplier_enrichment.db"
+    assert data_sync.fetch_supplier_db(dest, repo="acme/scprs-operational-db") is False
+    assert not dest.exists()
+
+
+def test_fetch_supplier_db_fetches_with_operational_token(tmp_path, monkeypatch):
+    import huggingface_hub
+
+    remote = tmp_path / "remote.db"
+    remote.write_bytes(b"supplier-bytes")
+    monkeypatch.setenv("HF_SCPRS_TOKEN", "op-token")
+    captured = {}
+
+    def fake_download(**kw):
+        captured.update(kw)
+        return str(remote)
+
+    monkeypatch.setattr(huggingface_hub, "hf_hub_download", fake_download)
+    dest = tmp_path / "supplier_enrichment.db"
+    assert data_sync.fetch_supplier_db(dest, repo="acme/scprs-operational-db") is True
+    assert dest.read_bytes() == b"supplier-bytes"
+    assert captured["filename"] == "supplier_enrichment.db"
+    assert captured["token"] == "op-token"  # noqa: S105 — test literal
+
+
+def test_publish_supplier_db_missing_file(tmp_path):
+    with pytest.raises(FileNotFoundError):
+        data_sync.publish_supplier_db(tmp_path / "nope.db", "acme/scprs-operational-db")
+
+
+def test_restart_spaces_is_best_effort(monkeypatch):
+    """One Space restarting and one failing must yield per-Space outcomes, no raise."""
+    import huggingface_hub
+
+    calls = []
+
+    class FakeApi:
+        def restart_space(self, repo_id, token=None):
+            calls.append((repo_id, token))
+            if "chat" in repo_id:
+                raise RuntimeError("403 Forbidden")
+
+    monkeypatch.setattr(huggingface_hub, "HfApi", FakeApi)
+    monkeypatch.setenv("HF_DEPLOY_TOKEN", "deploy-token")
+    results = dict(
+        data_sync.restart_spaces(("acme/scprs-warehouse-mcp", "acme/scprs-warehouse-chat"))
+    )
+    assert results["acme/scprs-warehouse-mcp"] == "restarted"
+    assert results["acme/scprs-warehouse-chat"].startswith("FAILED:")
+    assert all(token == "deploy-token" for _, token in calls)  # noqa: S105 — test literal
+
+
+def test_deploy_token_precedence(monkeypatch):
+    monkeypatch.delenv("HF_DEPLOY_TOKEN", raising=False)
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+    assert data_sync._deploy_token() is None
+    monkeypatch.setenv("HF_TOKEN", "cached-login")
+    assert data_sync._deploy_token() == "cached-login"
+    monkeypatch.setenv("HF_DEPLOY_TOKEN", "spaces-write")
+    assert data_sync._deploy_token() == "spaces-write"  # dedicated token wins
+
+
+def test_restart_spaces_cli_defaults_and_exit_zero(monkeypatch, capsys):
+    captured = {}
+
+    def recorder(spaces, token=None):
+        captured["spaces"] = spaces
+        return [(s, "FAILED: no token") for s in spaces]
+
+    monkeypatch.setattr(data_sync, "restart_spaces", recorder)
+    monkeypatch.setattr(sys, "argv", ["data_sync", "restart-spaces"])
+    data_sync._cli()  # must not raise/exit non-zero even when every restart fails
+    assert captured["spaces"] == data_sync.DEFAULT_SPACES
+    assert "FAILED" in capsys.readouterr().out
+
+
 def test_fetch_operational_cli(tmp_path, monkeypatch):
     captured = {}
 
@@ -179,6 +269,8 @@ def test_fetch_operational_cli(tmp_path, monkeypatch):
         return True
 
     monkeypatch.setattr(data_sync, "fetch_operational_db", recorder)
+    # The CLI also best-effort fetches the supplier side input — stub it offline.
+    monkeypatch.setattr(data_sync, "fetch_supplier_db", lambda dest, repo=None: False)
     dest = tmp_path / "scprs.db"
     monkeypatch.setattr(
         sys,

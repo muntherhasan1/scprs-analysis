@@ -78,10 +78,18 @@ deadlock — publishing is what advances freshness. Guardrails:
   guarantees this).
 - Secret: an HF token with **read+write** on the `scprs.db` dataset (Actions secret).
 
-### 2c — Refresh in Actions
-Chain `warehouse build → serve-export → data_sync publish` (all reused from PR #20)
-after enrichment. Restarting the Spaces to go live is the **auto-restart backlog
-item** (`docs/BACKLOG.md`) — needed here to close the loop fully device-free.
+### 2c — Refresh in Actions — SHIPPED 2026-07-20
+Chained `warehouse build → serve-export → data_sync publish` (reused from PR #20)
+after the operational publish in the same workflow. The supplier side input
+(`supplier_enrichment.db`) now syncs through the operational dataset
+(`fetch-operational` pulls it best-effort; `publish-supplier` pushes it after
+local research sessions) so CI-built gold keeps the web-researched firmographics.
+Go-live is a best-effort `data_sync restart-spaces` (needs the optional
+`HF_DEPLOY_TOKEN` — write on both Space repos — as an Actions secret and in
+`.env`; without it the step prints FAILED and the Spaces serve the previous
+snapshot until manually rebooted). `refresh_pipeline.ps1` follows the
+single-writer model: it always fetches the operational store first, and `-Enrich`
+publishes back.
 
 ### 2d — (later) Dagster + lineage
 Pipeline-as-assets and richer data versioning. Deferred; the Actions workflows are
