@@ -196,6 +196,29 @@ def evaluate(
     return findings
 
 
+def next_bu(con: sqlite3.Connection) -> str | None:
+    """The business unit most in need of enrichment, or None when nothing pends.
+
+    Selection order: units with pending days only; never-enriched first (they are
+    infinitely stale), then least-recently-advanced, then most pending, then BU
+    code for determinism. This is what lets a scheduled runner cure its own
+    staleness findings — each run advances the worst unit, so the pick rotates
+    as `last_enriched` timestamps update."""
+    candidates = [u for u in _load_state(con) if u.pending_days > 0]
+    if not candidates:
+        return None
+    epoch = datetime.min.replace(tzinfo=timezone.utc)
+    candidates.sort(
+        key=lambda u: (
+            u.last_enriched is not None,
+            u.last_enriched or epoch,
+            -u.pending_days,
+            u.business_unit,
+        )
+    )
+    return candidates[0].business_unit
+
+
 def _print_report(findings: list[Finding]) -> None:
     # ASCII markers, not emoji: this runs on the Windows console (cp1252), where
     # emoji raise UnicodeEncodeError.
@@ -214,11 +237,23 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--min-coverage", type=float, default=DEFAULT_MIN_COVERAGE)
     ap.add_argument("--db", type=Path, default=DB_PATH, help="Path to scprs.db")
     ap.add_argument("--json", action="store_true", help="Emit findings as JSON")
+    ap.add_argument(
+        "--next-bu",
+        action="store_true",
+        help="Print only the business unit most in need of enrichment "
+        "(exit 1 if nothing is pending) — for scheduled runners.",
+    )
     args = ap.parse_args(argv)
 
     # Read-only: never let a health check mutate the store it inspects.
     con = sqlite3.connect(f"file:{args.db}?mode=ro", uri=True)
     try:
+        if args.next_bu:
+            bu = next_bu(con)
+            if bu is None:
+                return 1
+            print(bu)
+            return 0
         findings = evaluate(con, stale_hours=args.stale_hours, min_coverage=args.min_coverage)
     finally:
         con.close()
