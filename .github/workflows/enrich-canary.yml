@@ -1,0 +1,99 @@
+name: Enrich canary (Wave 2)
+
+# Manual-only canary that de-risks Wave 2's biggest unknown: does the headless
+# PeopleSoft scraper work from GitHub Actions' cloud IPs, and does the
+# fetch -> mutate -> publish round-trip on scprs.db hold together?
+#
+# It runs ONE small enrichment slice, then the Wave-1 checks, and only publishes
+# the mutated scprs.db back to its dataset if everything passes (upload-on-success).
+# Prove this by hand before adding a cron schedule in sub-phase 2b.
+on:
+  workflow_dispatch:
+    inputs:
+      business_unit:
+        description: Business unit to enrich
+        default: "8660"
+      limit:
+        description: Max days to process this run (keep small for a canary)
+        default: "3"
+      from_date:
+        description: Window start (MM/DD/YYYY) — bounds eligible summarized days
+        default: "07/01/2016"
+      to_date:
+        description: Window end (MM/DD/YYYY)
+        default: "06/30/2028"
+
+permissions:
+  contents: read
+
+# Single-writer guarantee: only one run may mutate scprs.db at a time. Do NOT
+# cancel an in-progress run — a writer interrupted mid-upload could corrupt the
+# dataset; queue instead. Sub-phase 2b's scheduled workflow shares this group.
+concurrency:
+  group: scprs-operational-writer
+  cancel-in-progress: false
+
+jobs:
+  enrich:
+    runs-on: ubuntu-latest
+    env:
+      # The operational store's private dataset. Override with a repo variable if needed.
+      SCPRS_DATASET: ${{ vars.SCPRS_DATASET || 'munther-hasan/scprs-operational-db' }}
+      # Dedicated read+write token for that dataset (Actions secret). CI is the sole writer.
+      HF_SCPRS_TOKEN: ${{ secrets.HF_SCPRS_TOKEN }}
+      # Chromium runs unprivileged on the runner — match the container launch flags.
+      PLAYWRIGHT_NO_SANDBOX: "1"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt "huggingface_hub>=0.25"
+          playwright install --with-deps chromium
+
+      - name: Fetch scprs.db from the dataset
+        run: python -m src.data_sync fetch-operational
+
+      - name: Enrich one slice (PO Details drill-down)
+        run: >
+          python -m src.model enrich
+          "${{ inputs.business_unit }}"
+          "${{ inputs.from_date }}"
+          "${{ inputs.to_date }}"
+          --limit "${{ inputs.limit }}"
+          --newest-first
+
+      # Wave-1 gate. Any hard error blocks the publish so a corrupt/partial store is
+      # never uploaded — the day stays unrecorded and the next run safely retries.
+      - name: Wave-1 checks (gate the publish)
+        run: |
+          set +e
+          echo "::group::health"
+          python -m src.health; H=$?
+          echo "::endgroup::"
+          echo "::group::contracts"
+          python -m src.contracts capture
+          python -m src.contracts check; C=$?
+          echo "::endgroup::"
+          echo "::group::canary (live parse-drift probe)"
+          python -m src.canary; K=$?
+          echo "::endgroup::"
+          echo "results: health=$H contracts=$C canary=$K"
+          fail=0
+          if [ "$H" -ne 0 ]; then echo "::error::health reported error finding(s)"; fail=1; fi
+          if [ "$C" -ne 0 ]; then echo "::error::contracts reported a metric-delta violation"; fail=1; fi
+          if [ "$K" -eq 1 ]; then echo "::error::canary detected parse drift — parser may be writing bad data"; fail=1; fi
+          if [ "$K" -eq 2 ]; then echo "::warning::canary UNAVAILABLE (site unreachable) — not gating on this"; fi
+          exit $fail
+
+      # Only reached if every prior step succeeded (upload-on-success contract).
+      - name: Publish scprs.db back to the dataset
+        run: python -m src.data_sync publish-operational

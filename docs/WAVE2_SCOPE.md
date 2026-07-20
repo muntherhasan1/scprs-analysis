@@ -34,14 +34,32 @@ refresh **publish** unattended; Wave 2 removes the laptop from the loop entirely
 - CI already runs Python 3.12 on `ubuntu-latest` (`.github/workflows/ci.yml`). The
   scraper is headless Playwright/Chromium, installable in Actions.
 
+## Progress
+
+- **2a — done** (this PR). `fetch_operational_db` / `publish_operational_db` added to
+  `src/data_sync.py` with `fetch-operational` / `publish-operational` CLI subcommands,
+  a dedicated `HF_SCPRS_TOKEN` (falls back to `HF_TOKEN`), and tests.
+- **Canary workflow — done** (this PR). `.github/workflows/enrich-canary.yml`,
+  `workflow_dispatch`-only, implements the full 2b loop at `--limit 3` so the round-trip
+  and Playwright-in-CI can be proven by hand before a schedule is added.
+- **Remaining:** promote the canary to a cron schedule (2b), chain the refresh (2c),
+  and the operational-DB seed + single-writer cutover (below).
+
+### Before the first run — seed + secret
+1. Seed the dataset once from a local checkout (CI fetches it, so it must exist):
+   `python -m src.data_sync publish-operational --dataset munther-hasan/scprs-operational-db`
+   (needs `HF_SCPRS_TOKEN` or a cached HF login with write on that dataset).
+2. Add the `HF_SCPRS_TOKEN` **Actions secret** (read+write on the dataset). Optionally
+   set a `SCPRS_DATASET` **repo variable** to override the default dataset id.
+3. Run **Enrich canary (Wave 2)** from the Actions tab. Green = Playwright + round-trip work.
+
 ## Sub-phases (in order)
 
-### 2a — `scprs.db` as HF source of truth
+### 2a — `scprs.db` as HF source of truth  ✅
 Add fetch/publish for `scprs.db` to `src/data_sync.py`, mirroring the serve-DB
 pattern (`ensure_local_db` / `publish_serve_db`), targeting a **new private dataset**
-(e.g. `munther-hasan/scprs-operational-db`). Establish the
+(`munther-hasan/scprs-operational-db`). Establish the
 **download → mutate → upload-on-success** contract, with CI as the sole writer.
-Verify locally with a round-trip.
 
 ### 2b — Enrichment in Actions (the core)
 A scheduled workflow (cron): fetch `scprs.db` → `model enrich --limit N
