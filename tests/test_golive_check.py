@@ -1,0 +1,82 @@
+"""Offline tests for the post-refresh go-live verification."""
+
+import sqlite3
+
+import pytest
+
+from src import golive_check
+
+
+def _serve_db(path, *, docs=5, lines=9, enriched=3):
+    """A minimal serve DB exposing the lv_* views the marker query reads."""
+    con = sqlite3.connect(path)
+    con.execute("CREATE TABLE lv_fact_document (line_count INTEGER)")
+    con.executemany(
+        "INSERT INTO lv_fact_document VALUES (?)",
+        [(1,)] * enriched + [(0,)] * (docs - enriched),
+    )
+    con.execute("CREATE TABLE lv_fact_line (x INTEGER)")
+    con.executemany("INSERT INTO lv_fact_line VALUES (?)", [(1,)] * lines)
+    con.commit()
+    con.close()
+
+
+def test_local_markers_reads_counts(tmp_path):
+    db = tmp_path / "warehouse-serve.db"
+    _serve_db(db, docs=5, lines=9, enriched=3)
+    assert golive_check.local_markers(db) == {
+        "documents": 5,
+        "line_rows": 9,
+        "enriched_docs": 3,
+    }
+
+
+def test_main_skips_without_token(monkeypatch, capsys):
+    monkeypatch.delenv("MCP_VERIFY_TOKEN", raising=False)
+    assert golive_check.main([]) == 0
+    assert "SKIPPED" in capsys.readouterr().out
+
+
+def _wire(monkeypatch, tmp_path, served):
+    """Stub the network-facing pieces; the local serve DB is real."""
+    db = tmp_path / "warehouse-serve.db"
+    _serve_db(db, docs=5, lines=9, enriched=3)
+    monkeypatch.setenv("MCP_VERIFY_TOKEN", "tok")
+    monkeypatch.setattr(golive_check, "wait_for_space", lambda space, timeout_s: None)
+
+    async def fake_served(url, token, timeout_s):
+        return served
+
+    monkeypatch.setattr(golive_check, "served_markers", fake_served)
+    return ["--serve-db", str(db)]
+
+
+def test_main_verifies_matching_snapshot(monkeypatch, tmp_path, capsys):
+    argv = _wire(monkeypatch, tmp_path, {"documents": 5, "line_rows": 9, "enriched_docs": 3})
+    assert golive_check.main(argv) == 0
+    assert "VERIFIED" in capsys.readouterr().out
+
+
+def test_main_fails_on_stale_snapshot(monkeypatch, tmp_path, capsys):
+    """The 2026-07-20 signature: Space still serving the previous snapshot."""
+    argv = _wire(monkeypatch, tmp_path, {"documents": 5, "line_rows": 7, "enriched_docs": 2})
+    assert golive_check.main(argv) == 1
+    assert "FAILED" in capsys.readouterr().out
+
+
+def test_wait_for_space_raises_on_terminal_stage(monkeypatch):
+    import huggingface_hub
+
+    class FakeRuntime:
+        stage = "RUNTIME_ERROR"
+
+    class FakeInfo:
+        runtime = FakeRuntime()
+
+    class FakeApi:
+        def space_info(self, space):
+            return FakeInfo()
+
+    monkeypatch.setattr(huggingface_hub, "HfApi", FakeApi)
+    with pytest.raises(RuntimeError, match="RUNTIME_ERROR"):
+        golive_check.wait_for_space("acme/space", timeout_s=5)

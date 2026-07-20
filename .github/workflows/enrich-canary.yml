@@ -157,3 +157,13 @@ jobs:
         env:
           HF_DEPLOY_TOKEN: ${{ secrets.HF_DEPLOY_TOKEN }}
         run: python -m src.data_sync restart-spaces
+
+      # Observability extended to deploys (retrospective action #4): verify over
+      # the real MCP channel that the rebooted Space serves the snapshot THIS run
+      # published. A failure here means the data is safe but NOT live — the
+      # silent-staleness failure mode of 2026-07-20, made loud. Skips (exit 0)
+      # when the MCP_VERIFY_TOKEN secret is unset.
+      - name: Verify go-live (Space serves this build)
+        env:
+          MCP_VERIFY_TOKEN: ${{ secrets.MCP_VERIFY_TOKEN }}
+        run: python -m src.golive_check
