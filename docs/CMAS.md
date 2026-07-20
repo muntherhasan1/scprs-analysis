@@ -3,9 +3,10 @@
 Pulls California's **CMAS** (California Multiple Award Schedules) contract data
 from the public search site
 [`cmassearch-prod.apps.dgs.ca.gov`](https://cmassearch-prod.apps.dgs.ca.gov)
-into a standalone store — deliberately **separate** from the SCPRS pipeline
-(its own `data/cmas.db` + one CSV per table). This is a distinct data source
-(CMAS master-agreement contractors), not another SCPRS stage.
+into a standalone store — its own `data/cmas.db` + one CSV per table. The
+extractor is a distinct data source (CMAS master-agreement contractors), not
+another SCPRS stage. The warehouse then folds it in as an **optional side input**
+and joins it to the supplier dimension (see [Warehouse integration](#warehouse-integration)).
 
 ## Why it isn't a normal scrape
 
@@ -62,3 +63,37 @@ python -m src.cmas extract --entity Approved_Applications
 Tokens are short-lived (~10 min); a full extract completes well within one
 session, so no token refresh is needed. Output is a full idempotent refresh
 (drop + recreate each table) — rerun any time for fresh data.
+
+## Warehouse integration
+
+`warehouse.py` folds CMAS in as an **optional side input**, exactly like
+`supplier_enrichment.db`: if `data/cmas.db` is present it's ingested; if absent the
+build is a clean no-op (empty tables, no failure). No CMAS extract is required to
+build the warehouse.
+
+- **`bronze_cmas`** — the CMAS agreements landed at build time (`_ingest_cmas` in
+  `build_bronze`), a curated column subset plus a `supplier_norm` (normalized
+  supplier name) computed at ingest.
+- **Name matching** — CMAS names are mixed-case with punctuation
+  (`HCI Systems, Inc.`); warehouse supplier names are upper-case, no punctuation
+  (`HCI SYSTEMS INC`). A plain `UPPER()` join (what the web-enrichment mart uses)
+  matches only ~8% of CMAS suppliers; reusing `supplier_master.normalize_name`
+  (strip punctuation + legal suffixes like Inc/LLC) lifts that to ~22% of distinct
+  names. `_resolve_cmas_suppliers` (a gold step, after `dim_supplier` exists) does
+  this matching **in Python** and stamps each agreement's
+  `matched_canonical_id`/`matched_canonical_name`, so the gold marts stay plain
+  equality joins. The join is to the **canonical** supplier, so split registrations
+  resolve to one entity.
+- **`gold_cmas_agreement`** — every CMAS agreement with its `matched_to_supplier`
+  flag (NULL match = a statewide CMAS holder we have no SCPRS spend record for).
+- **`gold_supplier_cmas`** — the payoff: our canonical suppliers that *also* hold a
+  CMAS master agreement, with their SCPRS spend (`scprs_total_value`,
+  `document_count`) beside their CMAS terms, SB/DVBE status, base-schedule count,
+  and agreement numbers. Use it to see which vendors you already spend with are on
+  a statewide CMAS vehicle.
+
+The overlap is genuinely partial (~330 of our canonical suppliers match, ~29% of
+CMAS agreements) — expected, since CMAS is statewide while the SCPRS spend data
+covers a priority subset of departments. Both marts flow into the slim serve DB
+(materialized, since they read `bronze_cmas`), so the MCP server and web app serve
+them automatically.

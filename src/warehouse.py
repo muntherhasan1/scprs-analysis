@@ -49,6 +49,7 @@ SOURCE_DB = scprs.DATA_DIR / "scprs.db"
 WAREHOUSE_DB = scprs.DATA_DIR / "warehouse.db"
 SERVE_DB = scprs.DATA_DIR / "warehouse-serve.db"  # slim, serving-only copy (gold + star)
 ENRICHMENT_DB = scprs.DATA_DIR / "supplier_enrichment.db"  # web-researched supplier profiles
+CMAS_DB = scprs.DATA_DIR / "cmas.db"  # CMAS master-agreement contractors (src/cmas.py)
 DEPARTMENTS_CSV = Path(__file__).resolve().parent.parent / "references" / "departments.csv"
 ABBREVIATIONS_CSV = Path(__file__).resolve().parent.parent / "references" / "abbreviations.csv"
 
@@ -108,7 +109,11 @@ def _count(con: sqlite3.Connection, table: str) -> int:
 # Bronze: raw snapshot + lineage
 # --------------------------------------------------------------------------- #
 def build_bronze(
-    con: sqlite3.Connection, batch: str, ts: str, enrichment_db: Path = ENRICHMENT_DB
+    con: sqlite3.Connection,
+    batch: str,
+    ts: str,
+    enrichment_db: Path = ENRICHMENT_DB,
+    cmas_db: Path = CMAS_DB,
 ) -> dict:
     counts = {}
     for bronze, source in _BRONZE_SOURCES.items():
@@ -153,7 +158,107 @@ def build_bronze(
             "sb_dvbe TEXT, confidence REAL)"
         )
     counts["bronze_supplier_web"] = _count(con, "bronze_supplier_web")
+
+    # CMAS master-agreement contractors (separate standalone store, src/cmas.py) —
+    # a side input like supplier_enrichment.db: optional, skipped if absent.
+    counts["bronze_cmas"] = _ingest_cmas(con, cmas_db, batch, ts)
     return counts
+
+
+# CMAS side input: landed bronze column -> its source column in cmas.db's
+# Approved_Applications. `supplier_norm` / `matched_canonical_*` are derived, not
+# copied (normalized name; canonical id stamped later in _resolve_cmas_suppliers).
+_CMAS_SOURCE = {
+    "agreement_number": "CMAS Agreement Number",
+    "supplier_name": "CMAS Supplier Name",
+    "base_schedule_number": "Base Schedule Number",
+    "base_schedule_holder": "base_schedule_company_name",
+    "business_enterprise_type": "Business Enterprise Type",
+    "term_start_date": "base_schedule_term_start_date",
+    "term_end_date": "base_schedule_term_end_date",
+    "product_service_codes": "select_applicable_product_service_codes",
+    "city": "Contractor Location (City)",
+    "state_or_country": "State or Country",
+    "contact_email": "contact_email",
+    "contact_name": "contact_name",
+    "company_website": "company_website",
+}
+_CMAS_COLUMNS = (
+    *_CMAS_SOURCE.keys(),
+    "supplier_norm",
+    "matched_canonical_id",
+    "matched_canonical_name",
+)
+
+
+def _ingest_cmas(con: sqlite3.Connection, cmas_db: Path, batch: str, ts: str) -> int:
+    """Land CMAS agreements into bronze_cmas (its own store, its own connection).
+
+    Adds a `supplier_norm` (normalized supplier name) at ingest so gold can join to
+    warehouse suppliers on a plain equality of normalized names — the warehouse's
+    own UPPER()-only joins miss CMAS punctuation / legal-suffix variants. The
+    canonical id is stamped later, once dim_supplier exists (_resolve_cmas_suppliers).
+    Optional: an absent cmas.db just yields an empty table, so the build never
+    depends on the standalone extractor having run.
+    """
+    con.execute("DROP TABLE IF EXISTS bronze_cmas")
+    defs = ", ".join(f"{c} TEXT" for c in _CMAS_COLUMNS)
+    con.execute(
+        f"CREATE TABLE bronze_cmas ({defs}, "  # noqa: S608 - column names are internal constants
+        "_batch_id TEXT, _loaded_at TEXT, _source TEXT)"
+    )
+    rows = []
+    if cmas_db.exists():
+        src = sqlite3.connect(cmas_db, timeout=30)
+        try:
+            if src.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='Approved_Applications'"
+            ).fetchone():
+                src_cols = list(_CMAS_SOURCE.keys())
+                sel = ", ".join(f'"{_CMAS_SOURCE[c]}"' for c in src_cols)
+                cur = src.execute(f'SELECT {sel} FROM "Approved_Applications"')  # noqa: S608
+                for r in cur.fetchall():
+                    d = dict(zip(src_cols, r, strict=True))
+                    norm = supplier_master.normalize_name(d.get("supplier_name") or "")
+                    rows.append([d[c] for c in src_cols] + [norm, None, None, batch, ts, "cmas.db"])
+        finally:
+            src.close()
+    if rows:
+        ph = ", ".join("?" * (len(_CMAS_COLUMNS) + 3))
+        con.executemany(f"INSERT INTO bronze_cmas VALUES ({ph})", rows)  # noqa: S608 - fixed arity
+    return _count(con, "bronze_cmas")
+
+
+def _resolve_cmas_suppliers(con: sqlite3.Connection) -> None:
+    """Stamp each bronze_cmas agreement with the warehouse canonical supplier it
+    matches, by normalized name. All fuzzy matching stays in Python (reusing
+    supplier_master.normalize_name) so the gold marts are plain equality joins.
+
+    Runs after dim_supplier + _abbreviate_gold, so it reads canonical identity via
+    the logical-named lv_dim_supplier view.
+    """
+    if not _src_has_local(con, "bronze_cmas"):
+        return
+    # normalized canonical name -> canonical (id, name); first wins on the rare
+    # collision, deterministic by canonical_id.
+    lookup: dict[str, tuple[str, str]] = {}
+    for cid, cname in con.execute(
+        "SELECT DISTINCT canonical_id, canonical_name FROM lv_dim_supplier "
+        "WHERE canonical_name IS NOT NULL ORDER BY canonical_id"
+    ):
+        key = supplier_master.normalize_name(cname)
+        if key and key not in lookup:
+            lookup[key] = (cid, cname)
+    updates = [
+        (*lookup[norm], rowid)
+        for rowid, norm in con.execute("SELECT rowid, supplier_norm FROM bronze_cmas")
+        if norm in lookup
+    ]
+    con.executemany(
+        "UPDATE bronze_cmas SET matched_canonical_id = ?, matched_canonical_name = ? "
+        "WHERE rowid = ?",
+        updates,
+    )
 
 
 def _src_has_local(con: sqlite3.Connection, table: str) -> bool:
@@ -545,6 +650,7 @@ def build_gold(con: sqlite3.Connection, batch: str, ts: str) -> dict:
     _finalize(con, "fact_line", "line_sk", batch, ts, clob_cols=("item_description",))
     _finalize(con, "fact_associated_po", "po_sk", batch, ts)
     _abbreviate_gold(con, load_abbreviations())  # abbreviate physical cols + build lv_ views
+    _resolve_cmas_suppliers(con)  # match CMAS agreements to canonical suppliers (by norm name)
     _build_marts(con)
     return {
         t: _count(con, t)
@@ -797,6 +903,45 @@ def _build_marts(con):
             FROM agg
             LEFT JOIN bronze_supplier_web w
               ON UPPER(w.supplier_name) = UPPER(agg.canonical_name)""",
+        # -- CMAS integration ------------------------------------------------- #
+        # Every CMAS master agreement, flagged with the warehouse canonical supplier
+        # it maps to (matched on normalized name; NULL = a CMAS holder we have no
+        # SCPRS spend record for). Standalone CMAS data + the bridge in one view.
+        "gold_cmas_agreement": """
+            SELECT agreement_number, supplier_name, base_schedule_number,
+                   base_schedule_holder, business_enterprise_type,
+                   term_start_date, term_end_date, product_service_codes,
+                   city, state_or_country, contact_email, contact_name, company_website,
+                   matched_canonical_id, matched_canonical_name,
+                   CASE WHEN matched_canonical_id IS NOT NULL THEN 1 ELSE 0 END
+                        AS matched_to_supplier
+            FROM bronze_cmas""",
+        # The integration payoff: our canonical suppliers that also hold a CMAS
+        # master agreement — their SCPRS spend beside their CMAS terms / SB-DVBE
+        # status / product-service reach. Intersection only (INNER on the match).
+        "gold_supplier_cmas": """
+            WITH c AS (
+              SELECT matched_canonical_id AS canonical_id,
+                     COUNT(*) AS cmas_agreement_count,
+                     COUNT(DISTINCT base_schedule_number) AS base_schedule_count,
+                     MAX(CASE WHEN business_enterprise_type LIKE '%SB%' THEN 1 ELSE 0 END)
+                        AS cmas_small_business,
+                     MAX(CASE WHEN business_enterprise_type LIKE '%DVBE%' THEN 1 ELSE 0 END)
+                        AS cmas_dvbe,
+                     MIN(term_start_date) AS earliest_term_start,
+                     MAX(term_end_date) AS latest_term_end,
+                     GROUP_CONCAT(DISTINCT agreement_number) AS cmas_agreement_numbers
+              FROM bronze_cmas
+              WHERE matched_canonical_id IS NOT NULL
+              GROUP BY matched_canonical_id)
+            SELECT sp.canonical_id, sp.canonical_name,
+                   sp.registration_count, sp.document_count,
+                   sp.total_value AS scprs_total_value,
+                   c.cmas_agreement_count, c.base_schedule_count,
+                   c.cmas_small_business, c.cmas_dvbe,
+                   c.earliest_term_start, c.latest_term_end, c.cmas_agreement_numbers
+            FROM c
+            JOIN gold_canonical_supplier_spend sp ON sp.canonical_id = c.canonical_id""",
         # Supplier share of each department's total spend.
         "gold_supplier_share": """
             WITH v AS (
@@ -1219,6 +1364,7 @@ def build_all(
     wh_path: Path = WAREHOUSE_DB,
     source_path: Path = SOURCE_DB,
     enrichment_db: Path = ENRICHMENT_DB,
+    cmas_db: Path = CMAS_DB,
     log=print,
 ) -> dict:
     ts = datetime.now().isoformat(timespec="seconds")
@@ -1232,7 +1378,7 @@ def build_all(
             (batch, ts),
         )
         log(f"[{batch}] bronze...")
-        counts = build_bronze(con, batch, ts, enrichment_db)
+        counts = build_bronze(con, batch, ts, enrichment_db, cmas_db)
         con.commit()
         appended = capture_document_history(con, batch, ts)
         counts["dw_document_history_appended"] = appended
