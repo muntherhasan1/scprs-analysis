@@ -212,7 +212,11 @@ def restart_spaces(
     results: list[tuple[str, str]] = []
     for space in spaces:
         try:
-            api.restart_space(repo_id=space, token=token or _deploy_token())
+            # factory_reboot, not a plain restart: a plain restart reports success
+            # but the Space keeps serving its boot-time snapshot (observed
+            # 2026-07-20 — restarted at 18:22, still serving the 07-17 serve DB).
+            # Only a factory reboot reliably re-runs the boot fetch.
+            api.restart_space(repo_id=space, token=token or _deploy_token(), factory_reboot=True)
             results.append((space, "restarted"))
         except Exception as exc:  # noqa: BLE001 — best-effort by design, see docstring
             results.append((space, f"FAILED: {type(exc).__name__}: {exc}"))
