@@ -65,10 +65,14 @@ jobs:
           python -m src.warehouse_diff snapshot --db data/warehouse.db --out head.json
 
       # Swap ONLY the code to the base commit, rebuild against the same data, then
-      # restore head so the (head) diff tool snapshots the base build.
+      # restore head so the (head) diff tool snapshots the base build. The base
+      # build must start from a CLEAN warehouse.db: dw_document_history is
+      # append-only (not dropped on rebuild), so reusing the head build's file
+      # would cross-contaminate the history-derived marts and show a phantom diff.
       - name: Build (base) + snapshot
         if: steps.fetch.outputs.skip != '1'
         run: |
+          rm -f data/warehouse.db
           git checkout ${{ github.event.pull_request.base.sha }} -- src references
           python -m src.warehouse build
           git checkout ${{ github.sha }} -- src references
