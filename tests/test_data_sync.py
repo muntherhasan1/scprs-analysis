@@ -222,8 +222,8 @@ def test_restart_spaces_is_best_effort(monkeypatch):
     calls = []
 
     class FakeApi:
-        def restart_space(self, repo_id, token=None):
-            calls.append((repo_id, token))
+        def restart_space(self, repo_id, token=None, factory_reboot=False):
+            calls.append((repo_id, token, factory_reboot))
             if "chat" in repo_id:
                 raise RuntimeError("403 Forbidden")
 
@@ -234,7 +234,10 @@ def test_restart_spaces_is_best_effort(monkeypatch):
     )
     assert results["acme/scprs-warehouse-mcp"] == "restarted"
     assert results["acme/scprs-warehouse-chat"].startswith("FAILED:")
-    assert all(token == "deploy-token" for _, token in calls)  # noqa: S105 — test literal
+    assert all(token == "deploy-token" for _, token, _fr in calls)  # noqa: S105 — test literal
+    # A plain restart reports success without re-running the boot fetch — the
+    # go-live contract requires a factory reboot.
+    assert all(factory for _, _, factory in calls)
 
 
 def test_deploy_token_precedence(monkeypatch):
