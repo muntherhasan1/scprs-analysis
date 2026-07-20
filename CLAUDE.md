@@ -22,8 +22,9 @@ warehouse build.
 `cmas.py` is a **separate, standalone** data source (not a SCPRS stage): it
 extracts California's CMAS master-agreement contractor data — an anonymous
 **Power BI** embed, queried directly over the model's DSR protocol, not scraped —
-into its own `data/cmas.db` + CSVs. `python -m src.cmas extract`. Not yet wired
-into the warehouse. See `docs/CMAS.md`.
+into its own `data/cmas.db` + CSVs. `python -m src.cmas extract`. The warehouse
+folds it in as an **optional side input** (like `supplier_enrichment.db`): skipped
+if `data/cmas.db` is absent. See `docs/CMAS.md`.
 
 ## Commands
 

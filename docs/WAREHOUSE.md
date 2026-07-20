@@ -106,6 +106,16 @@ per-registration scorecard in **`gold_supplier_enriched`** and to the canonical
 scorecard in **`gold_supplier_master`** (internal metrics + external firmographics
 + confidence, matched by supplier name).
 
+**CMAS integration:** a second optional side input, California's CMAS
+master-agreement contractors (`data/cmas.db`, `src/cmas.py`), is snapshotted to
+`bronze_cmas` and matched to `dim_supplier` **by normalized name** — reusing
+`supplier_master.normalize_name` (strip punctuation + legal suffixes), which
+roughly triples the match rate over the plain `UPPER()` join. It exposes
+**`gold_cmas_agreement`** (all agreements + a `matched_to_supplier` flag) and
+**`gold_supplier_cmas`** (our canonical suppliers that also hold a CMAS agreement —
+SCPRS spend beside CMAS terms / SB-DVBE / product reach). Absent `data/cmas.db`,
+the build is a clean no-op. See `docs/CMAS.md`.
+
 ## Contract change capture (history over time)
 The bronze/silver/gold layers are a full-refresh snapshot of *current* state, so on
 their own they can't show how a contract changed. **`dw_document_history`** fixes
