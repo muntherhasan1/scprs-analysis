@@ -4,16 +4,19 @@ Small, deferred enhancements. Each entry: what, why, and where to start.
 
 ## Open
 
-### Auto-restart the Spaces after a data refresh — SHIPPED 2026-07-20 (token pending)
-`src/data_sync.py restart-spaces` implemented (best-effort `HfApi().restart_space`
-per Space — warn, never fail) and wired into both the Wave 2c workflow and
-`refresh_pipeline.ps1`. **Remaining one-time step:** create `HF_DEPLOY_TOKEN`
-(fine-grained, write on both `scprs-warehouse-mcp` and `scprs-warehouse-chat`
-Space repos) and add it to `.env` + as a GitHub Actions secret; until then each
-restart prints FAILED and the Spaces need a manual reboot to serve new data.
-The `add_space_secret` marker-secret fallback from the original design was
-dropped: it needs the same write scope, so it cannot succeed where
-`restart_space` fails.
+### Feed CMAS data to the CI warehouse build
+The warehouse integrates CMAS (`gold_cmas_agreement`, `gold_supplier_cmas`) as an
+optional side input, but a CI build produces **empty** CMAS marts because
+`data/cmas.db` isn't in the operational dataset — only local builds see real CMAS
+data.
+- **Why:** so the deployed Spaces serve real CMAS supplier integration, not empty
+  tables, after a device-free refresh.
+- **Start:** mirror the `supplier_enrichment.db` pattern — a `publish-cmas`
+  subcommand in `src/data_sync.py` (push `cmas.db` to the operational dataset) and
+  a best-effort `fetch-cmas` in the enrich workflow before `warehouse build`.
+  Bigger question to decide first: should CMAS be *refreshed* device-free too
+  (run `src.cmas extract` in CI on a cadence), or stay a manual local extract that
+  is merely published? See `docs/CMAS.md`.
 
 ### Capture per-section row counts in `generate_report` audit records
 The `generate_report` audit record logs the report `title` and section SQLs but
@@ -22,3 +25,16 @@ The `generate_report` audit record logs the report `title` and section SQLs but
 - **Start:** in `src/mcp_server.py` `generate_report`, collect each section's
   `res["row_count"]` (or `len(rows)`) alongside `section_sqls`, and pass a
   `sections_detail`/`row_counts` field to `query_log.record_tool`.
+- **Caveat:** `generate_report` is part of the Copilot/charts/reports cluster the
+  retrospective flagged for freeze/retire (zero audit-log usage). Don't invest here
+  unless that cluster is being kept.
+
+## Done
+
+### Auto-restart the Spaces after a data refresh — DONE 2026-07-20
+`src/data_sync.py restart-spaces` (best-effort `HfApi().restart_space`, factory
+reboot, warn-never-fail) wired into the Wave 2c workflow and `refresh_pipeline.ps1`.
+`HF_DEPLOY_TOKEN` created and added to `.env` + Actions; verified live (the loop
+now factory-reboots the MCP Space and serves the new build automatically). The
+chat Space 404s on restart by design — it's private/frozen (see `docs/WEB_APP.md`
+freeze status once the Copilot cluster is retired).

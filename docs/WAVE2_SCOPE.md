@@ -1,5 +1,12 @@
 # Wave 2 scope — cloud orchestration (device-free pipeline)
 
+> **STATUS: COMPLETE & LIVE (2026-07-20).** 2a/2b/2c all shipped and proven; both
+> laptop scheduled tasks are disabled and CI is the sole writer of `scprs.db`. Only
+> 2d (Dagster/lineage) is deferred by choice. The "Decisions to make" below are all
+> resolved (enrichment-only in CI; clean cutover done; dedicated
+> `scprs-operational-db` dataset; 6h cron at `--limit 50`). This doc is retained as
+> the design record.
+>
 > Part of the platform-hardening roadmap. Wave 1 (observability: `health`/`canary`/
 > `contracts`) was authored in PR #13 but never merged; it lands on `main` as the
 > prerequisite for this wave (the enrichment canary gates on those checks).
