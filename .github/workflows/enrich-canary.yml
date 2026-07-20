@@ -1,8 +1,10 @@
 name: Enrich (Wave 2)
 
-# Wave 2b: scheduled cloud enrichment (plus the original manual canary mode).
-# Each run does the fetch -> enrich -> integrity-gate -> publish round-trip on
-# scprs.db, proven end-to-end by the manual canary on 2026-07-20 (run 29763141085).
+# Wave 2b+2c: scheduled cloud enrichment and warehouse refresh (plus the original
+# manual canary mode). Each run does the fetch -> enrich -> integrity-gate ->
+# publish round-trip on scprs.db (proven end-to-end on 2026-07-20, run
+# 29763141085), then rebuilds the warehouse, publishes the serve DB, and
+# best-effort restarts the Spaces — the fully device-free loop.
 #
 # Scheduled runs pick the business unit MOST IN NEED automatically
 # (`health --next-bu`: never-enriched first, then least-recently-advanced), so
@@ -129,3 +131,29 @@ jobs:
       # Only reached if every prior step succeeded (upload-on-success contract).
       - name: Publish scprs.db back to the dataset
         run: python -m src.data_sync publish-operational
+
+      # ---- Wave 2c: refresh the served warehouse from the just-enriched store ----
+      # scprs.db is already published above, so a failure below never loses
+      # enrichment progress — it only leaves the Spaces serving the previous
+      # serve-DB snapshot. `warehouse build` has its own error-severity DQ gate
+      # (non-zero exit on failure), so a bad build never reaches the publish step.
+      - name: Rebuild warehouse + export serve DB
+        run: |
+          python -m src.warehouse build
+          python -m src.warehouse serve-export
+
+      - name: Publish serve DB
+        env:
+          HF_WAREHOUSE_TOKEN: ${{ secrets.HF_WAREHOUSE_TOKEN }}
+        run: >
+          python -m src.data_sync publish
+          --dataset "${{ vars.WAREHOUSE_DATASET || 'munther-hasan/scprs-warehouse-data' }}"
+
+      # Best-effort go-live: restart the Spaces so they re-fetch the serve DB at
+      # boot. Needs the optional HF_DEPLOY_TOKEN secret (write on both Space
+      # repos); without it this prints FAILED per Space and exits 0 — the data is
+      # published either way and goes live on the next manual reboot.
+      - name: Restart Spaces (best-effort)
+        env:
+          HF_DEPLOY_TOKEN: ${{ secrets.HF_DEPLOY_TOKEN }}
+        run: python -m src.data_sync restart-spaces

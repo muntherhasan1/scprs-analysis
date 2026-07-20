@@ -31,6 +31,14 @@ from . import config  # noqa: F401 — imported for its load_dotenv() side-effec
 
 SERVE_FILENAME = "warehouse-serve.db"
 OPERATIONAL_FILENAME = "scprs.db"
+SUPPLIER_FILENAME = "supplier_enrichment.db"
+
+# The always-on front ends that fetch the serve DB at boot. Restarting them is how
+# a freshly published serve DB goes live; mirrors refresh_pipeline.ps1's defaults.
+DEFAULT_SPACES = (
+    "munther-hasan/scprs-warehouse-mcp",
+    "munther-hasan/scprs-warehouse-chat",
+)
 
 
 class WarehouseFetchError(RuntimeError):
@@ -159,6 +167,64 @@ def publish_operational_db(db_path: Path, repo: str, token: str | None = None) -
     )
 
 
+def fetch_supplier_db(dest: Path, repo: str | None = None, token: str | None = None) -> bool:
+    """Best-effort fetch of the supplier-enrichment side input from the operational
+    dataset. Returns False when no dataset is configured or the file isn't there —
+    the warehouse build skips a missing ``supplier_enrichment.db`` gracefully, so a
+    CI build must fetch it or gold silently loses the web-researched firmographics."""
+    repo = repo or os.environ.get("SCPRS_DATASET")
+    if not repo:
+        return False
+    try:
+        _download_db(repo, SUPPLIER_FILENAME, dest, token or _operational_token())
+    except WarehouseFetchError:
+        return False  # optional side input — absent until first published
+    return True
+
+
+def publish_supplier_db(db_path: Path, repo: str, token: str | None = None) -> str:
+    """Upload the supplier-enrichment side input alongside ``scprs.db`` in the
+    operational dataset. Run after local web-research sessions update it; CI only
+    reads it. Returns the commit URL."""
+    db_path = Path(db_path)
+    if not db_path.exists():
+        raise FileNotFoundError(f"{db_path} not found — nothing to publish")
+    return _upload_db(
+        db_path,
+        repo,
+        SUPPLIER_FILENAME,
+        token or _operational_token(),
+        "Publish supplier enrichment side input",
+    )
+
+
+def restart_spaces(
+    spaces: tuple[str, ...] = DEFAULT_SPACES, token: str | None = None
+) -> list[tuple[str, str]]:
+    """Best-effort restart of the always-on Spaces so they re-fetch the serve DB at
+    boot and the just-published data goes live. Returns ``(space, outcome)`` pairs
+    and never raises — a failed restart only means the Space keeps serving the
+    previous snapshot until restarted by hand (warn, never fail: a refresh whose
+    publish succeeded must not be reported as failed)."""
+    from huggingface_hub import HfApi
+
+    api = HfApi()
+    results: list[tuple[str, str]] = []
+    for space in spaces:
+        try:
+            api.restart_space(repo_id=space, token=token or _deploy_token())
+            results.append((space, "restarted"))
+        except Exception as exc:  # noqa: BLE001 — best-effort by design, see docstring
+            results.append((space, f"FAILED: {type(exc).__name__}: {exc}"))
+    return results
+
+
+def _deploy_token() -> str | None:
+    """Token for restarting the Spaces: a token with write access to both Space
+    repos (``HF_DEPLOY_TOKEN``), falling back to ``HF_TOKEN`` / the cached login."""
+    return os.environ.get("HF_DEPLOY_TOKEN") or os.environ.get("HF_TOKEN")
+
+
 def _publish_token() -> str | None:
     """Token for publishing the serve DB: prefer the dedicated warehouse-data write
     token, fall back to ``HF_TOKEN`` / the cached HF login. Read from the git-ignored
@@ -184,13 +250,34 @@ def _cli() -> None:
     pub = sub.add_parser("publish", help="Upload data/warehouse-serve.db to the dataset")
     pub.add_argument("--dataset", default=os.environ.get("WAREHOUSE_DATASET"))
 
-    fop = sub.add_parser("fetch-operational", help="Download scprs.db from its dataset")
+    fop = sub.add_parser(
+        "fetch-operational",
+        help="Download scprs.db (and the supplier side input, if published) from its dataset",
+    )
     fop.add_argument("--dataset", default=os.environ.get("SCPRS_DATASET"))
     fop.add_argument("--dest", default=str(model.DB_PATH))
 
     pop = sub.add_parser("publish-operational", help="Upload scprs.db to its dataset (CI writer)")
     pop.add_argument("--dataset", default=os.environ.get("SCPRS_DATASET"))
     pop.add_argument("--path", default=str(model.DB_PATH))
+
+    psu = sub.add_parser(
+        "publish-supplier",
+        help="Upload supplier_enrichment.db to the operational dataset (after local research)",
+    )
+    psu.add_argument("--dataset", default=os.environ.get("SCPRS_DATASET"))
+    psu.add_argument("--path", default=str(warehouse.ENRICHMENT_DB))
+
+    rsp = sub.add_parser(
+        "restart-spaces",
+        help="Best-effort restart of the always-on Spaces so a published serve DB goes live",
+    )
+    rsp.add_argument(
+        "--space",
+        action="append",
+        dest="spaces",
+        help=f"Space id to restart (repeatable; default: {', '.join(DEFAULT_SPACES)})",
+    )
 
     args = ap.parse_args()
 
@@ -204,11 +291,25 @@ def _cli() -> None:
             raise SystemExit("set --dataset or the SCPRS_DATASET env var")
         fetch_operational_db(Path(args.dest), repo=args.dataset)
         print(f"Fetched {OPERATIONAL_FILENAME} <- {args.dataset} into {args.dest}")
+        if fetch_supplier_db(warehouse.ENRICHMENT_DB, repo=args.dataset):
+            print(f"Fetched {SUPPLIER_FILENAME} <- {args.dataset}")
+        else:
+            print(f"Note: {SUPPLIER_FILENAME} not in {args.dataset}; build will skip it")
     elif args.cmd == "publish-operational":
         if not args.dataset:
             raise SystemExit("set --dataset or the SCPRS_DATASET env var")
         url = publish_operational_db(Path(args.path), args.dataset)
         print(f"Published {OPERATIONAL_FILENAME} -> {args.dataset}: {url}")
+    elif args.cmd == "publish-supplier":
+        if not args.dataset:
+            raise SystemExit("set --dataset or the SCPRS_DATASET env var")
+        url = publish_supplier_db(Path(args.path), args.dataset)
+        print(f"Published {SUPPLIER_FILENAME} -> {args.dataset}: {url}")
+    elif args.cmd == "restart-spaces":
+        for space, outcome in restart_spaces(tuple(args.spaces or DEFAULT_SPACES)):
+            print(f"{space}: {outcome}")
+        # Always exit 0: best-effort by contract — a failed restart only delays
+        # go-live until a manual reboot; the publish itself already succeeded.
 
 
 if __name__ == "__main__":
