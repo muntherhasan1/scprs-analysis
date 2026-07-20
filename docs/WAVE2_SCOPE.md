@@ -61,9 +61,13 @@ pattern (`ensure_local_db` / `publish_serve_db`), targeting a **new private data
 (`munther-hasan/scprs-operational-db`). Establish the
 **download → mutate → upload-on-success** contract, with CI as the sole writer.
 
-### 2b — Enrichment in Actions (the core)
-A scheduled workflow (cron): fetch `scprs.db` → `model enrich --limit N
---newest-first` → run the Wave-1 checks → publish `scprs.db` back. Only the
+### 2b — Enrichment in Actions (the core) — SHIPPED 2026-07-20
+The canary workflow gained a cron schedule (every 6h: `17 2,8,14,20 * * *`,
+limit 50 → ~200 day-slices/day, matching the manual-pass cadence): fetch
+`scprs.db` → `model enrich --limit N --newest-first` → Wave-1 checks → publish
+`scprs.db` back. Scheduled runs pick the business unit **most in need** via
+`health --next-bu` (never-enriched first, then least-recently-advanced), so
+staleness is self-curing and all loaded units rotate through. Only the
 integrity checks (`contracts`/`canary`) gate the publish; `health` is report-only
 because its checks measure freshness, and blocking the publish on staleness would
 deadlock — publishing is what advances freshness. Guardrails:

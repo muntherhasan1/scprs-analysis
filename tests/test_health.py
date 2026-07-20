@@ -119,6 +119,76 @@ def test_pipeline_idle_when_everything_stops(tmp_path):
     assert checks["pipeline_idle"][0].severity == "error"
 
 
+def _next_bu(path):
+    con = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    try:
+        return health.next_bu(con)
+    finally:
+        con.close()
+
+
+def test_next_bu_prefers_never_enriched_unit(tmp_path):
+    """A unit with no enrichment at all is infinitely stale — picked first."""
+    db = tmp_path / "scprs.db"
+    _seed(db)
+    _add_summary(db, "8660", ["2026-01-01", "2026-01-02"])
+    _mark_done(db, "8660", ["2026-01-01"], NOW - timedelta(hours=100))
+    _add_summary(db, "2720", ["2026-01-01", "2026-01-02"])  # never enriched
+
+    assert _next_bu(db) == "2720"
+
+
+def test_next_bu_picks_least_recently_advanced(tmp_path):
+    db = tmp_path / "scprs.db"
+    _seed(db)
+    _add_summary(db, "8660", ["2026-01-01", "2026-01-02"])
+    _mark_done(db, "8660", ["2026-01-01"], NOW - timedelta(hours=6))
+    _add_summary(db, "2660", ["2026-01-01", "2026-01-02"])
+    _mark_done(db, "2660", ["2026-01-01"], NOW - timedelta(hours=90))
+
+    assert _next_bu(db) == "2660"
+
+
+def test_next_bu_skips_fully_covered_units(tmp_path):
+    """A fully enriched unit never gets picked, however old its timestamps."""
+    db = tmp_path / "scprs.db"
+    _seed(db)
+    _add_summary(db, "8660", ["2026-01-01"])
+    _mark_done(db, "8660", ["2026-01-01"], NOW - timedelta(hours=500))
+    _add_summary(db, "2660", ["2026-01-01", "2026-01-02"])
+    _mark_done(db, "2660", ["2026-01-01"], NOW - timedelta(hours=6))
+
+    assert _next_bu(db) == "2660"
+
+
+def test_next_bu_none_when_nothing_pending(tmp_path):
+    db = tmp_path / "scprs.db"
+    _seed(db)
+    _add_summary(db, "8660", ["2026-01-01"])
+    _mark_done(db, "8660", ["2026-01-01"], NOW - timedelta(hours=1))
+
+    assert _next_bu(db) is None
+
+
+def test_main_next_bu_prints_unit_and_exits_zero(tmp_path, capsys):
+    db = tmp_path / "scprs.db"
+    _seed(db)
+    _add_summary(db, "2720", ["2026-01-01"])
+
+    assert health.main(["--db", str(db), "--next-bu"]) == 0
+    assert capsys.readouterr().out.strip() == "2720"
+
+
+def test_main_next_bu_exits_one_when_covered(tmp_path, capsys):
+    db = tmp_path / "scprs.db"
+    _seed(db)
+    _add_summary(db, "8660", ["2026-01-01"])
+    _mark_done(db, "8660", ["2026-01-01"], NOW - timedelta(hours=1))
+
+    assert health.main(["--db", str(db), "--next-bu"]) == 1
+    assert capsys.readouterr().out.strip() == ""
+
+
 def test_main_exits_nonzero_on_error(tmp_path):
     db = tmp_path / "scprs.db"
     _seed(db)

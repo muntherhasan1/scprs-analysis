@@ -1,17 +1,22 @@
-name: Enrich canary (Wave 2)
+name: Enrich (Wave 2)
 
-# Manual-only canary that de-risks Wave 2's biggest unknown: does the headless
-# PeopleSoft scraper work from GitHub Actions' cloud IPs, and does the
-# fetch -> mutate -> publish round-trip on scprs.db hold together?
+# Wave 2b: scheduled cloud enrichment (plus the original manual canary mode).
+# Each run does the fetch -> enrich -> integrity-gate -> publish round-trip on
+# scprs.db, proven end-to-end by the manual canary on 2026-07-20 (run 29763141085).
 #
-# It runs ONE small enrichment slice, then the Wave-1 checks, and only publishes
-# the mutated scprs.db back to its dataset if everything passes (upload-on-success).
-# Prove this by hand before adding a cron schedule in sub-phase 2b.
+# Scheduled runs pick the business unit MOST IN NEED automatically
+# (`health --next-bu`: never-enriched first, then least-recently-advanced), so
+# staleness is self-curing — the pick rotates as units advance. Manual dispatches
+# still accept explicit inputs and default to a small 8660 canary slice.
 on:
+  schedule:
+    # Every 6 hours, offset from the top of the hour. 4 runs/day x limit 50
+    # ≈ 200 day-slices/day, matching the manual enrichment-pass cadence.
+    - cron: "17 2,8,14,20 * * *"
   workflow_dispatch:
     inputs:
       business_unit:
-        description: Business unit to enrich
+        description: Business unit to enrich (blank = auto-pick the most-stale unit)
         default: "8660"
       limit:
         description: Max days to process this run (keep small for a canary)
@@ -36,6 +41,11 @@ concurrency:
 jobs:
   enrich:
     runs-on: ubuntu-latest
+    # Hang protection only — a wedged headless browser would otherwise hold the
+    # single-writer concurrency slot for the default 6h. Expected worst case
+    # (limit 50) is ~35 min. HF dataset commits are atomic, so a timeout kill
+    # can't leave a half-published scprs.db.
+    timeout-minutes: 90
     env:
       # The operational store's private dataset. Override with a repo variable if needed.
       SCPRS_DATASET: ${{ vars.SCPRS_DATASET || 'munther-hasan/scprs-operational-db' }}
@@ -62,13 +72,31 @@ jobs:
       - name: Fetch scprs.db from the dataset
         run: python -m src.data_sync fetch-operational
 
+      # On a schedule event all `inputs.*` are empty: pick the unit most in need
+      # and a larger slice. A manual dispatch with a blank business_unit also
+      # auto-picks. `--next-bu` exits 1 when nothing is pending — fall back to
+      # 8660, where enrich no-ops harmlessly on an empty pending set.
+      - name: Resolve run parameters
+        id: params
+        run: |
+          bu='${{ inputs.business_unit }}'
+          if [ -z "$bu" ]; then
+            bu=$(python -m src.health --next-bu || true)
+            bu=${bu:-8660}
+            echo "auto-picked business unit: $bu"
+          fi
+          echo "bu=$bu" >> "$GITHUB_OUTPUT"
+          echo "limit=${{ inputs.limit || '50' }}" >> "$GITHUB_OUTPUT"
+          echo "from=${{ inputs.from_date || '07/01/2016' }}" >> "$GITHUB_OUTPUT"
+          echo "to=${{ inputs.to_date || '06/30/2028' }}" >> "$GITHUB_OUTPUT"
+
       - name: Enrich one slice (PO Details drill-down)
         run: >
           python -m src.model enrich
-          "${{ inputs.business_unit }}"
-          "${{ inputs.from_date }}"
-          "${{ inputs.to_date }}"
-          --limit "${{ inputs.limit }}"
+          "${{ steps.params.outputs.bu }}"
+          "${{ steps.params.outputs.from }}"
+          "${{ steps.params.outputs.to }}"
+          --limit "${{ steps.params.outputs.limit }}"
           --newest-first
 
       # Wave-1 gate. Only the *integrity* checks (contracts, canary) block the
