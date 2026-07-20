@@ -19,6 +19,12 @@ browser scraping    SQLite operational    medallion analytical
 stored separately (`supplier_enrichment.db`) and folded into gold during the
 warehouse build.
 
+`cmas.py` is a **separate, standalone** data source (not a SCPRS stage): it
+extracts California's CMAS master-agreement contractor data — an anonymous
+**Power BI** embed, queried directly over the model's DSR protocol, not scraped —
+into its own `data/cmas.db` + CSVs. `python -m src.cmas extract`. Not yet wired
+into the warehouse. See `docs/CMAS.md`.
+
 ## Commands
 
 ```bash
