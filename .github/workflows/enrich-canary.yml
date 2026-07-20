@@ -71,8 +71,12 @@ jobs:
           --limit "${{ inputs.limit }}"
           --newest-first
 
-      # Wave-1 gate. Any hard error blocks the publish so a corrupt/partial store is
-      # never uploaded — the day stays unrecorded and the next run safely retries.
+      # Wave-1 gate. Only the *integrity* checks (contracts, canary) block the
+      # publish — they detect a corrupt/partial store, and a blocked publish leaves
+      # the day unrecorded so the next run safely retries. `health` is report-only
+      # here: it contains freshness checks only, and failing the publish on
+      # staleness would deadlock — the publish IS what advances freshness, so a
+      # stale unit would block the very action that cures it.
       - name: Wave-1 checks (gate the publish)
         run: |
           set +e
@@ -88,7 +92,7 @@ jobs:
           echo "::endgroup::"
           echo "results: health=$H contracts=$C canary=$K"
           fail=0
-          if [ "$H" -ne 0 ]; then echo "::error::health reported error finding(s)"; fail=1; fi
+          if [ "$H" -ne 0 ]; then echo "::warning::health reported freshness error finding(s) — report-only, does not gate the publish"; fi
           if [ "$C" -ne 0 ]; then echo "::error::contracts reported a metric-delta violation"; fail=1; fi
           if [ "$K" -eq 1 ]; then echo "::error::canary detected parse drift — parser may be writing bad data"; fail=1; fi
           if [ "$K" -eq 2 ]; then echo "::warning::canary UNAVAILABLE (site unreachable) — not gating on this"; fi

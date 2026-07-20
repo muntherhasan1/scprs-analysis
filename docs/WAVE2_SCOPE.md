@@ -63,8 +63,10 @@ pattern (`ensure_local_db` / `publish_serve_db`), targeting a **new private data
 
 ### 2b — Enrichment in Actions (the core)
 A scheduled workflow (cron): fetch `scprs.db` → `model enrich --limit N
---newest-first` → run the Wave-1 checks (`health`/`canary`/`contracts`, gate the run
-on any `error` finding) → publish `scprs.db` back. Guardrails:
+--newest-first` → run the Wave-1 checks → publish `scprs.db` back. Only the
+integrity checks (`contracts`/`canary`) gate the publish; `health` is report-only
+because its checks measure freshness, and blocking the publish on staleness would
+deadlock — publishing is what advances freshness. Guardrails:
 - **Concurrency group** serializes runs — never two writers mutating `scprs.db` at
   once.
 - **Upload only on success** — a failed/partial run leaves the dataset untouched and
