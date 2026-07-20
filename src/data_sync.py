@@ -32,6 +32,7 @@ from . import config  # noqa: F401 — imported for its load_dotenv() side-effec
 SERVE_FILENAME = "warehouse-serve.db"
 OPERATIONAL_FILENAME = "scprs.db"
 SUPPLIER_FILENAME = "supplier_enrichment.db"
+CMAS_FILENAME = "cmas.db"  # CMAS side input, refreshed device-free by cmas-refresh.yml
 
 # The always-on front ends that fetch the serve DB at boot. Restarting them is how
 # a freshly published serve DB goes live; mirrors refresh_pipeline.ps1's defaults.
@@ -198,6 +199,38 @@ def publish_supplier_db(db_path: Path, repo: str, token: str | None = None) -> s
     )
 
 
+def fetch_cmas_db(dest: Path, repo: str | None = None, token: str | None = None) -> bool:
+    """Best-effort fetch of the CMAS side input from the operational dataset.
+
+    Like ``fetch_supplier_db``: returns False when no dataset is configured or the
+    file isn't published yet, so a CI build that lacks it just produces empty CMAS
+    marts (the warehouse skips an absent ``cmas.db`` gracefully)."""
+    repo = repo or os.environ.get("SCPRS_DATASET")
+    if not repo:
+        return False
+    try:
+        _download_db(repo, CMAS_FILENAME, dest, token or _operational_token())
+    except WarehouseFetchError:
+        return False  # optional side input — absent until first published
+    return True
+
+
+def publish_cmas_db(db_path: Path, repo: str, token: str | None = None) -> str:
+    """Upload the CMAS store (``cmas.db``) alongside ``scprs.db`` in the operational
+    dataset. Written by the scheduled ``cmas-refresh`` workflow (which runs
+    ``src.cmas extract`` first), never by a person. Returns the commit URL."""
+    db_path = Path(db_path)
+    if not db_path.exists():
+        raise FileNotFoundError(f"{db_path} not found — run `python -m src.cmas extract` first")
+    return _upload_db(
+        db_path,
+        repo,
+        CMAS_FILENAME,
+        token or _operational_token(),
+        "Publish CMAS side input (CI refresh)",
+    )
+
+
 def restart_spaces(
     spaces: tuple[str, ...] = DEFAULT_SPACES, token: str | None = None
 ) -> list[tuple[str, str]]:
@@ -272,6 +305,13 @@ def _cli() -> None:
     psu.add_argument("--dataset", default=os.environ.get("SCPRS_DATASET"))
     psu.add_argument("--path", default=str(warehouse.ENRICHMENT_DB))
 
+    pcm = sub.add_parser(
+        "publish-cmas",
+        help="Upload cmas.db to the operational dataset (scheduled cmas-refresh workflow)",
+    )
+    pcm.add_argument("--dataset", default=os.environ.get("SCPRS_DATASET"))
+    pcm.add_argument("--path", default=str(warehouse.CMAS_DB))
+
     rsp = sub.add_parser(
         "restart-spaces",
         help="Best-effort restart of the always-on Spaces so a published serve DB goes live",
@@ -295,10 +335,15 @@ def _cli() -> None:
             raise SystemExit("set --dataset or the SCPRS_DATASET env var")
         fetch_operational_db(Path(args.dest), repo=args.dataset)
         print(f"Fetched {OPERATIONAL_FILENAME} <- {args.dataset} into {args.dest}")
-        if fetch_supplier_db(warehouse.ENRICHMENT_DB, repo=args.dataset):
-            print(f"Fetched {SUPPLIER_FILENAME} <- {args.dataset}")
-        else:
-            print(f"Note: {SUPPLIER_FILENAME} not in {args.dataset}; build will skip it")
+        # Optional side inputs — the warehouse build skips either if absent.
+        for label, path, fetch in (
+            (SUPPLIER_FILENAME, warehouse.ENRICHMENT_DB, fetch_supplier_db),
+            (CMAS_FILENAME, warehouse.CMAS_DB, fetch_cmas_db),
+        ):
+            if fetch(path, repo=args.dataset):
+                print(f"Fetched {label} <- {args.dataset}")
+            else:
+                print(f"Note: {label} not in {args.dataset}; build will skip it")
     elif args.cmd == "publish-operational":
         if not args.dataset:
             raise SystemExit("set --dataset or the SCPRS_DATASET env var")
@@ -309,6 +354,11 @@ def _cli() -> None:
             raise SystemExit("set --dataset or the SCPRS_DATASET env var")
         url = publish_supplier_db(Path(args.path), args.dataset)
         print(f"Published {SUPPLIER_FILENAME} -> {args.dataset}: {url}")
+    elif args.cmd == "publish-cmas":
+        if not args.dataset:
+            raise SystemExit("set --dataset or the SCPRS_DATASET env var")
+        url = publish_cmas_db(Path(args.path), args.dataset)
+        print(f"Published {CMAS_FILENAME} -> {args.dataset}: {url}")
     elif args.cmd == "restart-spaces":
         for space, outcome in restart_spaces(tuple(args.spaces or DEFAULT_SPACES)):
             print(f"{space}: {outcome}")
