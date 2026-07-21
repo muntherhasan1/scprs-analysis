@@ -1,0 +1,78 @@
+name: Deploy MCP Space
+
+# Wave 3 (continuous CODE delivery): auto-deploy the MCP Space image when its
+# shipped code changes on main, replacing the manual `deploy/hf-space/deploy.py`
+# run. Data deploys (the serve DB) are already continuous; this closes the loop
+# for code. Only the MCP Space is auto-deployed — the chat Space is frozen (see
+# docs/WEB_APP.md / the Copilot-cluster freeze).
+#
+# Paths mirror deploy.py's shipped file set: a change to any of them is what makes
+# the Space image stale.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "src/mcp_server.py"
+      - "src/auth.py"
+      - "src/warehouse_query.py"
+      - "src/query_log.py"
+      - "src/data_sync.py"
+      - "src/observability.py"
+      - "src/charting.py"
+      - "src/__init__.py"
+      - "requirements-mcp.txt"
+      - "Dockerfile.mcp"
+      - "deploy/hf-space/**"
+
+permissions:
+  contents: read
+
+# Only the latest main matters — supersede an in-flight deploy.
+concurrency:
+  group: deploy-mcp-space
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      HF_SPACE: ${{ vars.MCP_SPACE || 'munther-hasan/scprs-warehouse-mcp' }}
+      # Write on the MCP Space repo (upload code + set variables). Same secret as
+      # restart-spaces. HfApi() picks it up from HF_TOKEN.
+      HF_TOKEN: ${{ secrets.HF_DEPLOY_TOKEN }}
+      # Keep the serve-DB dataset variable correct on redeploy (idempotent).
+      WAREHOUSE_DATASET: ${{ vars.WAREHOUSE_DATASET || 'munther-hasan/scprs-warehouse-data' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install "huggingface_hub>=0.25" httpx
+
+      - name: Guard deploy token
+        id: guard
+        run: |
+          if [ -z "$HF_TOKEN" ]; then
+            echo "no HF_DEPLOY_TOKEN secret — skipping MCP Space deploy"
+            echo "skip=1" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Deploy MCP Space image
+        if: steps.guard.outputs.skip != '1'
+        run: python deploy/hf-space/deploy.py
+
+      # Confirm the new image is actually live — RUNNING on the just-pushed commit
+      # sha (not the old image) and answering /healthz. Fails loudly on a broken
+      # build so a bad deploy can't pass silently.
+      - name: Verify deploy went live
+        if: steps.guard.outputs.skip != '1'
+        run: python -m src.deploy_check --space "$HF_SPACE"

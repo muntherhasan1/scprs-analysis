@@ -36,6 +36,15 @@ from huggingface_hub import HfApi, create_repo
 
 ROOT = Path(__file__).resolve().parents[2]
 
+
+def _best_effort(desc: str, fn) -> None:
+    """Run a Space-settings write, warning (not failing) if the token can't."""
+    try:
+        fn()
+    except Exception as exc:  # noqa: BLE001
+        print(f"(skipped {desc}: {type(exc).__name__} — set it in Space Settings if needed)")
+
+
 # (src relative to ROOT, dest relative to Space root) — mirrors sync.sh.
 COPIES = [
     ("deploy/hf-space/README.md", "README.md"),
@@ -62,7 +71,15 @@ def main() -> None:
         sys.exit("set HF_SPACE=<user>/<space>, e.g. muntherhasan1/scprs-warehouse-mcp")
 
     api = HfApi()
-    create_repo(repo, repo_type="space", space_sdk="docker", exist_ok=True)
+    try:
+        create_repo(repo, repo_type="space", space_sdk="docker", exist_ok=True)
+    except Exception as exc:  # noqa: BLE001
+        # A repo-scoped write token (e.g. the CI deploy token) may lack
+        # namespace-create rights, which 403s here even with exist_ok=True. That's
+        # fine when the Space already exists — the common redeploy case.
+        if not api.repo_exists(repo, repo_type="space"):
+            raise
+        print(f"(create_repo skipped: {type(exc).__name__}; Space already exists)")
 
     work = Path(tempfile.mkdtemp(prefix="hf-space-"))
     try:
@@ -79,33 +96,42 @@ def main() -> None:
     finally:
         shutil.rmtree(work, ignore_errors=True)
 
+    # Settings writes are best-effort: a repo-content-scoped token (e.g. the CI
+    # deploy token) may lack settings-write, which 403s here. On a redeploy the
+    # variables/secrets are already set, so warn and continue rather than fail the
+    # whole deploy; a first-time deploy with a broad token sets them normally.
+    def _set_var(key, val):
+        _best_effort(f"variable {key}", lambda: api.add_space_variable(repo, key, val))
+
+    def _set_secret(key, val):
+        _best_effort(f"secret {key}", lambda: api.add_space_secret(repo, key, val))
+
     # Keep the SDK's DNS-rebinding Host guard on with the real proxied hostname.
     user, name = repo.split("/", 1)
     default_host = f"{user}-{name}.hf.space"
-    allowed_hosts = os.environ.get("MCP_ALLOWED_HOSTS", default_host)
-    api.add_space_variable(repo, "MCP_ALLOWED_HOSTS", allowed_hosts)
+    _set_var("MCP_ALLOWED_HOSTS", os.environ.get("MCP_ALLOWED_HOSTS", default_host))
     token = os.environ.get("MCP_AUTH_TOKEN")
     if token:
-        api.add_space_secret(repo, "MCP_AUTH_TOKEN", token)
+        _set_secret("MCP_AUTH_TOKEN", token)
     # Optional per-user tokens ("label:token,label2:token2") — revocable access
     # with per-user audit; either this or MCP_AUTH_TOKEN must end up set.
     tokens = os.environ.get("MCP_AUTH_TOKENS")
     if tokens:
-        api.add_space_secret(repo, "MCP_AUTH_TOKENS", tokens)
+        _set_secret("MCP_AUTH_TOKENS", tokens)
     # Optional per-user request/min cap (0/unset = off).
     rate_limit = os.environ.get("MCP_RATE_LIMIT_PER_MIN")
     if rate_limit:
-        api.add_space_variable(repo, "MCP_RATE_LIMIT_PER_MIN", rate_limit)
+        _set_var("MCP_RATE_LIMIT_PER_MIN", rate_limit)
     # Optional tool-call audit log: set the (non-secret) dataset id here; the HF
     # **write** token it needs (HF_TOKEN) stays a Space secret you add yourself.
     dataset = os.environ.get("QUERY_LOG_DATASET")
     if dataset:
-        api.add_space_variable(repo, "QUERY_LOG_DATASET", dataset)
+        _set_var("QUERY_LOG_DATASET", dataset)
     # The Space fetches the serve DB from this private dataset at startup; it also
     # needs an HF read token in the HF_TOKEN secret (set once in Space Settings).
     warehouse_dataset = os.environ.get("WAREHOUSE_DATASET")
     if warehouse_dataset:
-        api.add_space_variable(repo, "WAREHOUSE_DATASET", warehouse_dataset)
+        _set_var("WAREHOUSE_DATASET", warehouse_dataset)
 
     print(f"Deployed: {commit.commit_url if hasattr(commit, 'commit_url') else commit}")
     print(f"Endpoint: https://{default_host}/mcp")
