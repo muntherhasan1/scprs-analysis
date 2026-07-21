@@ -68,6 +68,20 @@ The example above sets a single shared `MCP_AUTH_TOKEN` for a first deploy. For
 (or as well) — see **Issuing & managing access tokens** below, which is the way
 you add/remove users day-to-day without a redeploy.
 
+**Auto-deploy (CI, Wave 3).** After the first manual deploy, the
+`Deploy MCP Space` workflow (`.github/workflows/deploy-mcp.yml`) redeploys the
+Space automatically whenever its shipped code changes on `main` (the file set in
+`deploy.py`'s `COPIES` — `mcp_server.py`, `warehouse_query.py`, the Dockerfile,
+`requirements-mcp.txt`, etc.). It runs `deploy.py` with the `HF_DEPLOY_TOKEN`
+Actions secret, then `python -m src.deploy_check` verifies the Space came back
+**RUNNING on the just-pushed commit's sha** (not the old image) and answers
+`/healthz` — a broken build fails the job loudly. `deploy.py` degrades gracefully
+under a repo-scoped token: it skips `create_repo` if the Space exists and treats
+variable/secret writes as best-effort (they're already set on a redeploy), so the
+same script works for both a broad-token first deploy and a scoped-token CI
+redeploy. Data deploys (the serve DB) were already continuous; this closes the
+loop for code. Only the MCP Space auto-deploys — the chat Space is frozen.
+
 `deploy.py` also sets the `MCP_ALLOWED_HOSTS` **variable** to
 `<user>-<space>.hf.space` (so the MCP SDK's DNS-rebinding Host guard stays on
 behind HF's proxy — otherwise `/mcp` returns `421 Invalid Host header`) and, if
