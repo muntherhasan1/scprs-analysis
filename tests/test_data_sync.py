@@ -215,6 +215,71 @@ def test_publish_supplier_db_missing_file(tmp_path):
         data_sync.publish_supplier_db(tmp_path / "nope.db", "acme/scprs-operational-db")
 
 
+def test_rollback_serve_db_reverts_to_previous_commit(tmp_path, monkeypatch):
+    """Rollback re-publishes the serve DB from the PRIOR revision as a new commit."""
+    import huggingface_hub
+
+    prev_db = tmp_path / "good.db"
+    prev_db.write_bytes(b"last-good-serve")
+    dl = {}
+
+    class Commit:
+        def __init__(self, cid):
+            self.commit_id = cid
+
+    class FakeApi:
+        def list_repo_commits(self, repo, repo_type=None, token=None):
+            # commits[0] = the just-published (bad) revision; [1] = last good.
+            return [Commit("badbadbad"), Commit("goodgood1234")]
+
+    def fake_download(**kw):
+        dl.update(kw)
+        return str(prev_db)
+
+    up = {}
+
+    def fake_upload(path, repo, filename, token, message):
+        up.update(path=str(path), repo=repo, filename=filename, message=message)
+        return "https://hf/commit/rollback"
+
+    monkeypatch.setattr(huggingface_hub, "HfApi", FakeApi)
+    monkeypatch.setattr(huggingface_hub, "hf_hub_download", fake_download)
+    monkeypatch.setattr(data_sync, "_upload_db", fake_upload)
+
+    url = data_sync.rollback_serve_db("acme/warehouse-data", token="wh-token")  # noqa: S106
+    assert url == "https://hf/commit/rollback"
+    assert dl["revision"] == "goodgood1234"  # fetched the PRIOR revision
+    assert dl["filename"] == "warehouse-serve.db"
+    assert up["filename"] == "warehouse-serve.db"
+    assert "goodgood" in up["message"]  # rollback commit names the target
+
+
+def test_rollback_serve_db_raises_without_prior_revision(monkeypatch):
+    import huggingface_hub
+
+    class Commit:
+        commit_id = "only"
+
+    class FakeApi:
+        def list_repo_commits(self, repo, repo_type=None, token=None):
+            return [Commit()]  # a single commit — nothing to roll back to
+
+    monkeypatch.setattr(huggingface_hub, "HfApi", FakeApi)
+    with pytest.raises(data_sync.WarehouseFetchError, match="no prior revision"):
+        data_sync.rollback_serve_db("acme/warehouse-data")
+
+
+def test_rollback_serve_cli_reverts_then_restarts(monkeypatch, capsys):
+    monkeypatch.setattr(data_sync, "rollback_serve_db", lambda repo, token=None: "https://hf/rb")
+    monkeypatch.setattr(data_sync, "restart_spaces", lambda *a, **k: [("acme/mcp", "restarted")])
+    monkeypatch.setattr(
+        sys, "argv", ["data_sync", "rollback-serve", "--dataset", "acme/warehouse-data"]
+    )
+    data_sync._cli()
+    out = capsys.readouterr().out
+    assert "Rolled back" in out and "restarted" in out  # reverts data, then restarts
+
+
 def test_restart_spaces_is_best_effort(monkeypatch):
     """One Space restarting and one failing must yield per-Space outcomes, no raise."""
     import huggingface_hub

@@ -164,6 +164,22 @@ jobs:
       # silent-staleness failure mode of 2026-07-20, made loud. Skips (exit 0)
       # when the MCP_VERIFY_TOKEN secret is unset.
       - name: Verify go-live (Space serves this build)
+        id: golive
         env:
           MCP_VERIFY_TOKEN: ${{ secrets.MCP_VERIFY_TOKEN }}
         run: python -m src.golive_check
+
+      # Wave 3 auto-rollback: if go-live verification failed, the just-published
+      # serve DB is not serving cleanly — revert the serve dataset to its prior
+      # (last-good) revision and restart, so the Spaces fall back to known-good
+      # data instead of being stuck on a bad snapshot. Scoped to the go-live
+      # step's failure only (a build/publish failure earlier published nothing to
+      # roll back). The job still fails so the bad deploy is loudly visible.
+      - name: Roll back serve DB on failed go-live
+        if: ${{ always() && steps.golive.outcome == 'failure' }}
+        env:
+          HF_WAREHOUSE_TOKEN: ${{ secrets.HF_WAREHOUSE_TOKEN }}
+          HF_DEPLOY_TOKEN: ${{ secrets.HF_DEPLOY_TOKEN }}
+        run: >
+          python -m src.data_sync rollback-serve
+          --dataset "${{ vars.WAREHOUSE_DATASET || 'munther-hasan/scprs-warehouse-data' }}"

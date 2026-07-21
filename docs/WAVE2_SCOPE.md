@@ -98,6 +98,15 @@ snapshot until manually rebooted). `refresh_pipeline.ps1` follows the
 single-writer model: it always fetches the operational store first, and `-Enrich`
 publishes back.
 
+**Auto-rollback (Wave 3).** After the publish + restart, `golive_check` verifies
+the Space serves this build. If that verification **fails**, a rollback step
+(`data_sync rollback-serve`) reverts the serve dataset to its prior (last-good)
+revision — a new commit re-publishing the previous `warehouse-serve.db` — and
+restarts, so the Spaces fall back to known-good data instead of being stuck on a
+bad/unverified snapshot. It's scoped to the go-live step's failure only (a
+build/publish failure earlier published nothing to roll back), and the job still
+fails so the bad deploy stays loudly visible.
+
 ### 2d — (later) Dagster + lineage
 Pipeline-as-assets and richer data versioning. Deferred; the Actions workflows are
 the MVP.
