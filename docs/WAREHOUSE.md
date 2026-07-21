@@ -144,6 +144,20 @@ Two marts derive from it:
   - `warn` (informational): line-item reconciliation, and negative grand totals
     (real credits/deobligations in the source data).
 
+## PR output diff (`src/warehouse_diff.py`)
+A change to `warehouse.py` (a mart, a grain, a join, an abbreviation) can shift the
+gold **output** in ways a small-fixture unit test won't catch. The `warehouse-diff`
+CI job (on PRs touching `warehouse.py`/`supplier_master.py`/`model.py`/
+`references/*.csv`) builds the warehouse from the **same real operational data** on
+both the PR code and the base code, and posts how gold changed as a PR comment:
+added/removed objects, per-mart **column** changes, **row-count** deltas, and a
+curated set of **headline metrics** (spend, supplier counts, CMAS coverage — all
+queried through the logical `lv_`/`gold_` views). It is **informational, not a
+gate** — warehouse output changes are often intended — but flags the shapes worth a
+second look (removed objects/columns, row-count drops >2%) with ⚠️. Two steps:
+`warehouse_diff snapshot` captures a build's contract to JSON; `warehouse_diff
+report` renders the base→head markdown.
+
 ## Physical naming (abbreviation standard)
 Physical columns on the gold `dim_*`/`fact_*` **tables** are abbreviated to a
 governed standard from `references/abbreviations.csv` (a `term → abbreviation`
