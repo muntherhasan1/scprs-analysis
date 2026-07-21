@@ -17,6 +17,7 @@ on:
       - "src/warehouse_query.py"
       - "src/query_log.py"
       - "src/data_sync.py"
+      - "src/config.py"
       - "src/observability.py"
       - "src/charting.py"
       - "src/__init__.py"

@@ -9,11 +9,16 @@ from __future__ import annotations
 
 import os
 
-from dotenv import load_dotenv
-
 # Loads .env if present (local dev). In production, real env vars / a secret
-# manager take precedence and .env simply won't exist.
-load_dotenv()
+# manager take precedence and .env simply won't exist. The lean deploy images
+# (MCP / web Spaces) get their config from platform env/secrets and don't install
+# python-dotenv, so a missing dotenv is a no-op there, not a boot failure.
+try:
+    from dotenv import load_dotenv
+
+    load_dotenv()
+except ModuleNotFoundError:
+    pass
 
 
 def require(name: str) -> str:
