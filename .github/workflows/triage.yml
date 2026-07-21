@@ -1,0 +1,77 @@
+name: Pipeline triage
+
+# Wave 4 (self-triaging pipeline): when an unattended pipeline workflow fails,
+# open a structured GitHub issue (which step, likely cause, what to check) built
+# from src/triage.py's hints. Idempotent — updates the one open issue per workflow
+# instead of spamming — and auto-closes it when a later run of that workflow
+# succeeds, so the issue list reflects current pipeline health. No LLM.
+on:
+  workflow_run:
+    workflows:
+      - "Enrich (Wave 2)"
+      - "CMAS refresh (Wave 2)"
+      - "Deploy MCP Space"
+    types: [completed]
+
+permissions:
+  contents: read # checkout src/triage.py
+  actions: read # read the failed run's jobs/steps
+  issues: write # open / comment / close the triage issue
+
+jobs:
+  triage:
+    runs-on: ubuntu-latest
+    # Only act on a clear success/failure verdict (skip cancelled/stale/etc).
+    if: contains(fromJSON('["success","failure"]'), github.event.workflow_run.conclusion)
+    env:
+      GH_TOKEN: ${{ github.token }}
+      WF: ${{ github.event.workflow_run.name }}
+      CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+      RUN_URL: ${{ github.event.workflow_run.html_url }}
+      RUN_ID: ${{ github.event.workflow_run.id }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Ensure the triage label exists
+        run: >
+          gh label create pipeline-failure -c B60205
+          -d "Automated pipeline-failure triage" -R "$GITHUB_REPOSITORY" 2>/dev/null || true
+
+      - name: Triage
+        run: |
+          set -euo pipefail
+          MARKER="<!-- pipeline-failure:${WF} -->"
+          # The single open triage issue for this workflow, if any (matched by marker).
+          NUM=$(gh issue list --label pipeline-failure --state open --json number,body \
+                  --jq "map(select(.body | contains(\"$MARKER\"))) | .[0].number // empty")
+
+          if [ "$CONCLUSION" = "success" ]; then
+            if [ -n "$NUM" ]; then
+              gh issue close "$NUM" \
+                --comment "✅ Recovered: a later run of **${WF}** succeeded — ${RUN_URL}"
+              echo "closed recovered issue #$NUM"
+            else
+              echo "success, no open issue — nothing to do"
+            fi
+            exit 0
+          fi
+
+          # failure: gather the failed step names and build the triage report.
+          STEPS=$(gh run view "$RUN_ID" --json jobs \
+                    --jq '[.jobs[].steps[] | select(.conclusion=="failure") | .name] | join(",")')
+          OUT=$(python -m src.triage report --workflow "$WF" --run-url "$RUN_URL" --steps "$STEPS")
+          TITLE=$(echo "$OUT" | jq -r .title)
+          BODY=$(echo "$OUT" | jq -r .body)
+          if [ -n "$NUM" ]; then
+            gh issue comment "$NUM" --body "$BODY"
+            echo "updated open issue #$NUM"
+          else
+            gh issue create --title "$TITLE" --label pipeline-failure --body "$BODY"
+            echo "opened a new triage issue"
+          fi
