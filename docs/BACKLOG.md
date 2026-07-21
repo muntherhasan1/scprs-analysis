@@ -4,19 +4,26 @@ Small, deferred enhancements. Each entry: what, why, and where to start.
 
 ## Open
 
-### Feed CMAS data to the CI warehouse build
-The warehouse integrates CMAS (`gold_cmas_agreement`, `gold_supplier_cmas`) as an
-optional side input, but a CI build produces **empty** CMAS marts because
-`data/cmas.db` isn't in the operational dataset — only local builds see real CMAS
-data.
-- **Why:** so the deployed Spaces serve real CMAS supplier integration, not empty
-  tables, after a device-free refresh.
-- **Start:** mirror the `supplier_enrichment.db` pattern — a `publish-cmas`
-  subcommand in `src/data_sync.py` (push `cmas.db` to the operational dataset) and
-  a best-effort `fetch-cmas` in the enrich workflow before `warehouse build`.
-  Bigger question to decide first: should CMAS be *refreshed* device-free too
-  (run `src.cmas extract` in CI on a cadence), or stay a manual local extract that
-  is merely published? See `docs/CMAS.md`.
+### Pre-deploy import smoke-test for the Space image
+The `deploy-mcp` workflow verifies the Space *after* it deploys (`deploy_check`),
+so a packaging gap only surfaces once the live Space has already crashed to
+`RUNTIME_ERROR` — exactly what happened when the first code-CD deploy shipped a
+`data_sync.py` that imported an unshipped `config.py` (incident 2026-07-21,
+#38→#39). A cheap pre-deploy gate would catch it *before* touching production.
+- **Why:** turn a live-Space outage into a red check on the PR / a failed
+  pre-deploy step; the safety net (`deploy_check`) stays, but the common failure
+  (a new module-level import of a module not in `deploy.py`'s `COPIES`, or a dep
+  not in `requirements-mcp.txt`) is caught pre-merge.
+- **Start:** a `deploy/hf-space/smoke_import.py` (or a step) that assembles the
+  exact shipped file set into a temp dir, `pip install -r requirements-mcp.txt`
+  into a throwaway venv, and imports the boot chain
+  (`import src.mcp_server`, then exercise `_require_db`'s `from . import data_sync`
+  path) — failing on any `ModuleNotFoundError`. Run it as the first step of
+  `deploy-mcp.yml` (before `deploy.py`) and/or as a `push`/PR check on the shipped
+  paths. The manual repro that found the incident: import the boot chain with a
+  `builtins.__import__` shim that raises `ModuleNotFoundError` for the non-lean
+  deps (e.g. `dotenv`). See [[space-deploy-shipped-files]] in memory and
+  `docs/REMOTE_MCP.md`.
 
 ### Capture per-section row counts in `generate_report` audit records
 The `generate_report` audit record logs the report `title` and section SQLs but
