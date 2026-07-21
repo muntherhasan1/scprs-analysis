@@ -231,6 +231,35 @@ def publish_cmas_db(db_path: Path, repo: str, token: str | None = None) -> str:
     )
 
 
+def rollback_serve_db(repo: str, token: str | None = None) -> str:
+    """Revert the serve dataset to its previous revision. Returns the commit URL.
+
+    Wave 3 auto-rollback: if a refresh publishes a serve DB and go-live
+    verification then fails, this re-publishes the **prior** revision of
+    ``warehouse-serve.db`` as a new commit, so the Spaces fetch known-good data on
+    their next boot instead of being stuck on a bad/unverified snapshot. The serve
+    dataset is git-based, so every ``publish`` is a versioned commit and the
+    last-good copy is always one revision back. Raises if there is nothing to roll
+    back to (a single commit)."""
+    from huggingface_hub import HfApi, hf_hub_download
+
+    api = HfApi()
+    commits = api.list_repo_commits(repo, repo_type="dataset", token=token)
+    if len(commits) < 2:
+        raise WarehouseFetchError(
+            f"cannot roll back {repo!r}: only {len(commits)} commit(s) — no prior revision"
+        )
+    prev = commits[1].commit_id  # commits[0] is the just-published (bad) revision
+    cached = hf_hub_download(  # nosec B615 — our own private dataset, explicit prior rev
+        repo_id=repo,
+        filename=SERVE_FILENAME,
+        repo_type="dataset",
+        revision=prev,
+        token=token,
+    )
+    return _upload_db(Path(cached), repo, SERVE_FILENAME, token, f"Rollback serve DB to {prev[:8]}")
+
+
 def restart_spaces(
     spaces: tuple[str, ...] = DEFAULT_SPACES, token: str | None = None
 ) -> list[tuple[str, str]]:
@@ -323,6 +352,12 @@ def _cli() -> None:
         help=f"Space id to restart (repeatable; default: {', '.join(DEFAULT_SPACES)})",
     )
 
+    rbk = sub.add_parser(
+        "rollback-serve",
+        help="Revert the serve dataset to its previous revision and restart the Spaces",
+    )
+    rbk.add_argument("--dataset", default=os.environ.get("WAREHOUSE_DATASET"))
+
     args = ap.parse_args()
 
     if args.cmd == "publish":
@@ -364,6 +399,13 @@ def _cli() -> None:
             print(f"{space}: {outcome}")
         # Always exit 0: best-effort by contract — a failed restart only delays
         # go-live until a manual reboot; the publish itself already succeeded.
+    elif args.cmd == "rollback-serve":
+        if not args.dataset:
+            raise SystemExit("set --dataset or the WAREHOUSE_DATASET env var")
+        url = rollback_serve_db(args.dataset, token=_publish_token())
+        print(f"Rolled back {SERVE_FILENAME} in {args.dataset} to last-good: {url}")
+        for space, outcome in restart_spaces():  # re-fetch the rolled-back data
+            print(f"{space}: {outcome}")
 
 
 if __name__ == "__main__":
