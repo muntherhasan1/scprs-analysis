@@ -185,6 +185,24 @@ jobs:
           MCP_VERIFY_TOKEN: ${{ secrets.MCP_VERIFY_TOKEN }}
         run: python -m src.golive_check
 
+      # The one alarm outside GitHub (#44): a healthy end-to-end run pings the
+      # dead-man's switch; the external service pages when pings stop, whatever
+      # the cause — including "GitHub disabled every cron in this repo". The
+      # pipeline monitor pings the same URL on its clean passes. Skips quietly
+      # until the HEALTHCHECK_PING_URL secret is configured.
+      - name: Dead-man's switch ping
+        if: success()
+        env:
+          PING: ${{ secrets.HEALTHCHECK_PING_URL }}
+        run: |
+          if [ -n "$PING" ]; then
+            curl -fsS -m 10 --retry 3 "$PING" >/dev/null \
+              && echo "pinged dead-man's switch" \
+              || echo "ping failed (non-fatal — the check's grace period absorbs one miss)"
+          else
+            echo "HEALTHCHECK_PING_URL not set — external dead-man's switch inactive (see #44)"
+          fi
+
       # Wave 3 auto-rollback: if go-live verification failed, the just-published
       # serve DB is not serving cleanly — revert the serve dataset to its prior
       # (last-good) revision and restart, so the Spaces fall back to known-good
