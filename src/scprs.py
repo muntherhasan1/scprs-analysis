@@ -54,6 +54,14 @@ _TO = "#ZZ_SCPRS_SP_WRK_TO_DATE"
 _SEARCH = "#ZZ_SCPRS_SP_WRK_BUTTON"
 _DL_SUMMARY = "#ZZ_SCPRS_SP_WRK_BUTTONS_GB"
 _MODAL_OK = '[id="#ICOK"]'
+# The results grid shows ~200 rows per page with a custom Next control (NOT the
+# standard PeopleSoft $hdown$ chunking — recon 2026-07-23). Clicking Next is a
+# full server round-trip (~5-30s behind a glass pane); the link ids restart at
+# PURCHASE_DOC$0 on every page, and Next disappears on the last page.
+_NEXT_PAGE = "#ZZ_SCPRS_SP_WRK_NEXT_BUTTON"
+# Grid row-count banner, e.g. "1 to 200 of 206". (An earlier "1-200 of" pattern
+# never matched this site, which silently hid multi-page days — see #49.)
+GRID_BANNER = r"(\d[\d,]*) to (\d[\d,]*) of (\d[\d,]*)"
 # NOTE: the site's "Download Detail Information" export is unreliable (it drops
 # line-item value on multi-line documents). We deliberately do not use it; the
 # authoritative line-item / associated-PO data comes from the PO Details
@@ -358,19 +366,30 @@ def collect_po_details(
 ) -> list[dict]:
     """Search, then click each purchase-document link and parse its PO Details.
 
-    Returns a list of {"document", "header", "lines", "pos"} dicts. Processes
-    the documents in the results grid (narrow the date range for large sets).
+    Returns a list of {"document", "header", "lines", "pos"} dicts. Pages
+    through the FULL results grid (~200 rows per page, custom Next control) —
+    days larger than one page are covered completely (#49). Note the grid's
+    ordering is not stable across sessions, so coverage is by document number,
+    never by position.
 
     `skip_docs` are document numbers already drilled elsewhere — they are not
     clicked again. `deadline` is a `time.monotonic()` timestamp; once reached,
     drilling stops early and the partial results are returned. `stats` (an
-    out-param dict) reports {"total", "drilled", "skipped", "complete"} so the
-    caller can tell a finished grid from a deadline-truncated one — a caller
-    recording day-level progress must only do so when `complete` is True.
+    out-param dict) reports {"total", "drilled", "skipped", "complete"} — total
+    is the grid's own row count across all pages, and a caller recording
+    day-level progress must only do so when `complete` is True (every page
+    visited, nothing cut short by deadline or max_docs).
     """
+    import re
+
     results: list[dict] = []
     if stats is not None:
         stats.update({"total": 0, "drilled": 0, "skipped": 0, "complete": True})
+
+    def _banner(page) -> str | None:
+        m = re.search(GRID_BANNER, page.inner_text("body"))
+        return m.group(0) if m else None
+
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=headless, args=_CHROMIUM_ARGS)
         ctx = browser.new_context()
@@ -394,48 +413,84 @@ def collect_po_details(
                 log("No records for that business unit + date range.")
                 return []
 
-            import re
-
-            total = page.locator("a[id^='PURCHASE_DOC$']").count()
-            # PeopleSoft grids page at ~100 rows; surface any rows beyond this page.
-            m = re.search(r"1-\d+ of ([\d,]+)", page.inner_text("body"))
-            grid_total = int(m.group(1).replace(",", "")) if m else total
-            if grid_total > total:
-                log(
-                    f"WARNING: grid reports {grid_total} rows but only the first {total} are on "
-                    "this page; narrow the date range to capture all (pagination not automated)."
-                )
-            n = min(total, max_docs) if max_docs else total
-            log(f"{total} document(s) on page; drilling into {n}")
+            first_page = page.locator("a[id^='PURCHASE_DOC$']").count()
+            m = re.search(GRID_BANNER, page.inner_text("body"))
+            grid_total = int(m.group(3).replace(",", "")) if m else first_page
+            log(f"{grid_total} document(s) in the grid; {first_page} on page 1")
             skipped = 0
             complete = True
-            for i in range(n):
-                link = page.locator(f"[id='PURCHASE_DOC${i}']")
-                doc = link.inner_text().strip()
-                if skip_docs and doc in skip_docs:
-                    skipped += 1
-                    continue
-                if deadline is not None and time.monotonic() >= deadline:
-                    log(f"  time budget reached at document {i + 1}/{n}; stopping early")
+            page_no = 1
+            while True:
+                n = page.locator("a[id^='PURCHASE_DOC$']").count()
+                stop = False
+                for i in range(n):
+                    if max_docs is not None and len(results) >= max_docs:
+                        # The cap covered less than the grid: not a complete pass.
+                        complete = len(results) + skipped >= grid_total
+                        stop = True
+                        break
+                    link = page.locator(f"[id='PURCHASE_DOC${i}']")
+                    doc = link.inner_text().strip()
+                    if skip_docs and doc in skip_docs:
+                        skipped += 1
+                        continue
+                    if deadline is not None and time.monotonic() >= deadline:
+                        log(f"  time budget reached at p{page_no} {i + 1}/{n}; stopping early")
+                        complete = False
+                        stop = True
+                        break
+                    with ctx.expect_page(timeout=timeout_ms) as pop:
+                        link.click()
+                    detail = pop.value
+                    try:
+                        detail.wait_for_load_state("networkidle", timeout=timeout_ms)
+                    except PWTimeout:
+                        pass
+                    detail.wait_for_timeout(1200)
+                    header, lines, pos = parse_po_details(detail.content())
+                    detail.close()
+                    results.append({"document": doc, "header": header, "lines": lines, "pos": pos})
+                    log(f"  [p{page_no} {i + 1}/{n}] {doc}: {len(lines)} lines, {len(pos)} POs")
+                if stop:
+                    break
+                nxt = page.locator(_NEXT_PAGE)
+                if not nxt.count() or not nxt.first.is_visible():
+                    break  # last page — the grid is fully covered
+                # Next is a slow server round-trip behind a glass pane: click,
+                # then poll until the banner (or first link text) actually
+                # changes. A grid that never advances is an incomplete pass —
+                # never record the day as done off the back of it.
+                before_banner = _banner(page)
+                before_first = page.locator("[id='PURCHASE_DOC$0']").inner_text().strip()
+                nxt.first.click()
+                advanced = False
+                for _ in range(45):  # up to ~90s
+                    page.wait_for_timeout(2000)
+                    try:
+                        if _banner(page) != before_banner or (
+                            page.locator("[id='PURCHASE_DOC$0']").count()
+                            and page.locator("[id='PURCHASE_DOC$0']").inner_text().strip()
+                            != before_first
+                        ):
+                            advanced = True
+                            break
+                    except Exception:  # noqa: BLE001,S112 # nosec B112 - DOM mid-swap; poll again
+                        continue
+                if not advanced:
+                    log(f"  next-page click did not advance past page {page_no}; stopping early")
                     complete = False
                     break
-                with ctx.expect_page(timeout=timeout_ms) as pop:
-                    link.click()
-                detail = pop.value
-                try:
-                    detail.wait_for_load_state("networkidle", timeout=timeout_ms)
-                except PWTimeout:
-                    pass
-                detail.wait_for_timeout(1200)
-                header, lines, pos = parse_po_details(detail.content())
-                detail.close()
-                results.append({"document": doc, "header": header, "lines": lines, "pos": pos})
-                log(f"  [{i + 1}/{n}] {doc}: {len(lines)} lines, {len(pos)} POs")
+                page_no += 1
             if skipped:
                 log(f"  skipped {skipped} already-drilled document(s)")
             if stats is not None:
                 stats.update(
-                    {"total": n, "drilled": len(results), "skipped": skipped, "complete": complete}
+                    {
+                        "total": grid_total,
+                        "drilled": len(results),
+                        "skipped": skipped,
+                        "complete": complete,
+                    }
                 )
         finally:
             browser.close()
