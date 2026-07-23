@@ -25,8 +25,11 @@ concurrency:
 jobs:
   diff:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # TWO full warehouse builds; measured 14m45s on 2026-07-23 (PR #42) and
+    # growing ~6h-ly with enrichment — 45 min keeps headroom ahead of growth.
+    timeout-minutes: 45
     env:
+      PYTHONUNBUFFERED: "1" # a killed run must still show how far it got
       SCPRS_DATASET: ${{ vars.SCPRS_DATASET || 'munther-hasan/scprs-operational-db' }}
       HF_SCPRS_TOKEN: ${{ secrets.HF_SCPRS_TOKEN }}
     steps:

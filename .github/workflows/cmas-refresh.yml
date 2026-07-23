@@ -27,6 +27,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
+      PYTHONUNBUFFERED: "1" # a killed run must still show how far it got
       # The operational store's private dataset (cmas.db lands alongside scprs.db).
       SCPRS_DATASET: ${{ vars.SCPRS_DATASET || 'munther-hasan/scprs-operational-db' }}
       # Read+write on that dataset (same Actions secret CI uses as the sole writer).
@@ -50,16 +51,51 @@ jobs:
       - name: Extract CMAS (Power BI embed -> data/cmas.db)
         run: python -m src.cmas extract
 
-      # Upload-on-success gate: never publish an empty/partial extract over good data.
-      - name: Sanity-check the extract
+      # Upload-on-success gate (#51): never publish an empty/partial extract
+      # over good data. ">0 rows" alone is not enough — a silently truncated
+      # DSR query (40 rows instead of ~4,000) would pass it and quietly shrink
+      # the gold CMAS marts on the next warehouse build. Agreements only grow
+      # slowly, so the new extract must hold >=90% of the previously published
+      # rows; the first-ever publish (no prior cmas.db) passes on >0.
+      - name: Sanity-check the extract (shrink gate)
         run: |
-          python - <<'PY'
+          set -o pipefail
+          python - <<'PY' 2>&1 | tee gate.log
           import sqlite3, sys
-          n = sqlite3.connect("data/cmas.db").execute(
-              "SELECT COUNT(*) FROM Approved_Applications").fetchone()[0]
-          print(f"Approved_Applications rows: {n}")
-          sys.exit(0 if n > 0 else 1)
+          from pathlib import Path
+          from src import data_sync
+
+          q = "SELECT COUNT(*) FROM Approved_Applications"
+          n = sqlite3.connect("data/cmas.db").execute(q).fetchone()[0]
+          print(f"new Approved_Applications rows: {n}")
+          if n <= 0:
+              print("FAIL: empty extract")
+              sys.exit(1)
+
+          prev_path = Path("data/cmas_prev.db")
+          try:
+              have_prev = data_sync.fetch_cmas_db(prev_path)
+          except Exception as e:  # noqa: BLE001 - unreadable prior copy: warn, don't block
+              print(f"WARN: could not fetch previous cmas.db ({e!r}) — gating on >0 only")
+              sys.exit(0)
+          if not have_prev:
+              print("no previously published cmas.db — first publish, gate passes")
+              sys.exit(0)
+          prev = sqlite3.connect(prev_path).execute(q).fetchone()[0]
+          floor = int(prev * 0.9)
+          print(f"previous rows: {prev}; floor (90%): {floor}")
+          if n < floor:
+              print(f"FAIL: extract shrank below 90% of previous ({n} < {floor}) — "
+                    "likely a truncated/changed DSR query; NOT publishing")
+              sys.exit(1)
+          print("OK: shrink gate passed")
           PY
+          {
+            echo "### CMAS refresh"
+            echo '```'
+            cat gate.log
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Publish cmas.db to the operational dataset
         run: python -m src.data_sync publish-cmas

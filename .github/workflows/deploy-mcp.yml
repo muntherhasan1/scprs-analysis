@@ -38,6 +38,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 40
     env:
+      PYTHONUNBUFFERED: "1" # a killed run must still show how far it got
       HF_SPACE: ${{ vars.MCP_SPACE || 'munther-hasan/scprs-warehouse-mcp' }}
       # Write on the MCP Space repo (upload code + set variables). Same secret as
       # restart-spaces. HfApi() picks it up from HF_TOKEN.
@@ -59,21 +60,22 @@ jobs:
           python -m pip install --upgrade pip
           pip install "huggingface_hub>=0.25" httpx
 
+      # A missing token must FAIL, not skip (#46): this workflow only runs on
+      # push to main in the base repo, where the secret must exist. The old
+      # soft-skip made every deploy a silent green no-op when the token was
+      # rotated away — and each fake success auto-closed the open triage issue.
       - name: Guard deploy token
-        id: guard
         run: |
           if [ -z "$HF_TOKEN" ]; then
-            echo "no HF_DEPLOY_TOKEN secret — skipping MCP Space deploy"
-            echo "skip=1" >> "$GITHUB_OUTPUT"
+            echo "::error::HF_DEPLOY_TOKEN secret is missing/empty — the Space can no longer be deployed. Restore the secret (write scope on the Space repo)."
+            exit 1
           fi
 
       - name: Deploy MCP Space image
-        if: steps.guard.outputs.skip != '1'
         run: python deploy/hf-space/deploy.py
 
       # Confirm the new image is actually live — RUNNING on the just-pushed commit
       # sha (not the old image) and answering /healthz. Fails loudly on a broken
       # build so a bad deploy can't pass silently.
       - name: Verify deploy went live
-        if: steps.guard.outputs.skip != '1'
         run: python -m src.deploy_check --space "$HF_SPACE"
