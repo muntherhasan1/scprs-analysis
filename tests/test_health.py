@@ -189,6 +189,15 @@ def test_main_next_bu_exits_one_when_covered(tmp_path, capsys):
     assert capsys.readouterr().out.strip() == ""
 
 
+def test_main_next_bu_exits_two_when_picker_crashes(tmp_path, capsys):
+    """A crashed picker (missing/corrupt store) must exit 2, never 1 — exit 1
+    means 'nothing pending' and would make the runner silently fall back."""
+    missing = tmp_path / "does-not-exist.db"
+
+    assert health.main(["--db", str(missing), "--next-bu"]) == 2
+    assert capsys.readouterr().out.strip() == ""  # no unit printed
+
+
 def test_main_exits_nonzero_on_error(tmp_path):
     db = tmp_path / "scprs.db"
     _seed(db)

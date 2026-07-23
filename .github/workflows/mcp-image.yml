@@ -27,6 +27,9 @@ permissions:
 jobs:
   build-and-smoke-test:
     runs-on: ubuntu-latest
+    # Build + 60s boot poll fit well inside 20 min; without this the default
+    # is 360 min of held runner on a hang.
+    timeout-minutes: 20
     env:
       DOCKER_BUILDKIT: "1"   # honor Dockerfile.mcp.dockerignore
     steps:

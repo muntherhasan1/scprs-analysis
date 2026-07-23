@@ -53,6 +53,13 @@ def test_report_unknown_workflow_is_graceful():
     assert "No triage hint" in r["body"]
 
 
+def test_report_covers_mcp_image_and_ci():
+    r = triage.build_report("MCP image", ["Build image"], "https://run/9")
+    assert "next auto-deploy" in r["body"]
+    r = triage.build_report("CI", ["Dependency vulnerability scan (pip-audit)"], "https://run/10")
+    assert "pip-audit" in r["body"]
+
+
 def test_report_cancelled_frames_timeout_and_keeps_step_hint():
     """A `timeout-minutes` kill concludes `cancelled` — the report must lead with
     the timeout framing (the 2026-07 enrich livelock lesson) and still include

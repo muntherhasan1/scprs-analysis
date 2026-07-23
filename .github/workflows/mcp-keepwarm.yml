@@ -21,16 +21,22 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  URL: https://munther-hasan-scprs-warehouse-mcp.hf.space/healthz
+  # Derived from the same var the deploy workflow uses, so a Space rename can't
+  # leave this pinging a dead hostname forever (subdomain = repo id, / and _
+  # mapped to -, lowercased).
+  MCP_SPACE: ${{ vars.MCP_SPACE || 'munther-hasan/scprs-warehouse-mcp' }}
   ALERT_LABEL: mcp-keepwarm-alert
 
 jobs:
   ping:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - name: Ping /healthz
         id: ping
         run: |
+          URL="https://$(echo "$MCP_SPACE" | tr '/_' '--' | tr '[:upper:]' '[:lower:]').hf.space/healthz"
+          echo "url=$URL" >> "$GITHUB_OUTPUT"
           # Retry: if the Space was asleep, the first hit wakes it (slow), the
           # next confirms it's up. --max-time covers a cold start. We record the
           # result instead of exiting, so the alert/resolve steps always run.
@@ -59,6 +65,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           CODES: ${{ steps.ping.outputs.codes }}
+          URL: ${{ steps.ping.outputs.url }}
         run: |
           body="Keep-warm ping to \`$URL\` failed (HTTP codes:$CODES).
 
@@ -69,6 +76,18 @@ jobs:
           existing=$(gh issue list --label "$ALERT_LABEL" --state open \
             --json number --jq '.[0].number')
           if [ -n "$existing" ]; then
+            # Throttle: this fires every 10 min — a weekend outage would pile
+            # up ~300 comments. One comment per hour keeps the issue readable
+            # (the failing runs themselves remain the fine-grained record).
+            last=$(gh issue view "$existing" --json comments \
+                     --jq '.comments[-1].createdAt // empty')
+            if [ -n "$last" ]; then
+              age_min=$(( ( $(date -u +%s) - $(date -u -d "$last" +%s) ) / 60 ))
+              if [ "$age_min" -lt 60 ]; then
+                echo "throttled: last comment ${age_min}m ago (<60m) — not commenting"
+                exit 0
+              fi
+            fi
             echo "Commenting on existing alert issue #$existing"
             gh issue comment "$existing" --body "$body"
           else

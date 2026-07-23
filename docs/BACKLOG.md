@@ -38,6 +38,16 @@ The `generate_report` audit record logs the report `title` and section SQLs but
 
 ## Done
 
+### Retire the web-app keep-warm workflow — DONE 2026-07-23 (#55)
+`webapp-keepwarm.yml` pinged the chat Space every 10 min, but the Space is
+private/frozen — its `hf.space` URL serves HF's sign-in interstitial with HTTP
+**200**, so the check was *falsely succeeding* against a login page (verified
+2026-07-23: root returns 200 while the unauthenticated Spaces API returns
+"Invalid username or password"). Removed rather than left as a dead check.
+**Revival:** when the chat Space is made public again, restore the workflow from
+git history (`git log --diff-filter=D -- .github/workflows/webapp-keepwarm.yml`)
+and re-verify the ping hits the app, not an interstitial.
+
 ### Auto-restart the Spaces after a data refresh — DONE 2026-07-20
 `src/data_sync.py restart-spaces` (best-effort `HfApi().restart_space`, factory
 reboot, warn-never-fail) wired into the Wave 2c workflow and `refresh_pipeline.ps1`.

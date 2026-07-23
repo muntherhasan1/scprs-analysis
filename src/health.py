@@ -245,15 +245,31 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = ap.parse_args(argv)
 
+    if args.next_bu:
+        # Exit contract for scheduled runners: 0 = unit printed, 1 = nothing
+        # pending (caller falls back), 2 = the picker itself CRASHED (missing/
+        # corrupt store). Without the distinct code a traceback exits 1 and
+        # reads as "nothing pending" — the runner would silently proceed
+        # against a broken store.
+        import traceback
+
+        try:
+            con = sqlite3.connect(f"file:{args.db}?mode=ro", uri=True)
+            try:
+                bu = next_bu(con)
+            finally:
+                con.close()
+        except Exception:  # noqa: BLE001 - any crash must exit 2, never 1
+            traceback.print_exc()
+            return 2
+        if bu is None:
+            return 1
+        print(bu)
+        return 0
+
     # Read-only: never let a health check mutate the store it inspects.
     con = sqlite3.connect(f"file:{args.db}?mode=ro", uri=True)
     try:
-        if args.next_bu:
-            bu = next_bu(con)
-            if bu is None:
-                return 1
-            print(bu)
-            return 0
         findings = evaluate(con, stale_hours=args.stale_hours, min_coverage=args.min_coverage)
     finally:
         con.close()

@@ -86,36 +86,65 @@ jobs:
 
       # On a schedule event all `inputs.*` are empty: pick the unit most in need
       # and a larger slice. A manual dispatch with a blank business_unit also
-      # auto-picks. `--next-bu` exits 1 when nothing is pending — fall back to
-      # 8660, where enrich no-ops harmlessly on an empty pending set.
+      # auto-picks. `--next-bu` exit codes: 0 = picked, 1 = nothing pending
+      # (fall back to 8660, where enrich no-ops harmlessly), >=2 = the picker
+      # CRASHED (corrupt store, missing table) — fail loudly instead of
+      # silently enriching the wrong unit. Inputs pass through `env`, never
+      # inline `${{ }}` in bash (quote-injection hygiene).
       - name: Resolve run parameters
         id: params
+        env:
+          IN_BU: ${{ inputs.business_unit }}
+          IN_LIMIT: ${{ inputs.limit }}
+          IN_FROM: ${{ inputs.from_date }}
+          IN_TO: ${{ inputs.to_date }}
+          IN_BUDGET: ${{ inputs.budget_minutes }}
         run: |
-          bu='${{ inputs.business_unit }}'
+          bu="$IN_BU"
           if [ -z "$bu" ]; then
-            bu=$(python -m src.health --next-bu || true)
+            set +e
+            bu=$(python -m src.health --next-bu)
+            rc=$?
+            set -e
+            if [ "$rc" -ge 2 ]; then
+              echo "::error::health --next-bu crashed (exit $rc) — refusing to guess a unit"
+              exit 1
+            fi
             bu=${bu:-8660}
             echo "auto-picked business unit: $bu"
           fi
           echo "bu=$bu" >> "$GITHUB_OUTPUT"
-          echo "limit=${{ inputs.limit || '50' }}" >> "$GITHUB_OUTPUT"
-          echo "from=${{ inputs.from_date || '07/01/2016' }}" >> "$GITHUB_OUTPUT"
-          echo "to=${{ inputs.to_date || '06/30/2028' }}" >> "$GITHUB_OUTPUT"
-          echo "budget=${{ inputs.budget_minutes || '70' }}" >> "$GITHUB_OUTPUT"
+          echo "limit=${IN_LIMIT:-50}" >> "$GITHUB_OUTPUT"
+          echo "from=${IN_FROM:-07/01/2016}" >> "$GITHUB_OUTPUT"
+          echo "to=${IN_TO:-06/30/2028}" >> "$GITHUB_OUTPUT"
+          echo "budget=${IN_BUDGET:-70}" >> "$GITHUB_OUTPUT"
 
       # --budget-minutes makes big business units (3540 averages ~350 docs/day;
       # its largest days top 1,100) tractable: the run banks what it drilled and
       # exits 0 so the publish steps run; an unfinished day resumes doc-by-doc
-      # next run instead of being re-scraped from scratch.
+      # next run instead of being re-scraped from scratch. The result line +
+      # duration land in the run summary so budget erosion is a visible trend,
+      # not a surprise timeout (the "~35 min worst case" lesson).
       - name: Enrich one slice (PO Details drill-down)
-        run: >
-          python -m src.model enrich
-          "${{ steps.params.outputs.bu }}"
-          "${{ steps.params.outputs.from }}"
-          "${{ steps.params.outputs.to }}"
-          --limit "${{ steps.params.outputs.limit }}"
-          --newest-first
-          --budget-minutes "${{ steps.params.outputs.budget }}"
+        env:
+          BU: ${{ steps.params.outputs.bu }}
+          FROM: ${{ steps.params.outputs.from }}
+          TO: ${{ steps.params.outputs.to }}
+          LIMIT: ${{ steps.params.outputs.limit }}
+          BUDGET: ${{ steps.params.outputs.budget }}
+        run: |
+          set -o pipefail
+          start=$SECONDS
+          python -m src.model enrich "$BU" "$FROM" "$TO" \
+            --limit "$LIMIT" --newest-first --budget-minutes "$BUDGET" \
+            2>&1 | tee enrich.log
+          {
+            echo "### Enrich — BU $BU (limit $LIMIT, budget ${BUDGET}m)"
+            echo '```'
+            grep -F "days_total" enrich.log | tail -1
+            echo "enrich step took $(( (SECONDS - start) / 60 ))m $(( (SECONDS - start) % 60 ))s"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
 
       # Wave-1 gate. Only the *integrity* checks (contracts, canary) block the
       # publish — they detect a corrupt/partial store, and a blocked publish leaves

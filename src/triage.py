@@ -73,6 +73,23 @@ _HINTS: dict[str, dict[str, str]] = {
             "nothing was published (upload-on-success held)."
         ),
     },
+    "MCP image": {
+        "_default": (
+            "The MCP server container failed to build or boot its smoke test on "
+            "main — the **next auto-deploy of the Space will likely break**. Check "
+            "the Docker build log first; if the build passed but boot failed, it's "
+            "usually a new module-level import of a file not in `deploy.py`'s "
+            "`COPIES` or a dep missing from `requirements-mcp.txt`."
+        ),
+    },
+    "CI": {
+        "_default": (
+            "Main-branch CI failed (lint / bandit / pip-audit / secret scan / "
+            "tests). If the merge was green, the likely cause is `pip-audit`: a "
+            "newly published CVE fails a scheduled run with no code change — "
+            "bump or pin the affected dependency."
+        ),
+    },
     "Deploy MCP Space": {
         "_default": "The MCP Space code deploy failed.",
         "Deploy MCP Space image": (
