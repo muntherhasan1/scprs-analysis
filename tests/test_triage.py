@@ -97,4 +97,4 @@ def test_cli_report_emits_json(capsys, monkeypatch):
     triage._cli()
     out = json.loads(capsys.readouterr().out)
     assert out["title"].startswith("⚠️ Pipeline failure")
-    assert "Auto-rollback" in out["body"]  # the go-live hint
+    assert "evidence-graded" in out["body"]  # the go-live hint

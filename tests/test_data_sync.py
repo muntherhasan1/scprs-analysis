@@ -100,6 +100,23 @@ def test_fetch_operational_db_noop_without_dataset(tmp_path, monkeypatch):
     assert not dest.exists()  # nothing fetched — local dev keeps its own scprs.db
 
 
+def _fake_head_api(monkeypatch, sha="headsha1234567890"):
+    """Fake HfApi whose dataset_info reports a fixed HEAD sha (the CAS base)."""
+    import huggingface_hub
+
+    class FakeApi:
+        def dataset_info(self, repo, token=None):
+            class Info:
+                pass
+
+            info = Info()
+            info.sha = sha
+            return info
+
+    monkeypatch.setattr(huggingface_hub, "HfApi", FakeApi)
+    return sha
+
+
 def test_fetch_operational_db_atomic_fetch(tmp_path, monkeypatch):
     import huggingface_hub
 
@@ -107,6 +124,7 @@ def test_fetch_operational_db_atomic_fetch(tmp_path, monkeypatch):
     remote.write_bytes(b"operational-db-bytes")
     monkeypatch.setenv("SCPRS_DATASET", "acme/scprs-operational-db")
     monkeypatch.setenv("HF_SCPRS_TOKEN", "op-token")
+    sha = _fake_head_api(monkeypatch)
     captured = {}
 
     def fake_download(**kw):
@@ -121,10 +139,35 @@ def test_fetch_operational_db_atomic_fetch(tmp_path, monkeypatch):
     assert not (dest.parent / (dest.name + ".tmp")).exists()  # temp renamed away
     assert captured["filename"] == "scprs.db"
     assert captured["token"] == "op-token"  # noqa: S105 — test literal, dedicated op token used
+    # CAS wiring (#48): download pinned to the resolved HEAD, sha recorded for publish
+    assert captured["revision"] == sha
+    assert data_sync._rev_sidecar(dest).read_text() == sha
+
+
+def test_fetch_operational_db_without_head_still_fetches(tmp_path, monkeypatch):
+    """CAS is protection, not a prerequisite: an unreachable HEAD lookup falls back
+    to a plain main fetch with no sidecar (publish then skips the guard)."""
+    import huggingface_hub
+
+    remote = tmp_path / "scprs.db"
+    remote.write_bytes(b"bytes")
+
+    class BrokenApi:
+        def dataset_info(self, repo, token=None):
+            raise RuntimeError("404 Repo Not Found")
+
+    monkeypatch.setattr(huggingface_hub, "HfApi", BrokenApi)
+    monkeypatch.setattr(huggingface_hub, "hf_hub_download", lambda **kw: str(remote))
+
+    dest = tmp_path / "out" / "scprs.db"
+    assert data_sync.fetch_operational_db(dest, repo="acme/op") is True
+    assert not data_sync._rev_sidecar(dest).exists()
 
 
 def test_fetch_operational_db_wraps_error(tmp_path, monkeypatch):
     import huggingface_hub
+
+    _fake_head_api(monkeypatch)
 
     def boom(**kw):
         raise RuntimeError("403 Forbidden")
@@ -138,6 +181,63 @@ def test_fetch_operational_db_wraps_error(tmp_path, monkeypatch):
 def test_publish_operational_db_missing_file(tmp_path):
     with pytest.raises(FileNotFoundError):
         data_sync.publish_operational_db(tmp_path / "nope.db", "acme/scprs-operational-db")
+
+
+def test_publish_operational_db_compare_and_swaps_then_spends_sidecar(tmp_path, monkeypatch):
+    """The publish passes the fetched revision as parent_commit and removes the
+    sidecar afterwards (a CAS base must never be reused across runs)."""
+    db = tmp_path / "scprs.db"
+    db.write_bytes(b"x")
+    data_sync._rev_sidecar(db).write_text("basesha")
+    captured = {}
+
+    def fake_upload(path, repo, filename, token, message, parent_commit=None):
+        captured.update(parent_commit=parent_commit)
+        return "https://hf/commit/ok"
+
+    monkeypatch.setattr(data_sync, "_upload_db", fake_upload)
+    assert data_sync.publish_operational_db(db, "acme/op") == "https://hf/commit/ok"
+    assert captured["parent_commit"] == "basesha"
+    assert not data_sync._rev_sidecar(db).exists()
+
+
+def test_publish_operational_db_lost_update_guard(tmp_path, monkeypatch):
+    """A 412 (HEAD moved past the fetched base) surfaces as an actionable
+    lost-update error instead of clobbering the other writer's publish (#48)."""
+    db = tmp_path / "scprs.db"
+    db.write_bytes(b"x")
+    data_sync._rev_sidecar(db).write_text("basesha")
+
+    def conflict(path, repo, filename, token, message, parent_commit=None):
+        raise RuntimeError("412 Client Error: Precondition Failed")
+
+    monkeypatch.setattr(data_sync, "_upload_db", conflict)
+    with pytest.raises(data_sync.WarehouseFetchError, match="lost-update"):
+        data_sync.publish_operational_db(db, "acme/op")
+    assert data_sync._rev_sidecar(db).exists()  # base kept — nothing was published
+
+
+def test_with_retries_retries_transient_and_not_deterministic(monkeypatch):
+    monkeypatch.setattr(data_sync.time, "sleep", lambda s: None)
+    calls = {"n": 0}
+
+    def flaky():
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise RuntimeError("503 Server Error")
+        return "ok"
+
+    assert data_sync._with_retries(flaky, what="t") == "ok"
+    assert calls["n"] == 3
+
+    def forbidden():
+        calls["n"] += 1
+        raise RuntimeError("403 Forbidden")
+
+    calls["n"] = 0
+    with pytest.raises(RuntimeError, match="403"):
+        data_sync._with_retries(forbidden, what="t")
+    assert calls["n"] == 1  # deterministic errors fail fast, no retry
 
 
 def test_operational_token_precedence(monkeypatch):
@@ -327,6 +427,30 @@ def test_restart_spaces_cli_defaults_and_exit_zero(monkeypatch, capsys):
     data_sync._cli()  # must not raise/exit non-zero even when every restart fails
     assert captured["spaces"] == data_sync.DEFAULT_SPACES
     assert "FAILED" in capsys.readouterr().out
+
+
+def test_restart_spaces_cli_require_fails_on_that_space(monkeypatch):
+    """--require turns the named space's failed restart into exit 1 so the
+    workflow can distinguish 'never rebooted' from 'rebooted but stale' (#45)."""
+
+    def recorder(spaces, token=None):
+        return [("acme/mcp", "FAILED: 401"), ("acme/chat", "restarted")]
+
+    monkeypatch.setattr(data_sync, "restart_spaces", recorder)
+    monkeypatch.setattr(sys, "argv", ["data_sync", "restart-spaces", "--require", "acme/mcp"])
+    with pytest.raises(SystemExit) as ei:
+        data_sync._cli()
+    assert ei.value.code == 1
+
+
+def test_restart_spaces_cli_require_passes_when_that_space_restarts(monkeypatch, capsys):
+    def recorder(spaces, token=None):
+        return [("acme/mcp", "restarted"), ("acme/chat", "FAILED: 404")]
+
+    monkeypatch.setattr(data_sync, "restart_spaces", recorder)
+    monkeypatch.setattr(sys, "argv", ["data_sync", "restart-spaces", "--require", "acme/mcp"])
+    data_sync._cli()  # chat (frozen) failing must not matter
+    assert "restarted" in capsys.readouterr().out
 
 
 def test_fetch_operational_cli(tmp_path, monkeypatch):

@@ -95,10 +95,14 @@ def test_run_unavailable_on_transient_error(monkeypatch):
     assert out.status == canary.UNAVAILABLE
 
 
-def test_run_fail_when_document_missing(monkeypatch):
+def test_run_not_found_when_document_missing(monkeypatch):
+    """A clean drill without the fixture doc is NOT_FOUND (exit 3) — alert-worthy
+    but NOT publish-gating: the parser is unproven, not indicted (#47)."""
     monkeypatch.setattr(scprs, "collect_po_details", lambda *a, **k: [_drill_row(doc="OTHER")])
     out = canary.run(_fixture(), retries=0, backoff=0)
-    assert out.status == canary.FAIL
+    assert out.status == canary.NOT_FOUND
+    assert canary._EXIT[out.status] == 3
+    assert "recapture" in out.detail
 
 
 def test_run_retries_then_succeeds(monkeypatch):
