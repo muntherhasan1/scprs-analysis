@@ -29,6 +29,9 @@ on:
       to_date:
         description: Window end (MM/DD/YYYY)
         default: "06/30/2028"
+      budget_minutes:
+        description: Enrich wall-clock budget in minutes (must stay under timeout-minutes)
+        default: "70"
 
 permissions:
   contents: read
@@ -43,12 +46,19 @@ concurrency:
 jobs:
   enrich:
     runs-on: ubuntu-latest
-    # Hang protection only — a wedged headless browser would otherwise hold the
-    # single-writer concurrency slot for the default 6h. Expected worst case
-    # (limit 50) is ~35 min. HF dataset commits are atomic, so a timeout kill
-    # can't leave a half-published scprs.db.
+    # Backstop only — enrich self-budgets (--budget-minutes 70) and exits
+    # cleanly with whatever it completed, leaving ~20 min for the warehouse
+    # rebuild + publish steps. This timeout should never fire unless the
+    # browser truly wedges; when it does, the run concludes `cancelled`, which
+    # the triage workflow treats like a failure (the 2026-07-20..23 livelock —
+    # 12 straight timeout kills on BU 3540 with zero alert — must stay loud).
+    # HF dataset commits are atomic, so a kill can't half-publish scprs.db.
     timeout-minutes: 90
     env:
+      # Unbuffered stdout: a killed run must still show how far it got — the
+      # livelock above was invisible partly because Python's block-buffered
+      # output died with the process, showing 90 silent minutes.
+      PYTHONUNBUFFERED: "1"
       # The operational store's private dataset. Override with a repo variable if needed.
       SCPRS_DATASET: ${{ vars.SCPRS_DATASET || 'munther-hasan/scprs-operational-db' }}
       # Dedicated read+write token for that dataset (Actions secret). CI is the sole writer.
@@ -91,7 +101,12 @@ jobs:
           echo "limit=${{ inputs.limit || '50' }}" >> "$GITHUB_OUTPUT"
           echo "from=${{ inputs.from_date || '07/01/2016' }}" >> "$GITHUB_OUTPUT"
           echo "to=${{ inputs.to_date || '06/30/2028' }}" >> "$GITHUB_OUTPUT"
+          echo "budget=${{ inputs.budget_minutes || '70' }}" >> "$GITHUB_OUTPUT"
 
+      # --budget-minutes makes big business units (3540 averages ~350 docs/day;
+      # its largest days top 1,100) tractable: the run banks what it drilled and
+      # exits 0 so the publish steps run; an unfinished day resumes doc-by-doc
+      # next run instead of being re-scraped from scratch.
       - name: Enrich one slice (PO Details drill-down)
         run: >
           python -m src.model enrich
@@ -100,6 +115,7 @@ jobs:
           "${{ steps.params.outputs.to }}"
           --limit "${{ steps.params.outputs.limit }}"
           --newest-first
+          --budget-minutes "${{ steps.params.outputs.budget }}"
 
       # Wave-1 gate. Only the *integrity* checks (contracts, canary) block the
       # publish — they detect a corrupt/partial store, and a blocked publish leaves

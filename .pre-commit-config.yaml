@@ -2,16 +2,6 @@
 #   pip install pre-commit && pre-commit install
 # Run manually against all files with: pre-commit run --all-files
 repos:
-  - repo: https://github.com/pre-commit/pre-commit-hooks
-    rev: v4.6.0
-    hooks:
-      - id: detect-private-key        # blocks committed private keys
-      - id: check-added-large-files   # blocks accidental data dumps
-        args: ["--maxkb=5000"]
-      - id: end-of-file-fixer
-      - id: trailing-whitespace
-      - id: check-merge-conflict
-
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.6.9
     hooks:
@@ -28,8 +18,36 @@ repos:
   # blocked. CI runs the same detect-secrets scan against .secrets.baseline, so
   # local and CI agree; GitHub's native secret scanning + push protection sit in
   # front of both. Manage false positives in .secrets.baseline (see README).
+  # The standard pre-commit-hooks suite also runs as local `python -m` hooks
+  # (the `pre-commit-hooks` package in requirements-dev.txt): the isolated-env
+  # shims for end-of-file-fixer / check-merge-conflict became persistently
+  # WDAC-blocked on 2026-07-23, joining gitleaks. Same ids, same behavior.
   - repo: local
     hooks:
+      - id: detect-private-key
+        name: detect private key
+        entry: python -m pre_commit_hooks.detect_private_key
+        language: system
+        types: [text]
+      - id: check-added-large-files
+        name: check for added large files
+        entry: python -m pre_commit_hooks.check_added_large_files --maxkb=5000
+        language: system
+      - id: end-of-file-fixer
+        name: fix end of files
+        entry: python -m pre_commit_hooks.end_of_file_fixer
+        language: system
+        types: [text]
+      - id: trailing-whitespace
+        name: trim trailing whitespace
+        entry: python -m pre_commit_hooks.trailing_whitespace_fixer
+        language: system
+        types: [text]
+      - id: check-merge-conflict
+        name: check for merge conflicts
+        entry: python -m pre_commit_hooks.check_merge_conflict
+        language: system
+        types: [text]
       - id: detect-secrets
         name: detect-secrets
         entry: python -m detect_secrets.pre_commit_hook --baseline .secrets.baseline

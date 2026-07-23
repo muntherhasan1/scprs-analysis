@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import time
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -350,14 +351,26 @@ def collect_po_details(
     headless: bool = True,
     timeout_ms: int = 120_000,
     max_docs: int | None = None,
+    skip_docs: set[str] | None = None,
+    deadline: float | None = None,
+    stats: dict | None = None,
     log=print,
 ) -> list[dict]:
     """Search, then click each purchase-document link and parse its PO Details.
 
     Returns a list of {"document", "header", "lines", "pos"} dicts. Processes
     the documents in the results grid (narrow the date range for large sets).
+
+    `skip_docs` are document numbers already drilled elsewhere — they are not
+    clicked again. `deadline` is a `time.monotonic()` timestamp; once reached,
+    drilling stops early and the partial results are returned. `stats` (an
+    out-param dict) reports {"total", "drilled", "skipped", "complete"} so the
+    caller can tell a finished grid from a deadline-truncated one — a caller
+    recording day-level progress must only do so when `complete` is True.
     """
     results: list[dict] = []
+    if stats is not None:
+        stats.update({"total": 0, "drilled": 0, "skipped": 0, "complete": True})
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=headless, args=_CHROMIUM_ARGS)
         ctx = browser.new_context()
@@ -394,9 +407,18 @@ def collect_po_details(
                 )
             n = min(total, max_docs) if max_docs else total
             log(f"{total} document(s) on page; drilling into {n}")
+            skipped = 0
+            complete = True
             for i in range(n):
                 link = page.locator(f"[id='PURCHASE_DOC${i}']")
                 doc = link.inner_text().strip()
+                if skip_docs and doc in skip_docs:
+                    skipped += 1
+                    continue
+                if deadline is not None and time.monotonic() >= deadline:
+                    log(f"  time budget reached at document {i + 1}/{n}; stopping early")
+                    complete = False
+                    break
                 with ctx.expect_page(timeout=timeout_ms) as pop:
                     link.click()
                 detail = pop.value
@@ -409,6 +431,12 @@ def collect_po_details(
                 detail.close()
                 results.append({"document": doc, "header": header, "lines": lines, "pos": pos})
                 log(f"  [{i + 1}/{n}] {doc}: {len(lines)} lines, {len(pos)} POs")
+            if skipped:
+                log(f"  skipped {skipped} already-drilled document(s)")
+            if stats is not None:
+                stats.update(
+                    {"total": n, "drilled": len(results), "skipped": skipped, "complete": complete}
+                )
         finally:
             browser.close()
     return results

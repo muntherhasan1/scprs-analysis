@@ -62,7 +62,7 @@ def test_build_details_db(tmp_path, monkeypatch):
     counts = model.build_details_db(
         "8660", "02/18/2021", "02/18/2021", db_path=db, log=lambda *a: None
     )
-    assert counts == {"documents": 1, "lines": 1, "pos": 1}
+    assert counts == {"documents": 1, "lines": 1, "pos": 1, "skipped": 0, "complete": True}
 
     det = model.query("SELECT bill_code, grand_total, start_date FROM document_details", db_path=db)
     assert det["bill_code"][0] == "059000"
@@ -214,6 +214,101 @@ def test_enrich_acq_type_filter(tmp_path, monkeypatch):
     assert "07/01/2021" not in calls
 
 
+def test_enrich_budget_zero_stops_before_any_day(tmp_path, monkeypatch):
+    """budget_minutes=0 must stop cleanly before drilling anything (clean exit 0
+    path — the CI guard against the outer job timeout killing the run)."""
+    db = tmp_path / "b.db"
+    con = model._connect(db)
+    model._ensure_schema(con)
+    con.execute(
+        "INSERT INTO purchases (business_unit, purchase_document, start_date) "
+        "VALUES ('8660', 'A', '2021-02-18')"
+    )
+    con.commit()
+    con.close()
+
+    def boom(*a, **k):
+        raise AssertionError("must not drill with a spent budget")
+
+    monkeypatch.setattr(model, "build_details_db", boom)
+    r = model.enrich_details(
+        "8660", "01/01/2021", "12/31/2021", db_path=db, budget_minutes=0, log=lambda *a: None
+    )
+    assert r["days_processed"] == 0
+    assert r["days_partial"] == 0
+    assert r["days_remaining"] == 1  # nothing recorded — the day retries next run
+
+
+def test_enrich_partial_day_left_unrecorded_then_resumes(tmp_path, monkeypatch):
+    """A budget-truncated day (complete=False) must NOT be recorded in
+    details_progress; the resumed run that covers the grid records it."""
+    db = tmp_path / "p.db"
+    con = model._connect(db)
+    model._ensure_schema(con)
+    con.execute(
+        "INSERT INTO purchases (business_unit, purchase_document, start_date) "
+        "VALUES ('8660', 'A', '2021-02-18')"
+    )
+    con.commit()
+    con.close()
+
+    results = [
+        {"documents": 40, "lines": 80, "pos": 0, "skipped": 0, "complete": False},  # run 1: cut
+        {"documents": 60, "lines": 90, "pos": 0, "skipped": 40, "complete": True},  # run 2: done
+    ]
+
+    def fake_build(bu, f, t, *, db_path, log=print, **k):
+        return results.pop(0)
+
+    monkeypatch.setattr(model, "build_details_db", fake_build)
+
+    r1 = model.enrich_details("8660", "01/01/2021", "12/31/2021", db_path=db, log=lambda *a: None)
+    assert r1["days_processed"] == 0
+    assert r1["days_partial"] == 1
+    assert model.query("SELECT COUNT(*) c FROM details_progress", db_path=db)["c"][0] == 0
+
+    r2 = model.enrich_details("8660", "01/01/2021", "12/31/2021", db_path=db, log=lambda *a: None)
+    assert r2["days_processed"] == 1
+    assert r2["days_partial"] == 0
+    rec = model.query("SELECT documents FROM details_progress", db_path=db)
+    assert rec["documents"][0] == 100  # drilled now + skipped-as-already-drilled
+
+
+def test_enrich_passes_already_drilled_docs_as_skip_set(tmp_path, monkeypatch):
+    """Resume skips docs drilled at the current summary version, but re-drills a
+    doc whose summary version moved past the drilled one."""
+    db = tmp_path / "s.db"
+    con = model._connect(db)
+    model._ensure_schema(con)
+    model._ensure_details_schema(con)
+    con.executemany(
+        "INSERT INTO purchases (business_unit, purchase_document, start_date, version) "
+        "VALUES (?, ?, ?, ?)",
+        [
+            ("8660", "DONE", "2021-02-18", 2),  # drilled at v2 -> skip
+            ("8660", "STALE", "2021-02-18", 3),  # drilled at v1, summary at v3 -> re-drill
+            ("8660", "NEW", "2021-02-18", 1),  # never drilled -> drill
+        ],
+    )
+    con.executemany(
+        "INSERT INTO document_details (business_unit, purchase_document, version) "
+        "VALUES (?, ?, ?)",
+        [("8660", "DONE", "2"), ("8660", "STALE", "1")],
+    )
+    con.commit()
+    con.close()
+
+    seen = {}
+
+    def fake_build(bu, f, t, *, db_path, skip_docs=None, log=print, **k):
+        seen["skip"] = skip_docs
+        return {"documents": 2, "lines": 0, "pos": 0, "skipped": 1, "complete": True}
+
+    monkeypatch.setattr(model, "build_details_db", fake_build)
+    model.enrich_details("8660", "01/01/2021", "12/31/2021", db_path=db, log=lambda *a: None)
+    assert seen["skip"] == {"DONE"}
+
+
 def test_build_details_delete_scoped_to_business_unit(tmp_path, monkeypatch):
     """Two BUs sharing a document number must not clobber each other's detail rows:
     reloading BU 2222's SHARED doc must leave BU 1111's SHARED rows intact."""
@@ -221,7 +316,7 @@ def test_build_details_delete_scoped_to_business_unit(tmp_path, monkeypatch):
 
     db = tmp_path / "scprs.db"
 
-    def fake_docs(bu, frm, to, *, max_docs=None, log=print):
+    def fake_docs(bu, frm, to, *, max_docs=None, log=print, **k):
         return [
             {
                 "document": "SHARED",
