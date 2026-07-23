@@ -21,8 +21,10 @@ permissions:
 jobs:
   triage:
     runs-on: ubuntu-latest
-    # Only act on a clear success/failure verdict (skip cancelled/stale/etc).
-    if: contains(fromJSON('["success","failure"]'), github.event.workflow_run.conclusion)
+    # Act on success (auto-close), failure, AND cancelled: a `timeout-minutes`
+    # kill concludes `cancelled`, not `failure` — filtering it out let 12
+    # straight enrich timeouts (2026-07-20..23) go three days with no issue.
+    if: contains(fromJSON('["success","failure","cancelled"]'), github.event.workflow_run.conclusion)
     env:
       GH_TOKEN: ${{ github.token }}
       WF: ${{ github.event.workflow_run.name }}
@@ -46,6 +48,21 @@ jobs:
       - name: Triage
         run: |
           set -euo pipefail
+          # Benign-cancel filter: not every `cancelled` is a timeout kill. A
+          # superseded deploy (cancel-in-progress) or a run dropped from the
+          # concurrency queue is cancelled young or before it starts; a
+          # timeout kill by definition ran its full timeout-minutes (>=40 min
+          # on every pipeline workflow). Only triage cancels that ran 30+ min.
+          if [ "$CONCLUSION" = "cancelled" ]; then
+            SECS=$(gh run view "$RUN_ID" --json startedAt,updatedAt \
+                     --jq 'if .startedAt == null then 0
+                           else ((.updatedAt|fromdate) - (.startedAt|fromdate)) end')
+            if [ "${SECS:-0}" -lt 1800 ]; then
+              echo "cancelled after ${SECS:-0}s (<30 min): superseded/queued cancel, not a timeout — skipping"
+              exit 0
+            fi
+          fi
+
           MARKER="<!-- pipeline-failure:${WF} -->"
           # The single open triage issue for this workflow, if any (matched by marker).
           NUM=$(gh issue list --label pipeline-failure --state open --json number,body \
@@ -62,10 +79,14 @@ jobs:
             exit 0
           fi
 
-          # failure: gather the failed step names and build the triage report.
+          # failure/cancelled: gather the culprit step names and build the report.
+          # A timeout kill marks the running step `cancelled`, so match both.
           STEPS=$(gh run view "$RUN_ID" --json jobs \
-                    --jq '[.jobs[].steps[] | select(.conclusion=="failure") | .name] | join(",")')
-          OUT=$(python -m src.triage report --workflow "$WF" --run-url "$RUN_URL" --steps "$STEPS")
+                    --jq '[.jobs[].steps[]
+                           | select(.conclusion=="failure" or .conclusion=="cancelled")
+                           | .name] | join(",")')
+          OUT=$(python -m src.triage report --workflow "$WF" --run-url "$RUN_URL" \
+                  --steps "$STEPS" --conclusion "$CONCLUSION")
           TITLE=$(echo "$OUT" | jq -r .title)
           BODY=$(echo "$OUT" | jq -r .body)
           if [ -n "$NUM" ]; then

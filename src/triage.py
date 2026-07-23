@@ -90,12 +90,25 @@ _HINTS: dict[str, dict[str, str]] = {
 }
 
 
-def build_report(workflow: str, failed_steps: list[str], run_url: str) -> dict[str, str]:
+def build_report(
+    workflow: str, failed_steps: list[str], run_url: str, conclusion: str = "failure"
+) -> dict[str, str]:
     """Build the triage issue (title, body, marker) for a failed workflow run."""
     hints = _HINTS.get(workflow, {})
     steps = [s.strip() for s in failed_steps if s.strip()]
 
     specific: list[str] = []
+    if conclusion == "cancelled":
+        # A `timeout-minutes` kill concludes `cancelled`, not `failure` — the
+        # signature of a hung or over-budget step (the 2026-07 enrich livelock:
+        # 12 straight 90-min kills, silently untriaged). Frame it first.
+        specific.append(
+            "The run was **cancelled — most likely the job `timeout-minutes` killing a "
+            "hung or over-budget step** (a manual cancel looks identical). Steps that "
+            "publish on success did NOT run, so no partial data was written — but that "
+            "also means repeated timeouts make **zero progress** and will recur until "
+            "the underlying slowness is fixed. Check how far the killed step's log got."
+        )
     for step in steps:
         for key, hint in hints.items():
             if key != "_default" and key.lower() in step.lower() and hint not in specific:
@@ -105,11 +118,12 @@ def build_report(workflow: str, failed_steps: list[str], run_url: str) -> dict[s
     if not specific:
         specific.append("No triage hint for this workflow — inspect the run logs.")
 
+    verb = "was cancelled (timeout?)" if conclusion == "cancelled" else "failed"
     marker = f"<!-- pipeline-failure:{workflow} -->"
     steps_line = ", ".join(f"`{s}`" for s in steps) if steps else "_unknown — see the run_"
     body = (
         f"{marker}\n"
-        f"## ⚠️ `{workflow}` failed\n\n"
+        f"## ⚠️ `{workflow}` {verb}\n\n"
         f"**Run:** {run_url}\n\n"
         f"**Failed step(s):** {steps_line}\n\n"
         f"### Likely cause & what to check\n" + "\n".join(f"- {h}" for h in specific) + "\n\n---\n"
@@ -126,9 +140,14 @@ def _cli() -> None:
     rep.add_argument("--workflow", required=True)
     rep.add_argument("--run-url", required=True)
     rep.add_argument("--steps", default="", help="comma-separated failed step names")
+    rep.add_argument(
+        "--conclusion",
+        default="failure",
+        help="workflow_run conclusion (`failure` or `cancelled` — a timeout kill)",
+    )
     args = ap.parse_args()
     if args.cmd == "report":
-        report = build_report(args.workflow, args.steps.split(","), args.run_url)
+        report = build_report(args.workflow, args.steps.split(","), args.run_url, args.conclusion)
         print(json.dumps(report))
 
 

@@ -89,6 +89,12 @@ first), records each finished day in `details_progress`, and skips done days on
 re-run. A day that errors is left unrecorded so it retries next run. This is why
 the daily job (`scripts/enrich_daily.ps1`) can run a small `--limit` slice each
 day and make progress. `--newest-first` prioritizes recent fiscal years.
+`--budget-minutes` bounds the run's wall clock so it exits 0 ahead of any outer
+job timeout: a day cut mid-drill keeps its drilled documents (idempotent per
+doc) and resumes doc-by-doc next run via a skip set (`_drilled_docs`), and is
+only recorded once its grid is fully covered. The CI cron relies on this —
+without it, a business unit whose single day exceeds the job timeout livelocks
+the scheduler (killed → unrecorded → re-picked; see the 2026-07 BU 3540 incident).
 
 **`warehouse.py` is a medallion warehouse built by SQL-generating Python.**
 `build_all` runs bronze → silver → gold in one batch, logged in `dw_batch` with

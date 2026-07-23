@@ -23,6 +23,7 @@ from __future__ import annotations
 import argparse
 import re
 import sqlite3
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -234,18 +235,35 @@ def build_details_db(
     *,
     db_path: Path = DB_PATH,
     max_docs: int | None = None,
+    skip_docs: set[str] | None = None,
+    deadline: float | None = None,
     log=print,
 ) -> dict:
     """Drill into each document's PO Details page and load the three detail tables.
 
     Idempotent per (business_unit, document): reloading a document replaces its
-    detail rows for that business unit only.
+    detail rows for that business unit only. `skip_docs`/`deadline` pass through
+    to the drill (see `scprs.collect_po_details`); the returned counts carry
+    `skipped` and `complete` so a caller tracking day-level progress knows
+    whether the grid was fully covered or cut short by the deadline.
     """
     import pandas as pd
 
-    docs = scprs.collect_po_details(business_unit, from_date, to_date, max_docs=max_docs, log=log)
+    stats: dict = {}
+    docs = scprs.collect_po_details(
+        business_unit,
+        from_date,
+        to_date,
+        max_docs=max_docs,
+        skip_docs=skip_docs,
+        deadline=deadline,
+        stats=stats,
+        log=log,
+    )
+    # A monkeypatched/legacy drill may not fill `stats`; default to a full grid.
+    extra = {"skipped": stats.get("skipped", 0), "complete": stats.get("complete", True)}
     if not docs:
-        return {"documents": 0, "lines": 0, "pos": 0}
+        return {"documents": 0, "lines": 0, "pos": 0, **extra}
 
     det, lines, pos = [], [], []
     for d in docs:
@@ -324,7 +342,7 @@ def build_details_db(
         con.commit()
     finally:
         con.close()
-    counts = {"documents": len(det), "lines": len(lines), "pos": len(pos)}
+    counts = {"documents": len(det), "lines": len(lines), "pos": len(pos), **extra}
     log(f"Loaded {counts} into {db_path}")
     return counts
 
@@ -337,6 +355,34 @@ def _ensure_progress_schema(con: sqlite3.Connection) -> None:
     )
 
 
+def _drilled_docs(db_path: Path, business_unit: str, iso_day: str) -> set[str]:
+    """Documents on `iso_day` already drilled at (or past) their summary version.
+
+    This is what makes a budget-truncated day resumable: the drilled documents
+    are skipped next run, only the missing ones are drilled, and the day is
+    recorded once the grid is fully covered. A document whose summary `version`
+    is newer than every drilled version is NOT skipped, so it is re-drilled at
+    the current version rather than resuming from a stale snapshot.
+    """
+    con = _connect(db_path)
+    try:
+        try:
+            rows = con.execute(
+                "SELECT p.purchase_document FROM purchases p "
+                "JOIN document_details d ON d.business_unit = p.business_unit "
+                "AND d.purchase_document = p.purchase_document "
+                "WHERE p.business_unit = ? AND p.start_date = ? "
+                "GROUP BY p.purchase_document "
+                "HAVING MAX(CAST(d.version AS INTEGER)) >= MAX(COALESCE(p.version, 0))",
+                (business_unit, iso_day),
+            ).fetchall()
+        except sqlite3.OperationalError:  # detail tables don't exist yet
+            return set()
+        return {r[0] for r in rows}
+    finally:
+        con.close()
+
+
 def enrich_details(
     business_unit: str,
     from_date: str,
@@ -347,6 +393,7 @@ def enrich_details(
     limit: int | None = None,
     newest_first: bool = False,
     acq_type: str | None = None,
+    budget_minutes: float | None = None,
     log=print,
 ) -> dict:
     """Drill into PO Details one active day at a time, resuming across runs.
@@ -356,6 +403,15 @@ def enrich_details(
     completed day is recorded in `details_progress`; a re-run skips finished
     days. A day that errors is left unrecorded so it retries next run.
     `newest_first` processes the most recent days first (recent data priority).
+
+    `budget_minutes` bounds the run's wall clock so it can finish cleanly ahead
+    of an external kill (e.g. the CI job timeout): once spent, the run stops —
+    even mid-day — and returns success. Documents drilled from an unfinished day
+    are kept (the loader is idempotent per document) and skipped when the day
+    resumes, so a day too large for one budget window completes across runs;
+    the day is only recorded in `details_progress` once fully covered. Without
+    a budget, a day larger than the surrounding job timeout would be killed,
+    recorded nowhere, re-picked, and killed again — an unbounded livelock.
 
     `acq_type` is an optional SQL LIKE pattern (e.g. "IT Services%") that narrows
     the run to days having at least one document of that acquisition type. Note
@@ -405,20 +461,43 @@ def enrich_details(
     if not active:
         log("No active days in `purchases` for that BU/range. Build the summary first:")
         log(f"  python -m src.model build {business_unit} {from_date} {to_date}")
-        return {"days_total": 0, "days_processed": 0, "days_remaining": 0}
+        return {"days_total": 0, "days_processed": 0, "days_partial": 0, "days_remaining": 0}
 
     pending = active if force else [d for d in active if d not in done]
     log(f"{len(active)} active day(s); {len(active) - len(pending)} done; {len(pending)} pending")
     todo = pending[:limit] if limit is not None else pending
 
+    deadline = time.monotonic() + budget_minutes * 60 if budget_minutes is not None else None
     processed = 0
-    for iso_day in todo:
+    partial = 0
+    for idx, iso_day in enumerate(todo):
+        if deadline is not None and time.monotonic() >= deadline:
+            log(
+                f"time budget ({budget_minutes:g} min) spent; stopping cleanly with "
+                f"{len(todo) - idx} day(s) unvisited"
+            )
+            break
         mdy = datetime.strptime(iso_day, "%Y-%m-%d").strftime("%m/%d/%Y")
-        log(f"[{processed + 1}/{len(todo)}] {iso_day}")
+        log(f"[{idx + 1}/{len(todo)}] {iso_day}")
+        skip = _drilled_docs(db_path, business_unit, iso_day)
         try:
-            counts = build_details_db(business_unit, mdy, mdy, db_path=db_path, log=lambda *a: None)
+            counts = build_details_db(
+                business_unit,
+                mdy,
+                mdy,
+                db_path=db_path,
+                skip_docs=skip or None,
+                deadline=deadline,
+                log=lambda *a: None,
+            )
         except Exception as e:  # noqa: BLE001 - keep going; unrecorded day retries next run
             log(f"    ERROR: {repr(e)[:120]} (will retry next run)")
+            continue
+        if not counts.get("complete", True):
+            # Budget ran out mid-day: the drilled documents are stored and will
+            # be skipped on resume, but the day is NOT recorded as done.
+            partial += 1
+            log(f"    partial {counts} (day left unrecorded; resumes next run)")
             continue
         con = _connect(db_path)
         try:
@@ -427,7 +506,9 @@ def enrich_details(
                 (
                     business_unit,
                     iso_day,
-                    counts["documents"],
+                    # Documents covered this day = drilled now + already drilled
+                    # in the earlier (budget-truncated) visits being resumed.
+                    counts["documents"] + counts.get("skipped", 0),
                     counts["lines"],
                     counts["pos"],
                     datetime.now().isoformat(timespec="seconds"),
@@ -442,6 +523,7 @@ def enrich_details(
     return {
         "days_total": len(active),
         "days_processed": processed,
+        "days_partial": partial,
         "days_remaining": len(pending) - processed,
     }
 
@@ -580,6 +662,13 @@ def _cli() -> None:
         help="Only visit days with a document whose acquisition_type_sub_type matches "
         "this SQL LIKE pattern, e.g. 'IT Services%%' (the drill still loads all docs on a day)",
     )
+    en.add_argument(
+        "--budget-minutes",
+        type=float,
+        default=None,
+        help="Stop cleanly (exit 0) after this many minutes; a day cut mid-drill keeps "
+        "its drilled documents and resumes next run. Set below any outer job timeout.",
+    )
     dc = sub.add_parser("document", help="Show a document like the PO Details page")
     dc.add_argument("document", help="Purchase document id or suffix, e.g. 63626")
     dc.add_argument("--fetch", action="store_true", help="Drill it now if not yet enriched")
@@ -604,6 +693,7 @@ def _cli() -> None:
                 force=args.force,
                 newest_first=args.newest_first,
                 acq_type=args.acq_type,
+                budget_minutes=args.budget_minutes,
             )
         )
     elif args.cmd == "document":

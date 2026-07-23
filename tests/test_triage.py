@@ -53,6 +53,23 @@ def test_report_unknown_workflow_is_graceful():
     assert "No triage hint" in r["body"]
 
 
+def test_report_cancelled_frames_timeout_and_keeps_step_hint():
+    """A `timeout-minutes` kill concludes `cancelled` — the report must lead with
+    the timeout framing (the 2026-07 enrich livelock lesson) and still include
+    the step-specific hint for the killed step."""
+    r = triage.build_report(
+        "Enrich (Wave 2)",
+        ["Enrich one slice (PO Details drill-down)"],
+        "https://run/8",
+        conclusion="cancelled",
+    )
+    assert "was cancelled (timeout?)" in r["body"]
+    assert "timeout-minutes" in r["body"] and "zero progress" in r["body"]
+    assert "headless scraper" in r["body"]  # the "Enrich one slice" hint still matches
+    # idempotency marker unchanged, so an existing open issue still matches.
+    assert r["marker"] == "<!-- pipeline-failure:Enrich (Wave 2) -->"
+
+
 def test_cli_report_emits_json(capsys, monkeypatch):
     import sys
 
