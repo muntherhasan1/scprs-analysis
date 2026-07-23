@@ -1,0 +1,169 @@
+name: Pipeline monitor
+
+# Out-of-band liveness watch (#43) + cron keep-alive (#44). Every other alarm
+# in this repo runs *inside* the pipeline it guards: health/canary/contracts
+# execute within the enrich run, and workflow_run triage only fires for runs
+# that happen — a pipeline that stops RUNNING is invisible to all of them
+# (the 2026-07-20..23 livelock: 3 days of stale Spaces, zero signal). This
+# workflow watches from outside, on its own offset cron:
+#
+#   1. keep-alive: re-enables schedule-disabled workflows and resets GitHub's
+#      60-day inactivity clock (scheduled runs don't count as activity).
+#   2. last SUCCESSFUL "Enrich (Wave 2)" run age — catches "runs failing or
+#      not happening at all", whatever the cause.
+#   3. serve dataset newest-commit age — catches "running but nothing reaches
+#      the Spaces" (the silent-staleness failure mode).
+#
+# Findings open/update one idempotent alert issue (keep-warm pattern) and the
+# run fails red; recovery auto-closes it. On a clean pass it pings the
+# optional HEALTHCHECK_PING_URL dead-man's switch — the one alarm OUTSIDE
+# GitHub, so even "all crons died" (which kills this monitor too) still pages.
+# The enrich workflow pings the same URL on success; silence past the check's
+# grace period means the pipeline OR its monitor is down.
+on:
+  schedule:
+    # Offset ~35 min behind enrich's "17 2,8,14,20" so each monitor tick sees
+    # the slot's outcome without racing it.
+    - cron: "52 3,9,15,21 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: write # keep-alive re-enable + reading run history
+  issues: write # open/close the alert issue
+
+concurrency:
+  group: pipeline-monitor
+  cancel-in-progress: true
+
+env:
+  ALERT_LABEL: pipeline-monitor-alert
+  # Enrich publishes every 6h; 14h = two missed slots + runtime.
+  MAX_AGE_HOURS: "14"
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      PYTHONUNBUFFERED: "1"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install minimal deps
+        run: pip install "huggingface_hub>=0.25"
+
+      - name: Keep crons alive
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # GitHub disables `on: schedule` workflows after 60 days without repo
+          # activity (scheduled runs don't count). Re-enabling resets that
+          # clock; enable on an active workflow is a harmless 204. Workflows a
+          # human disabled in the UI stay disabled — only inactivity is cured.
+          for id in $(gh api "repos/$GITHUB_REPOSITORY/actions/workflows" \
+                        --jq '.workflows[] | select(.state != "disabled_manually") | .id'); do
+            gh api -X PUT "repos/$GITHUB_REPOSITORY/actions/workflows/$id/enable" \
+              >/dev/null && echo "kept alive: workflow $id"
+          done
+
+      - name: Check last successful enrich run age
+        id: enrich
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          last=$(gh run list --workflow "Enrich (Wave 2)" --status success \
+                   --limit 1 --json updatedAt --jq '.[0].updatedAt // empty')
+          if [ -z "$last" ]; then
+            echo "finding=no successful 'Enrich (Wave 2)' run found in recent history" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          age_h=$(( ( $(date -u +%s) - $(date -u -d "$last" +%s) ) / 3600 ))
+          echo "last successful enrich: $last (${age_h}h ago, max ${MAX_AGE_HOURS}h)"
+          if [ "$age_h" -ge "$MAX_AGE_HOURS" ]; then
+            echo "finding=last successful 'Enrich (Wave 2)' run was ${age_h}h ago (threshold ${MAX_AGE_HOURS}h) — the pipeline is failing or not running" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Check serve dataset commit age
+        id: serve
+        env:
+          HF_WAREHOUSE_TOKEN: ${{ secrets.HF_WAREHOUSE_TOKEN }}
+          WAREHOUSE_DATASET: ${{ vars.WAREHOUSE_DATASET }}
+        run: |
+          set +e
+          out=$(python -m src.pipeline_monitor serve-age --max-hours "$MAX_AGE_HOURS")
+          rc=$?
+          echo "$out"
+          if [ "$rc" -ne 0 ]; then
+            echo "finding=$out" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Ensure alert label exists
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh label create "$ALERT_LABEL" -c B60205 \
+            -d "Out-of-band pipeline monitor finding" 2>/dev/null || true
+
+      - name: Alert on findings
+        if: steps.enrich.outputs.finding != '' || steps.serve.outputs.finding != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          F1: ${{ steps.enrich.outputs.finding }}
+          F2: ${{ steps.serve.outputs.finding }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          body="Out-of-band monitor findings:"$'\n'
+          [ -n "$F1" ] && body="$body"$'\n'"- $F1"
+          [ -n "$F2" ] && body="$body"$'\n'"- $F2"
+          body="$body"$'\n\n'"This fires when the pipeline stops running or stops reaching the Spaces — the failure class workflow_run triage cannot see. Check the Enrich workflow's recent runs first."$'\n\n'"Run: $RUN_URL"
+          existing=$(gh issue list --label "$ALERT_LABEL" --state open \
+            --json number --jq '.[0].number')
+          if [ -n "$existing" ]; then
+            echo "Commenting on existing alert issue #$existing"
+            gh issue comment "$existing" --body "$body"
+          else
+            gh issue create --title "🔴 Pipeline monitor: enrichment or serve refresh has stopped" \
+              --label "$ALERT_LABEL" --body "$body"
+          fi
+
+      - name: Resolve on recovery
+        if: steps.enrich.outputs.finding == '' && steps.serve.outputs.finding == ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          for n in $(gh issue list --label "$ALERT_LABEL" --state open \
+            --json number --jq '.[].number'); do
+            echo "Resolving alert issue #$n"
+            gh issue close "$n" \
+              --comment "✅ Recovered — enrich runs and serve commits are fresh again. Run: $RUN_URL"
+          done
+
+      # The one alarm OUTSIDE GitHub: ping only on a clean pass, so the
+      # external check pages on unhealthy AND on "the monitor itself died".
+      # Skips quietly until the HEALTHCHECK_PING_URL secret is configured.
+      - name: Dead-man's switch ping
+        if: steps.enrich.outputs.finding == '' && steps.serve.outputs.finding == ''
+        env:
+          PING: ${{ secrets.HEALTHCHECK_PING_URL }}
+        run: |
+          if [ -n "$PING" ]; then
+            curl -fsS -m 10 --retry 3 "$PING" >/dev/null \
+              && echo "pinged dead-man's switch" \
+              || echo "ping failed (non-fatal — the check's grace period absorbs one miss)"
+          else
+            echo "HEALTHCHECK_PING_URL not set — external dead-man's switch inactive (see #44)"
+          fi
+
+      - name: Fail the run on findings
+        if: steps.enrich.outputs.finding != '' || steps.serve.outputs.finding != ''
+        run: |
+          echo "::error::pipeline monitor found problems — see the alert issue"
+          exit 1
