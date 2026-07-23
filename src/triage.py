@@ -52,9 +52,23 @@ _HINTS: dict[str, dict[str, str]] = {
             "the serve dataset."
         ),
         "Verify go-live": (
-            "The Space isn't serving the new build. **Auto-rollback** should have "
-            "reverted the serve DB to the last-good revision and restarted — confirm "
-            "the Space is RUNNING and check the served markers vs the published build."
+            "The Space isn't verifiably serving the new build. Exit codes are "
+            "evidence-graded: a **verified mismatch** (rc=1) triggers auto-rollback "
+            "to the last-good serve revision; an **inconclusive** check (rc=2 — boot "
+            "timeout / unreachable) fails without touching the publish. Check the "
+            "step log for which case this was, then the Space's runtime stage."
+        ),
+        "restart-token problem": (
+            "The MCP Space restart never happened — almost always a missing/rotated/"
+            "mis-scoped `HF_DEPLOY_TOKEN`. The data IS published and nothing was "
+            "rolled back; fix the token (write scope on the Space repo) or reboot the "
+            "Space manually to serve the new snapshot."
+        ),
+        "canary target-not-found": (
+            "The canary's fixture document is no longer findable on the site (archive "
+            "purge or availability change) — the parser is unproven, not indicted, and "
+            "the run's enrichment WAS published. Recapture the fixture from an "
+            "already-drilled document: `python -m src.canary --capture --document <id>`."
         ),
     },
     "CMAS refresh (Wave 2)": {

@@ -16,13 +16,18 @@ value captured while the pipeline was healthy.
 Two drawbacks of a live check, and how they are handled:
 
   * Flakiness. A canary that pages on every transient blip is worse than none.
-    The outcome is tri-state, not pass/fail:
+    The outcome is four-state, not pass/fail:
         PASS         drilled cleanly, signature matches golden   -> exit 0
-        FAIL         drilled cleanly, signature DRIFTED          -> exit 1  (alert)
+        FAIL         drilled cleanly, signature DRIFTED          -> exit 1  (alert + gate)
         UNAVAILABLE  could not complete the drill after retries  -> exit 2  (retry, no alert)
-    Only FAIL means "the site changed". Transient network/timeout errors retry
-    with backoff and, if still stuck, report UNAVAILABLE — a soft signal the
-    scheduler treats as "try again next run", not an incident.
+        NOT_FOUND    drilled cleanly, fixture doc not in results -> exit 3  (alert, DON'T gate)
+    Only FAIL means "the parser is writing wrong data" — the one case worth
+    blocking a publish over. NOT_FOUND means the fixture document itself became
+    unavailable (archive purge, availability change): the parser is unproven but
+    not indicted, and a run's banked enrichment must not be forfeited over it —
+    the scheduler alerts and a human recaptures the fixture (see #47). Transient
+    network/timeout errors retry with backoff and, if still stuck, report
+    UNAVAILABLE — a soft signal treated as "try again next run", not an incident.
 
   * Not unit-testable offline. The scoring is a *pure* function (`signature` +
     `compare`) tested offline; the orchestration (`run`) is tested by faking the
@@ -49,8 +54,8 @@ from .scprs import DATA_DIR
 # Committed alongside the other reference datasets so the golden value is versioned.
 FIXTURE_PATH = DATA_DIR.parent / "references" / "canary_fixture.json"
 
-PASS, FAIL, UNAVAILABLE = "PASS", "FAIL", "UNAVAILABLE"
-_EXIT = {PASS: 0, FAIL: 1, UNAVAILABLE: 2}
+PASS, FAIL, UNAVAILABLE, NOT_FOUND = "PASS", "FAIL", "UNAVAILABLE", "NOT_FOUND"
+_EXIT = {PASS: 0, FAIL: 1, UNAVAILABLE: 2, NOT_FOUND: 3}
 
 
 # --- pure scoring core (fully offline-testable) ------------------------------
@@ -161,11 +166,12 @@ def run(
     headless: bool = True,
     log=None,
 ) -> Outcome:
-    """Drill the fixture document live and classify the result (tri-state).
+    """Drill the fixture document live and classify the result (four-state).
 
     Retries transient failures (exceptions, empty results, target-not-found) with
     linear backoff; a *clean* drill whose signature diverges is a FAIL and is
-    never retried, because site drift is deterministic."""
+    never retried, because site drift is deterministic. Target-not-found that
+    survives every retry is NOT_FOUND — alert-worthy but not publish-gating."""
     from .scprs import collect_po_details  # lazy: keeps import light for pure tests
 
     bu, day, target = fixture["business_unit"], fixture["search_date"], fixture["document"]
@@ -189,7 +195,10 @@ def run(
         match = [d for d in drilled if (d.get("document") or "").strip().lower() == target.lower()]
         if not drilled or not match:
             # A stable 2016 document should always be found; a transient search
-            # glitch usually clears on retry. Only escalate after exhausting them.
+            # glitch usually clears on retry. After exhausting retries this is
+            # NOT_FOUND, not FAIL: the parser produced clean output — there is
+            # just nothing to score it against. FAIL (which gates the publish)
+            # is reserved for a drilled document whose signature drifted.
             last = (
                 f"search returned no records for {target} on {day}"
                 if not drilled
@@ -198,7 +207,11 @@ def run(
             if not last_attempt:
                 time.sleep(backoff * (attempt + 1))
                 continue
-            return Outcome(FAIL, f"{last}; the site or document availability changed")
+            return Outcome(
+                NOT_FOUND,
+                f"{last}; the fixture document is no longer findable — recapture the "
+                "fixture (python -m src.canary --capture --document <id>)",
+            )
 
         observed = _sig_from_drill(match[0])
         diffs = compare(golden, observed, money_tol=tol)

@@ -57,11 +57,29 @@ def test_main_verifies_matching_snapshot(monkeypatch, tmp_path, capsys):
     assert "VERIFIED" in capsys.readouterr().out
 
 
-def test_main_fails_on_stale_snapshot(monkeypatch, tmp_path, capsys):
-    """The 2026-07-20 signature: Space still serving the previous snapshot."""
+def test_main_exits_one_on_verified_mismatch(monkeypatch, tmp_path, capsys):
+    """The 2026-07-20 signature: Space up but serving the previous snapshot —
+    positive evidence, the only case the workflow rolls back on."""
     argv = _wire(monkeypatch, tmp_path, {"documents": 5, "line_rows": 7, "enriched_docs": 2})
     assert golive_check.main(argv) == 1
-    assert "FAILED" in capsys.readouterr().out
+    assert "MISMATCH" in capsys.readouterr().out
+
+
+def test_main_exits_two_when_observation_impossible(monkeypatch, tmp_path, capsys):
+    """Boot timeout / unreachable endpoint proves nothing about the data — exit 2
+    so the workflow fails WITHOUT rolling back (#45: no rollback on absence of
+    evidence; the old behavior reverted good data on a mere token rotation)."""
+    db = tmp_path / "warehouse-serve.db"
+    _serve_db(db)
+    monkeypatch.setenv("MCP_VERIFY_TOKEN", "tok")
+
+    def never_running(space, timeout_s):
+        raise TimeoutError("acme/space still BUILDING after 1500s")
+
+    monkeypatch.setattr(golive_check, "wait_for_space", never_running)
+    assert golive_check.main(["--serve-db", str(db)]) == 2
+    out = capsys.readouterr().out
+    assert "INCONCLUSIVE" in out and "roll" in out
 
 
 def test_wait_for_space_raises_on_terminal_stage(monkeypatch):

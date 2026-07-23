@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import time
 from pathlib import Path
 
 from . import config  # noqa: F401 — imported for its load_dotenv() side-effect (.env in local dev)
@@ -47,7 +48,37 @@ class WarehouseFetchError(RuntimeError):
     READ access to the (private) dataset, or the dataset env var is wrong."""
 
 
-def _download_db(repo: str, filename: str, dest: Path, token: str | None) -> None:
+# Substrings that mark an HF error as worth retrying (server hiccups, network
+# blips). Deterministic failures — 401/403/404, a parent_commit conflict — are
+# NOT retried: they'd fail identically and only delay the real error.
+_TRANSIENT_MARKERS = ("500", "502", "503", "504", "timeout", "timed out", "connection", "reset")
+
+
+def _is_transient(exc: Exception) -> bool:
+    s = str(exc).lower()
+    return any(m in s for m in _TRANSIENT_MARKERS)
+
+
+def _with_retries(fn, *, what: str, attempts: int = 3, base_delay: float = 5.0):
+    """Run ``fn`` retrying only transient failures with linear backoff.
+
+    One flaky HF 500 used to fail a whole 90-minute pipeline run (it self-healed
+    six hours later but generated triage noise) — a couple of cheap retries
+    absorb that class without masking real token/config errors."""
+    for attempt in range(attempts):
+        try:
+            return fn()
+        except Exception as exc:  # noqa: BLE001 - classified below; non-transient re-raises
+            if attempt == attempts - 1 or not _is_transient(exc):
+                raise
+            delay = base_delay * (attempt + 1)
+            print(f"{what} hit a transient error ({type(exc).__name__}); retrying in {delay:.0f}s")
+            time.sleep(delay)
+
+
+def _download_db(
+    repo: str, filename: str, dest: Path, token: str | None, revision: str = "main"
+) -> None:
     """Atomically fetch ``filename`` from dataset ``repo`` into ``dest``.
 
     Downloads to a temp file then renames into place, so a reader never sees a
@@ -57,15 +88,20 @@ def _download_db(repo: str, filename: str, dest: Path, token: str | None) -> Non
     from huggingface_hub import hf_hub_download
 
     try:
-        # nosec B615 — intentionally track the latest revision (main) of our OWN
+        # nosec B615 — by default track the latest revision (main) of our OWN
         # private, access-controlled dataset; pinning an immutable commit would
-        # defeat the fetch-newest refresh model this design is built on.
-        cached = hf_hub_download(  # nosec B615
-            repo_id=repo,
-            filename=filename,
-            repo_type="dataset",
-            revision="main",
-            token=token,
+        # defeat the fetch-newest refresh model this design is built on. The
+        # operational fetch passes an explicit sha so its publish can
+        # compare-and-swap against the exact revision it read (#48).
+        cached = _with_retries(
+            lambda: hf_hub_download(  # nosec B615
+                repo_id=repo,
+                filename=filename,
+                repo_type="dataset",
+                revision=revision,
+                token=token,
+            ),
+            what=f"download of {filename} from {repo}",
         )
     except Exception as exc:  # noqa: BLE001 — re-raised as an actionable error below
         raise WarehouseFetchError(
@@ -80,22 +116,37 @@ def _download_db(repo: str, filename: str, dest: Path, token: str | None) -> Non
     os.replace(tmp, dest)  # atomic on the same filesystem
 
 
-def _upload_db(path: Path, repo: str, filename: str, token: str | None, message: str) -> str:
+def _upload_db(
+    path: Path,
+    repo: str,
+    filename: str,
+    token: str | None,
+    message: str,
+    parent_commit: str | None = None,
+) -> str:
     """Upload ``path`` to the private HF Dataset ``repo`` as ``filename`` (repo created
-    if missing). Returns the commit URL."""
+    if missing). Returns the commit URL.
+
+    ``parent_commit`` makes the upload a compare-and-swap: the Hub rejects the
+    commit (412) if the dataset HEAD moved past that revision, so a slower second
+    writer fails instead of silently clobbering a newer publish (#48)."""
     from huggingface_hub import HfApi, create_repo
 
     path = Path(path)
     if not path.exists():
         raise FileNotFoundError(f"{path} not found")
     create_repo(repo, repo_type="dataset", private=True, exist_ok=True, token=token)
-    info = HfApi().upload_file(
-        path_or_fileobj=str(path),
-        path_in_repo=filename,
-        repo_id=repo,
-        repo_type="dataset",
-        token=token,
-        commit_message=message,
+    info = _with_retries(
+        lambda: HfApi().upload_file(
+            path_or_fileobj=str(path),
+            path_in_repo=filename,
+            repo_id=repo,
+            repo_type="dataset",
+            token=token,
+            commit_message=message,
+            parent_commit=parent_commit,
+        ),
+        what=f"upload of {filename} to {repo}",
     )
     return getattr(info, "commit_url", str(info))
 
@@ -134,6 +185,12 @@ def publish_serve_db(serve_path: Path, repo: str, token: str | None = None) -> s
 # --------------------------------------------------------------- operational DB (Wave 2)
 
 
+def _rev_sidecar(db_path: Path) -> Path:
+    """Sidecar recording the dataset revision a fetched DB came from (CAS base)."""
+    db_path = Path(db_path)
+    return db_path.with_name(db_path.name + ".fetched-rev")
+
+
 def fetch_operational_db(dest: Path, repo: str | None = None, token: str | None = None) -> bool:
     """Fetch the operational store (``scprs.db``) from its dataset into ``dest``.
 
@@ -141,11 +198,36 @@ def fetch_operational_db(dest: Path, repo: str | None = None, token: str | None 
     operational token / ``HF_TOKEN``. Returns True if a fetch happened, False when no
     dataset is configured (local dev keeps its own ``data/scprs.db``). This is the
     "download" half of CI's download → mutate → upload-on-success contract.
+
+    The dataset HEAD sha is resolved FIRST, the file is downloaded at exactly that
+    revision, and the sha is recorded in a sidecar — ``publish_operational_db``
+    passes it as ``parent_commit`` so two concurrent writers (e.g. the CI cron and
+    a laptop run) become a hard conflict instead of a silent lost update (#48).
     """
     repo = repo or os.environ.get("SCPRS_DATASET")
     if not repo:
         return False
-    _download_db(repo, OPERATIONAL_FILENAME, dest, token or _operational_token())
+    tok = token or _operational_token()
+
+    sha: str | None = None
+    try:
+        from huggingface_hub import HfApi
+
+        sha = _with_retries(
+            lambda: HfApi().dataset_info(repo, token=tok).sha, what=f"HEAD lookup of {repo}"
+        )
+    except Exception as exc:  # noqa: BLE001 - CAS is protection, not a fetch prerequisite
+        print(
+            f"WARN: could not resolve {repo} HEAD ({type(exc).__name__}) — publishing "
+            "without the lost-update guard this run"
+        )
+
+    _download_db(repo, OPERATIONAL_FILENAME, dest, tok, revision=sha or "main")
+    sidecar = _rev_sidecar(dest)
+    if sha:
+        sidecar.write_text(sha, encoding="utf-8")
+    else:
+        sidecar.unlink(missing_ok=True)  # never CAS against a stale base
     return True
 
 
@@ -155,17 +237,36 @@ def publish_operational_db(db_path: Path, repo: str, token: str | None = None) -
     Returns the commit URL. Called by CI **only on a successful, gated run** so a
     failed/partial enrichment leaves the dataset untouched and the day unrecorded,
     letting the next run safely retry (the incremental design guarantees this).
+
+    If the fetch recorded a revision sidecar, the upload compare-and-swaps against
+    it: a 412 means another writer published since this run fetched — the upload
+    is refused (publishing would discard their work) and the run must retry from
+    a fresh fetch.
     """
     db_path = Path(db_path)
     if not db_path.exists():
         raise FileNotFoundError(f"{db_path} not found — nothing to publish")
-    return _upload_db(
-        db_path,
-        repo,
-        OPERATIONAL_FILENAME,
-        token or _operational_token(),
-        "Publish operational DB (CI enrichment)",
-    )
+    sidecar = _rev_sidecar(db_path)
+    parent = sidecar.read_text(encoding="utf-8").strip() if sidecar.exists() else None
+    try:
+        url = _upload_db(
+            db_path,
+            repo,
+            OPERATIONAL_FILENAME,
+            token or _operational_token(),
+            "Publish operational DB (CI enrichment)",
+            parent_commit=parent,
+        )
+    except Exception as exc:
+        if parent and "412" in str(exc):
+            raise WarehouseFetchError(
+                f"lost-update guard: {repo} advanced past the revision this run fetched "
+                f"({parent[:8]}) — another writer published meanwhile. NOT overwriting "
+                "their work; re-run so it fetches fresh and re-applies."
+            ) from exc
+        raise
+    sidecar.unlink(missing_ok=True)  # spent — never reuse a CAS base across runs
+    return url
 
 
 def fetch_supplier_db(dest: Path, repo: str | None = None, token: str | None = None) -> bool:
@@ -351,6 +452,14 @@ def _cli() -> None:
         dest="spaces",
         help=f"Space id to restart (repeatable; default: {', '.join(DEFAULT_SPACES)})",
     )
+    rsp.add_argument(
+        "--require",
+        default=None,
+        metavar="SPACE",
+        help="Exit 1 if THIS space's restart failed (best-effort for the rest). Lets the "
+        "workflow distinguish 'restart never happened' from 'restarted but serving stale' "
+        "— the difference between a token problem and a rollback-worthy deploy (#45).",
+    )
 
     rbk = sub.add_parser(
         "rollback-serve",
@@ -395,10 +504,19 @@ def _cli() -> None:
         url = publish_cmas_db(Path(args.path), args.dataset)
         print(f"Published {CMAS_FILENAME} -> {args.dataset}: {url}")
     elif args.cmd == "restart-spaces":
-        for space, outcome in restart_spaces(tuple(args.spaces or DEFAULT_SPACES)):
+        results = restart_spaces(tuple(args.spaces or DEFAULT_SPACES))
+        for space, outcome in results:
             print(f"{space}: {outcome}")
-        # Always exit 0: best-effort by contract — a failed restart only delays
-        # go-live until a manual reboot; the publish itself already succeeded.
+        # Best-effort by contract — a failed restart only delays go-live until a
+        # manual reboot; the publish itself already succeeded. But the caller may
+        # --require one space, turning ITS failure into a machine-readable exit
+        # so the workflow can skip go-live/rollback and fail with the real cause.
+        if args.require:
+            failed = dict(results).get(args.require, "").startswith("FAILED")
+            missing = args.require not in dict(results)
+            if failed or missing:
+                print(f"required space {args.require} did not restart")
+                raise SystemExit(1)
     elif args.cmd == "rollback-serve":
         if not args.dataset:
             raise SystemExit("set --dataset or the WAREHOUSE_DATASET env var")

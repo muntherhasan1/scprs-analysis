@@ -153,6 +153,7 @@ jobs:
       # staleness would deadlock — the publish IS what advances freshness, so a
       # stale unit would block the very action that cures it.
       - name: Wave-1 checks (gate the publish)
+        id: wave1
         run: |
           set +e
           echo "::group::health"
@@ -171,6 +172,13 @@ jobs:
           if [ "$C" -ne 0 ]; then echo "::error::contracts reported a metric-delta violation"; fail=1; fi
           if [ "$K" -eq 1 ]; then echo "::error::canary detected parse drift — parser may be writing bad data"; fail=1; fi
           if [ "$K" -eq 2 ]; then echo "::warning::canary UNAVAILABLE (site unreachable) — not gating on this"; fi
+          # NOT_FOUND (#47): the fixture document vanished, not the parser — the
+          # run's banked enrichment must still publish. Recorded here; a final
+          # step fails the run AFTER the publish/serve chain so triage alerts.
+          if [ "$K" -eq 3 ]; then
+            echo "::warning::canary fixture document NOT FOUND — publishing anyway; run will end failed for triage"
+            echo "canary_notfound=1" >> "$GITHUB_OUTPUT"
+          fi
           exit $fail
 
       # Only reached if every prior step succeeded (upload-on-success contract).
@@ -194,25 +202,46 @@ jobs:
           python -m src.data_sync publish
           --dataset "${{ vars.WAREHOUSE_DATASET || 'munther-hasan/scprs-warehouse-data' }}"
 
-      # Best-effort go-live: restart the Spaces so they re-fetch the serve DB at
-      # boot. Needs the optional HF_DEPLOY_TOKEN secret (write on both Space
-      # repos); without it this prints FAILED per Space and exits 0 — the data is
-      # published either way and goes live on the next manual reboot.
+      # Restart the Spaces so they re-fetch the serve DB at boot. Best-effort
+      # for the (frozen) chat Space, but the MCP Space's restart outcome is
+      # load-bearing (#45): if it never rebooted, go-live would inevitably see
+      # old markers and the old logic ROLLED BACK GOOD DATA on every cycle.
+      # A failed MCP restart now skips go-live/rollback and fails the run with
+      # the real cause (a token problem) at the end.
       - name: Restart Spaces (best-effort)
+        id: restart
         env:
           HF_DEPLOY_TOKEN: ${{ secrets.HF_DEPLOY_TOKEN }}
-        run: python -m src.data_sync restart-spaces
+          MCP_SPACE: ${{ vars.MCP_SPACE || 'munther-hasan/scprs-warehouse-mcp' }}
+        run: |
+          set +e
+          python -m src.data_sync restart-spaces --require "$MCP_SPACE"
+          rc=$?
+          set -e
+          if [ "$rc" -ne 0 ]; then
+            echo "restart_failed=1" >> "$GITHUB_OUTPUT"
+            echo "::warning::MCP Space restart did not happen — data IS published; skipping go-live (nothing to verify) and NOT rolling back"
+          fi
 
       # Observability extended to deploys (retrospective action #4): verify over
       # the real MCP channel that the rebooted Space serves the snapshot THIS run
       # published. A failure here means the data is safe but NOT live — the
       # silent-staleness failure mode of 2026-07-20, made loud. Skips (exit 0)
-      # when the MCP_VERIFY_TOKEN secret is unset.
+      # when the MCP_VERIFY_TOKEN secret is unset. Exit codes are evidence-graded
+      # (#45): 1 = Space up but serving a DIFFERENT snapshot (roll back);
+      # 2 = could not observe (boot timeout / unreachable — fail, don't touch).
       - name: Verify go-live (Space serves this build)
         id: golive
+        if: steps.restart.outputs.restart_failed != '1'
         env:
           MCP_VERIFY_TOKEN: ${{ secrets.MCP_VERIFY_TOKEN }}
-        run: python -m src.golive_check
+        run: |
+          set +e
+          python -m src.golive_check
+          rc=$?
+          set -e
+          echo "rc=$rc" >> "$GITHUB_OUTPUT"
+          exit $rc
 
       # The one alarm outside GitHub (#44): a healthy end-to-end run pings the
       # dead-man's switch; the external service pages when pings stop, whatever
@@ -232,17 +261,35 @@ jobs:
             echo "HEALTHCHECK_PING_URL not set — external dead-man's switch inactive (see #44)"
           fi
 
-      # Wave 3 auto-rollback: if go-live verification failed, the just-published
-      # serve DB is not serving cleanly — revert the serve dataset to its prior
-      # (last-good) revision and restart, so the Spaces fall back to known-good
-      # data instead of being stuck on a bad snapshot. Scoped to the go-live
-      # step's failure only (a build/publish failure earlier published nothing to
-      # roll back). The job still fails so the bad deploy is loudly visible.
-      - name: Roll back serve DB on failed go-live
-        if: ${{ always() && steps.golive.outcome == 'failure' }}
+      # Wave 3 auto-rollback, evidence-graded (#45): revert the serve dataset to
+      # its prior (last-good) revision ONLY on rc=1 — the Space is up and
+      # verifiably serving a different snapshot (positive evidence). rc=2
+      # (timeout / unreachable) proves nothing about the data: the run fails
+      # loudly but leaves the publish alone — the old on-any-failure trigger
+      # would have rolled back good data every 6h on a mere token rotation.
+      - name: Roll back serve DB on verified mismatch
+        if: ${{ always() && steps.golive.outputs.rc == '1' }}
         env:
           HF_WAREHOUSE_TOKEN: ${{ secrets.HF_WAREHOUSE_TOKEN }}
           HF_DEPLOY_TOKEN: ${{ secrets.HF_DEPLOY_TOKEN }}
         run: >
           python -m src.data_sync rollback-serve
           --dataset "${{ vars.WAREHOUSE_DATASET || 'munther-hasan/scprs-warehouse-data' }}"
+
+      # Deferred failure for a skipped go-live: the publish chain completed (no
+      # rollback needed, nothing lost) but the refresh is NOT live — fail with
+      # the actual cause so triage names the token, not a phantom deploy issue.
+      - name: Fail on restart-token problem
+        if: ${{ always() && steps.restart.outputs.restart_failed == '1' }}
+        run: |
+          echo "::error::MCP Space restart failed — check HF_DEPLOY_TOKEN (write scope on the Space repo). Data is published; reboot the Space manually or fix the token for the next cron."
+          exit 1
+
+      # Deferred failure for canary NOT_FOUND (#47): everything published and
+      # went live, but the canary has no fixture to score against — alert via a
+      # red run + triage without having forfeited any banked work.
+      - name: Escalate canary target-not-found
+        if: ${{ always() && steps.wave1.outputs.canary_notfound == '1' }}
+        run: |
+          echo "::error::canary fixture document not findable on the site — recapture it (python -m src.canary --capture --document <id>) from an already-drilled document. Enrichment data WAS published; nothing was lost."
+          exit 1

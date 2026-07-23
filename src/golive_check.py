@@ -12,7 +12,14 @@ How it works, over the same channel a real MCP client uses:
   2. Wait for the Space to come back from its factory reboot (stage RUNNING).
   3. Run the same marker query through the Space's token-gated ``run_sql`` MCP
      tool, retrying while the app inside the RUNNING container finishes booting.
-  4. Compare. Mismatch or timeout -> exit 1 (the workflow fails loudly).
+  4. Compare. Exit codes are evidence-graded (#45) so auto-rollback only fires
+     on proof the served data is wrong, never on absence of evidence:
+       0  VERIFIED     the Space serves this build
+       1  MISMATCH     the Space is up and serving a DIFFERENT snapshot
+                       -> positive evidence; the workflow rolls back
+       2  INCONCLUSIVE boot timeout / terminal stage / endpoint unreachable
+                       -> nothing proves the published data is bad; the
+                          workflow fails loudly but must NOT roll back
 
 Needs ``MCP_VERIFY_TOKEN`` (any valid ``MCP_AUTH_TOKENS`` entry's token). Without
 it the check prints a skip note and exits 0, so the workflow still passes on
@@ -104,7 +111,10 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--space", default=DEFAULT_SPACE)
     ap.add_argument("--url", default=DEFAULT_URL)
     ap.add_argument("--serve-db", type=Path, default=warehouse.SERVE_DB)
-    ap.add_argument("--boot-timeout", type=float, default=1200, help="seconds to wait for RUNNING")
+    # 1500s matches deploy_check's build budget: a factory reboot does a full
+    # image rebuild, and a shorter window here rolled back healthy-but-slow
+    # boots (#45).
+    ap.add_argument("--boot-timeout", type=float, default=1500, help="seconds to wait for RUNNING")
     ap.add_argument("--serve-timeout", type=float, default=300, help="seconds to wait for the app")
     args = ap.parse_args(argv)
 
@@ -115,16 +125,24 @@ def main(argv: list[str] | None = None) -> int:
 
     expected = local_markers(args.serve_db)
     print(f"expected (this build): {expected}")
-    wait_for_space(args.space, timeout_s=args.boot_timeout)
-    served = asyncio.run(served_markers(args.url, token, timeout_s=args.serve_timeout))
+    try:
+        wait_for_space(args.space, timeout_s=args.boot_timeout)
+        served = asyncio.run(served_markers(args.url, token, timeout_s=args.serve_timeout))
+    except Exception as e:  # noqa: BLE001 - boot timeout / terminal stage / unreachable
+        print(
+            f"go-live INCONCLUSIVE: {type(e).__name__}: {e} — could not observe what the "
+            "Space serves; there is NO evidence the published data is bad, so the "
+            "workflow must fail without rolling back"
+        )
+        return 2
     print(f"served   (live Space): {served}")
 
     if served == expected:
         print("go-live VERIFIED: the Space serves this build")
         return 0
     print(
-        "go-live FAILED: the Space is serving a different snapshot than this run "
-        "published — the restart did not take effect or fetched a stale revision"
+        "go-live MISMATCH: the Space is up and serving a different snapshot than this "
+        "run published — the restart did not take effect or fetched a stale revision"
     )
     return 1
 
