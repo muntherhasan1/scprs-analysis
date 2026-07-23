@@ -82,6 +82,30 @@ def test_main_exits_two_when_observation_impossible(monkeypatch, tmp_path, capsy
     assert "INCONCLUSIVE" in out and "roll" in out
 
 
+def test_wait_for_space_survives_transient_poll_errors(monkeypatch):
+    """One API blip mid-poll must not abort the wait (live incident: ConnectError
+    80s into a 20-min reboot window failed the whole go-live check)."""
+    import huggingface_hub
+
+    calls = {"n": 0}
+
+    class FlakyApi:
+        def space_info(self, space):
+            calls["n"] += 1
+            if calls["n"] < 3:
+                raise ConnectionError("reset by peer")
+
+            class Info:
+                class runtime:
+                    stage = "RUNNING"
+
+            return Info()
+
+    monkeypatch.setattr(huggingface_hub, "HfApi", FlakyApi)
+    golive_check.wait_for_space("acme/space", timeout_s=30, poll_s=0)  # must not raise
+    assert calls["n"] == 3
+
+
 def test_wait_for_space_raises_on_terminal_stage(monkeypatch):
     import huggingface_hub
 

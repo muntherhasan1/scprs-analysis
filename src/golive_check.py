@@ -63,14 +63,24 @@ def local_markers(serve_db: Path) -> dict:
 
 def wait_for_space(space: str, timeout_s: float = 1200, poll_s: float = 20) -> None:
     """Block until the Space's runtime stage is RUNNING (a factory reboot passes
-    through a full image rebuild first). Raises TimeoutError / RuntimeError."""
+    through a full image rebuild first). Raises TimeoutError / RuntimeError.
+
+    A single failed poll must not abort a 20+ minute wait: one transient API
+    blip (observed live: `ConnectError` 80s into run 30050957326) would
+    otherwise fail the whole go-live check while the Space was mid-reboot.
+    Poll errors are logged and re-polled until the deadline decides."""
     from huggingface_hub import HfApi
 
     api = HfApi()
     deadline = time.monotonic() + timeout_s
     stage = "?"
     while time.monotonic() < deadline:
-        stage = str(api.space_info(space).runtime.stage)
+        try:
+            stage = str(api.space_info(space).runtime.stage)
+        except Exception as exc:  # noqa: BLE001 - transient poll blip; deadline decides
+            print(f"  space_info poll error ({type(exc).__name__}: {exc}); retrying")
+            time.sleep(poll_s)
+            continue
         if stage == "RUNNING":
             return
         if stage in ("RUNTIME_ERROR", "BUILD_ERROR", "PAUSED"):
