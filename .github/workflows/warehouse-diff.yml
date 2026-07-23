@@ -31,7 +31,11 @@ jobs:
     env:
       PYTHONUNBUFFERED: "1" # a killed run must still show how far it got
       SCPRS_DATASET: ${{ vars.SCPRS_DATASET || 'munther-hasan/scprs-operational-db' }}
-      HF_SCPRS_TOKEN: ${{ secrets.HF_SCPRS_TOKEN }}
+      # Least privilege (#54): this job only READS the dataset but executes
+      # PR-head code, so it should never hold the single-writer token. Prefer a
+      # fine-grained read-only HF_SCPRS_READ_TOKEN; the write token is only the
+      # fallback until that secret is minted — remove the fallback once it is.
+      HF_SCPRS_TOKEN: ${{ secrets.HF_SCPRS_READ_TOKEN || secrets.HF_SCPRS_TOKEN }}
     steps:
       - name: Checkout PR (head)
         uses: actions/checkout@v7
