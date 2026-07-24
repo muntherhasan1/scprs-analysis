@@ -1,0 +1,106 @@
+name: eProcure registry refresh
+
+# Device-free refresh of the eProcure SB/DVBE certified-supplier registry side
+# input. Drives the public PeopleSoft component behind caleprocure.ca.gov with
+# headless Playwright (src/eprocure.py — the site's overlay APIs are not
+# drivable without a browser; see docs/EPROCURE.md) and publishes eprocure.db
+# to the operational dataset. Upload-on-success: a failed/partial run never
+# overwrites good data — the extractor itself refuses to write an export whose
+# unique-firm count falls short of the site's own result banner.
+on:
+  schedule:
+    # Weekly — certifications churn slowly. Offset from the enrich cron slots
+    # (17 past 02/08/14/20) and the CMAS cron (06:37) so the shared writer
+    # lock rarely queues.
+    - cron: "53 4 * * 2"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Shares the operational-dataset single-writer group with the enrich + CMAS
+# workflows so two commits never race the same dataset repo. Queue, don't cancel.
+concurrency:
+  group: scprs-operational-writer
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      PYTHONUNBUFFERED: "1" # a killed run must still show how far it got
+      # The operational store's private dataset (eprocure.db lands alongside scprs.db).
+      SCPRS_DATASET: ${{ vars.SCPRS_DATASET || 'munther-hasan/scprs-operational-db' }}
+      # Read+write on that dataset (same Actions secret CI uses as the sole writer).
+      HF_SCPRS_TOKEN: ${{ secrets.HF_SCPRS_TOKEN }}
+      # Chromium runs unprivileged on the runner — match the container launch flags.
+      PLAYWRIGHT_NO_SANDBOX: "1"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt "huggingface_hub>=0.25"
+          playwright install --with-deps chromium
+
+      - name: Extract registry (Playwright -> data/eprocure.db)
+        run: python -m src.eprocure extract-registry
+
+      # Upload-on-success gate (#51): never publish a shrunken extract over good
+      # data. The extractor already refuses an export short of the site's own
+      # banner total, but that guards one run against itself; this compares
+      # against the previously *published* store, catching e.g. a cert-type
+      # checkbox that silently stopped committing (search covers a subset).
+      # Registrations churn slowly, so the new extract must hold >=90% of the
+      # previously published rows; the first-ever publish passes on >0.
+      - name: Sanity-check the extract (shrink gate)
+        run: |
+          set -o pipefail
+          python - <<'PY' 2>&1 | tee gate.log
+          import sqlite3, sys
+          from pathlib import Path
+          from src import data_sync
+
+          q = "SELECT COUNT(*) FROM registry"
+          n = sqlite3.connect("data/eprocure.db").execute(q).fetchone()[0]
+          print(f"new registry rows: {n}")
+          if n <= 0:
+              print("FAIL: empty extract")
+              sys.exit(1)
+
+          prev_path = Path("data/eprocure_prev.db")
+          try:
+              have_prev = data_sync.fetch_eprocure_db(prev_path)
+          except Exception as e:  # noqa: BLE001 - unreadable prior copy: warn, don't block
+              print(f"WARN: could not fetch previous eprocure.db ({e!r}) — gating on >0 only")
+              sys.exit(0)
+          if not have_prev:
+              print("no previously published eprocure.db — first publish, gate passes")
+              sys.exit(0)
+          prev = sqlite3.connect(prev_path).execute(q).fetchone()[0]
+          floor = int(prev * 0.9)
+          print(f"previous rows: {prev}; floor (90%): {floor}")
+          if n < floor:
+              print(f"FAIL: extract shrank below 90% of previous ({n} < {floor}) — "
+                    "likely a partial search/export; NOT publishing")
+              sys.exit(1)
+          print("OK: shrink gate passed")
+          PY
+          {
+            echo "### eProcure registry refresh"
+            echo '```'
+            cat gate.log
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Publish eprocure.db to the operational dataset
+        run: python -m src.data_sync publish-eprocure
