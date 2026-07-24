@@ -26,6 +26,16 @@ into its own `data/cmas.db` + CSVs. `python -m src.cmas extract`. The warehouse
 folds it in as an **optional side input** (like `supplier_enrichment.db`): skipped
 if `data/cmas.db` is absent. See `docs/CMAS.md`.
 
+## Project skills
+
+Six playbooks in `.claude/skills/` distill this repo's hard-won operational
+knowledge — invoke the matching one BEFORE starting work of that kind:
+`data-extraction` (new/changed sources: recon-first, extractor contract, gates),
+`warehouse-modeling` (medallion/grain/DQ rules), `mart-builder` (gold marts +
+MCP/NL discoverability + Space deploys), `data-analysis` (querying without
+double-counting or over-claiming coverage), `external-research` (source vetting,
+supplier enrichment), `pipeline-ops` (CI/CD protocols, incident drill, tokens).
+
 ## Commands
 
 ```bash
