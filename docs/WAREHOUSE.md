@@ -116,6 +116,21 @@ roughly triples the match rate over the plain `UPPER()` join. It exposes
 SCPRS spend beside CMAS terms / SB-DVBE / product reach). Absent `data/cmas.db`,
 the build is a clean no-op. See `docs/CMAS.md`.
 
+**eProcure SB/DVBE certification integration:** a third optional side input,
+Cal eProcure's certified-supplier registry (`data/eprocure.db`,
+`src/eprocure.py`), is snapshotted to `bronze_eprocure` and matched to
+`dim_supplier` by the same normalized-name mechanism as CMAS. Registry grain is
+one row per **certification record** — a firm (`cert_id`) can hold several,
+e.g. separate SB and DVBE certifications with different date ranges. It exposes
+**`gold_eprocure_certification`** (every certification record + derived
+`cert_small_business`/`cert_micro_business`/`cert_dvbe` flags + a
+`matched_to_supplier` flag) and **`gold_supplier_certification`** (our canonical
+suppliers holding a state certification — SCPRS spend beside authoritative
+SB/micro/DVBE status, flags OR-ed across the firm's certification records).
+The registry's contact PII and owner-demographic columns deliberately stay in
+`eprocure.db`. Absent the file, the build is a clean no-op. See
+`docs/EPROCURE.md`.
+
 ## Contract change capture (history over time)
 The bronze/silver/gold layers are a full-refresh snapshot of *current* state, so on
 their own they can't show how a contract changed. **`dw_document_history`** fixes

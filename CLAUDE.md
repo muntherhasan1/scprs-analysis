@@ -29,7 +29,10 @@ if `data/cmas.db` is absent. See `docs/CMAS.md`.
 `eprocure.py` is likewise standalone: Cal eProcure's SB/DVBE certified-supplier
 registry (headless Playwright on the same PeopleSoft host as SCPRS — the overlay
 APIs are not drivable without a browser) into `data/eprocure.db`.
-`python -m src.eprocure extract-registry`. Warehouse fold is a planned follow-up.
+`python -m src.eprocure extract-registry`. The warehouse folds it in as an
+optional side input (CMAS pattern): certification flags matched to canonical
+suppliers by normalized name (`gold_eprocure_certification`,
+`gold_supplier_certification`).
 See `docs/EPROCURE.md` for the recon map (WAF quirks, banner formats).
 
 ## Project skills

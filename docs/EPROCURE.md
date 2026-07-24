@@ -84,10 +84,17 @@ extracts and publishes `eprocure.db` to the private operational dataset via
 Failures open a triage issue (`src/triage.py` hints under
 "eProcure registry refresh").
 
+## Warehouse fold
+
+**Shipped.** The warehouse ingests `data/eprocure.db` as an optional side input
+(CMAS pattern): `bronze_eprocure` (certification-record grain; contact PII and
+owner demographics deliberately not landed), canonical-supplier match by
+normalized name, marts `gold_eprocure_certification` +
+`gold_supplier_certification`. Absent the file, the build is a clean no-op.
+See `docs/WAREHOUSE.md`.
+
 ## Follow-ups (tracked, not in this change)
 
-- **Warehouse fold (PR B)**: optional side input like CMAS — skipped when
-  `data/eprocure.db` is absent; cert flags joined by `normalized_name`.
 - **CSCR events archive (PR C)**: the other eProcure surface
   (`AUC_MANAGE_BIDS.AUC_RESP_INQ_AUC.GBL`) — Historical years 2015–2026,
   ~5,610 events in 2025 alone, 50/page `PSGRIDCOUNTER` grid; row grain is

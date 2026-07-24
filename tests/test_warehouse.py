@@ -496,3 +496,110 @@ def test_cmas_absent_is_a_clean_noop(tmp_path):
         assert con.execute("SELECT COUNT(*) FROM gold_supplier_cmas").fetchone()[0] == 0
     finally:
         con.close()
+
+
+# --------------------------------------------------------------------------- #
+# eProcure SB/DVBE registry integration
+# --------------------------------------------------------------------------- #
+def _seed_eprocure(path, certs):
+    """Minimal eProcure store: a registry table with the source columns the
+    warehouse reads. `certs` is a list of (cert_id, legal_name, cert_type,
+    start_date, end_date) tuples; other columns are stubbed."""
+    con = sqlite3.connect(path)
+    cols = list(warehouse._EPROCURE_SOURCE.values())
+    coldefs = ", ".join(f'"{c}" TEXT' for c in cols)
+    con.execute(f'CREATE TABLE "registry" ({coldefs})')  # noqa: S608 - test constant
+    ph = ", ".join("?" * len(cols))
+    for cert_id, name, ctype, start, end in certs:
+        vals = {c: None for c in cols}
+        vals["Certification ID"] = cert_id
+        vals["Legal Business Name"] = name
+        vals["Certification Type"] = ctype
+        vals["Start Date"] = start
+        vals["End Date"] = end
+        con.execute(
+            f'INSERT INTO "registry" VALUES ({ph})',  # noqa: S608 - fixed arity
+            [vals[c] for c in cols],
+        )
+    con.commit()
+    con.close()
+
+
+def test_eprocure_integration_matches_suppliers_by_normalized_name(tmp_path):
+    """eProcure certifications attach to warehouse canonical suppliers by
+    normalized name, and per-supplier flags aggregate a firm's multiple
+    certification records (e.g. separate SB and DVBE rows under one cert_id)."""
+    src, wh = tmp_path / "scprs.db", tmp_path / "warehouse.db"
+    epr = tmp_path / "eprocure.db"
+    _seed_source(src)  # suppliers "Acme" (S1) and "Beta" (S2)
+    _seed_eprocure(
+        epr,
+        [
+            # one firm, two certification records -> flags aggregate to one row
+            ("100", "Acme, Inc.", "SB(Micro),SB-PW", "2025-01-01", "2027-01-31"),
+            ("100", "Acme, Inc.", "DVBE", "2025-06-01", "2027-06-30"),
+            ("200", "Beta LLC", "SB", "2024-03-01", "2026-03-31"),
+            ("300", "Zeta Unrelated Corp.", "DVBE", "2025-01-01", "2027-01-01"),  # no match
+        ],
+    )
+    warehouse.build_all(
+        wh_path=wh,
+        source_path=src,
+        enrichment_db=tmp_path / "no_enrich.db",
+        cmas_db=tmp_path / "missing_cmas.db",
+        eprocure_db=epr,
+        log=lambda *a: None,
+    )
+    con = sqlite3.connect(wh)
+    try:
+        assert con.execute("SELECT COUNT(*) FROM bronze_eprocure").fetchone()[0] == 4
+        assert con.execute("SELECT COUNT(*) FROM gold_eprocure_certification").fetchone()[0] == 4
+        assert (
+            con.execute(
+                "SELECT COUNT(*) FROM gold_eprocure_certification WHERE matched_to_supplier = 1"
+            ).fetchone()[0]
+            == 3
+        )
+        # The punctuation/suffix variant resolved to the canonical warehouse name.
+        assert con.execute(
+            "SELECT DISTINCT matched_canonical_name FROM gold_eprocure_certification "
+            "WHERE cert_id = '100'"
+        ).fetchall() == [("Acme",)]
+        # gold_supplier_certification: one row per matched supplier, flags OR-ed
+        # across that firm's certification records, SCPRS spend beside them.
+        rows = {
+            r[0]: r
+            for r in con.execute(
+                "SELECT canonical_name, scprs_total_value, cert_record_count, "
+                "cert_small_business, cert_micro_business, cert_dvbe "
+                "FROM gold_supplier_certification"
+            )
+        }
+        assert set(rows) == {"Acme", "Beta"}
+        assert rows["Acme"][1] == 150.0  # current-version SCPRS spend for doc A
+        assert rows["Acme"][2] == 2  # both certification records counted
+        assert rows["Acme"][3:] == (1, 1, 1)  # SB + micro + DVBE across the two rows
+        assert rows["Beta"][3:] == (1, 0, 0)  # plain SB only
+    finally:
+        con.close()
+
+
+def test_eprocure_absent_is_a_clean_noop(tmp_path):
+    """No eprocure.db => empty bronze_eprocure and empty marts; build succeeds."""
+    src, wh = tmp_path / "scprs.db", tmp_path / "warehouse.db"
+    _seed_source(src)
+    warehouse.build_all(
+        wh_path=wh,
+        source_path=src,
+        enrichment_db=tmp_path / "no_enrich.db",
+        cmas_db=tmp_path / "missing_cmas.db",
+        eprocure_db=tmp_path / "missing_eprocure.db",
+        log=lambda *a: None,
+    )
+    con = sqlite3.connect(wh)
+    try:
+        assert con.execute("SELECT COUNT(*) FROM bronze_eprocure").fetchone()[0] == 0
+        assert con.execute("SELECT COUNT(*) FROM gold_eprocure_certification").fetchone()[0] == 0
+        assert con.execute("SELECT COUNT(*) FROM gold_supplier_certification").fetchone()[0] == 0
+    finally:
+        con.close()

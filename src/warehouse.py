@@ -50,6 +50,9 @@ WAREHOUSE_DB = scprs.DATA_DIR / "warehouse.db"
 SERVE_DB = scprs.DATA_DIR / "warehouse-serve.db"  # slim, serving-only copy (gold + star)
 ENRICHMENT_DB = scprs.DATA_DIR / "supplier_enrichment.db"  # web-researched supplier profiles
 CMAS_DB = scprs.DATA_DIR / "cmas.db"  # CMAS master-agreement contractors (src/cmas.py)
+EPROCURE_DB = (
+    scprs.DATA_DIR / "eprocure.db"
+)  # SB/DVBE certified-supplier registry (src/eprocure.py)
 DEPARTMENTS_CSV = Path(__file__).resolve().parent.parent / "references" / "departments.csv"
 ABBREVIATIONS_CSV = Path(__file__).resolve().parent.parent / "references" / "abbreviations.csv"
 
@@ -114,6 +117,7 @@ def build_bronze(
     ts: str,
     enrichment_db: Path = ENRICHMENT_DB,
     cmas_db: Path = CMAS_DB,
+    eprocure_db: Path = EPROCURE_DB,
 ) -> dict:
     counts = {}
     for bronze, source in _BRONZE_SOURCES.items():
@@ -162,6 +166,10 @@ def build_bronze(
     # CMAS master-agreement contractors (separate standalone store, src/cmas.py) —
     # a side input like supplier_enrichment.db: optional, skipped if absent.
     counts["bronze_cmas"] = _ingest_cmas(con, cmas_db, batch, ts)
+
+    # Cal eProcure SB/DVBE certified-supplier registry (standalone store,
+    # src/eprocure.py) — same optional side-input contract as cmas.db.
+    counts["bronze_eprocure"] = _ingest_eprocure(con, eprocure_db, batch, ts)
     return counts
 
 
@@ -229,16 +237,89 @@ def _ingest_cmas(con: sqlite3.Connection, cmas_db: Path, batch: str, ts: str) ->
     return _count(con, "bronze_cmas")
 
 
-def _resolve_cmas_suppliers(con: sqlite3.Connection) -> None:
-    """Stamp each bronze_cmas agreement with the warehouse canonical supplier it
-    matches, by normalized name. All fuzzy matching stays in Python (reusing
-    supplier_master.normalize_name) so the gold marts are plain equality joins.
+# eProcure side input: landed bronze column -> its source column in eprocure.db's
+# registry. Same contract as _CMAS_SOURCE: `supplier_norm` / `matched_canonical_*`
+# are derived, not copied. The registry's contact PII (names, emails, phones,
+# street addresses) and owner-demographic columns deliberately stay in
+# eprocure.db — the warehouse only needs the certification facts.
+_EPROCURE_SOURCE = {
+    "cert_id": "Certification ID",
+    "supplier_name": "Legal Business Name",
+    "doing_business_as": "Doing Business As 1",
+    "certification_type": "Certification Type",
+    "cert_start_date": "Start Date",
+    "cert_end_date": "End Date",
+    "city": "City",
+    "state": "State",
+    "postal_code": "Postal Code",
+    "unspsc": "UNSPSC",
+    "naics": "NAICS",
+    "service_areas": "Service Areas",
+    "industry_type": "Industry Type",
+    "diversity_certs": "Supplier Diversity Certs",
+}
+_EPROCURE_COLUMNS = (
+    *_EPROCURE_SOURCE.keys(),
+    "supplier_norm",
+    "matched_canonical_id",
+    "matched_canonical_name",
+)
+
+
+def _ingest_eprocure(con: sqlite3.Connection, eprocure_db: Path, batch: str, ts: str) -> int:
+    """Land the SB/DVBE registry into bronze_eprocure (own store, own connection).
+
+    Grain: one row per certification record — a firm (cert_id) can hold several
+    rows, e.g. separate SB and DVBE certifications with different date ranges.
+    `supplier_norm` is recomputed here from the legal name (not copied from the
+    source's normalized_name column) so the join key always matches this
+    warehouse's supplier_master version. Optional: absent eprocure.db => empty
+    table, build unaffected.
+    """
+    con.execute("DROP TABLE IF EXISTS bronze_eprocure")
+    defs = ", ".join(f"{c} TEXT" for c in _EPROCURE_COLUMNS)
+    con.execute(
+        f"CREATE TABLE bronze_eprocure ({defs}, "  # noqa: S608 - column names are internal constants
+        "_batch_id TEXT, _loaded_at TEXT, _source TEXT)"
+    )
+    rows = []
+    if eprocure_db.exists():
+        src = sqlite3.connect(eprocure_db, timeout=30)
+        try:
+            if src.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='registry'"
+            ).fetchone():
+                src_cols = list(_EPROCURE_SOURCE.keys())
+                sel = ", ".join(f'"{_EPROCURE_SOURCE[c]}"' for c in src_cols)
+                cur = src.execute(f'SELECT {sel} FROM "registry"')  # noqa: S608
+                for r in cur.fetchall():
+                    d = dict(zip(src_cols, r, strict=True))
+                    norm = supplier_master.normalize_name(str(d.get("supplier_name") or ""))
+                    rows.append(
+                        [d[c] for c in src_cols] + [norm, None, None, batch, ts, "eprocure.db"]
+                    )
+        finally:
+            src.close()
+    if rows:
+        ph = ", ".join("?" * (len(_EPROCURE_COLUMNS) + 3))
+        con.executemany(f"INSERT INTO bronze_eprocure VALUES ({ph})", rows)  # noqa: S608 - fixed arity
+    return _count(con, "bronze_eprocure")
+
+
+# Side-input bronze tables that carry a supplier_norm join key and receive a
+# canonical-supplier stamp after gold is built.
+_SIDE_INPUT_TABLES = ("bronze_cmas", "bronze_eprocure")
+
+
+def _resolve_side_input_suppliers(con: sqlite3.Connection) -> None:
+    """Stamp each side-input row (CMAS agreement, eProcure certification) with the
+    warehouse canonical supplier it matches, by normalized name. All fuzzy matching
+    stays in Python (reusing supplier_master.normalize_name) so the gold marts are
+    plain equality joins.
 
     Runs after dim_supplier + _abbreviate_gold, so it reads canonical identity via
     the logical-named lv_dim_supplier view.
     """
-    if not _src_has_local(con, "bronze_cmas"):
-        return
     # normalized canonical name -> canonical (id, name); first wins on the rare
     # collision, deterministic by canonical_id.
     lookup: dict[str, tuple[str, str]] = {}
@@ -249,16 +330,21 @@ def _resolve_cmas_suppliers(con: sqlite3.Connection) -> None:
         key = supplier_master.normalize_name(cname)
         if key and key not in lookup:
             lookup[key] = (cid, cname)
-    updates = [
-        (*lookup[norm], rowid)
-        for rowid, norm in con.execute("SELECT rowid, supplier_norm FROM bronze_cmas")
-        if norm in lookup
-    ]
-    con.executemany(
-        "UPDATE bronze_cmas SET matched_canonical_id = ?, matched_canonical_name = ? "
-        "WHERE rowid = ?",
-        updates,
-    )
+    for table in _SIDE_INPUT_TABLES:
+        if not _src_has_local(con, table):
+            continue
+        updates = [
+            (*lookup[norm], rowid)
+            for rowid, norm in con.execute(
+                f"SELECT rowid, supplier_norm FROM {table}"  # noqa: S608 - internal constant
+            )
+            if norm in lookup
+        ]
+        con.executemany(
+            f"UPDATE {table} SET matched_canonical_id = ?, "  # noqa: S608 - internal constant
+            "matched_canonical_name = ? WHERE rowid = ?",
+            updates,
+        )
 
 
 def _src_has_local(con: sqlite3.Connection, table: str) -> bool:
@@ -650,7 +736,7 @@ def build_gold(con: sqlite3.Connection, batch: str, ts: str) -> dict:
     _finalize(con, "fact_line", "line_sk", batch, ts, clob_cols=("item_description",))
     _finalize(con, "fact_associated_po", "po_sk", batch, ts)
     _abbreviate_gold(con, load_abbreviations())  # abbreviate physical cols + build lv_ views
-    _resolve_cmas_suppliers(con)  # match CMAS agreements to canonical suppliers (by norm name)
+    _resolve_side_input_suppliers(con)  # stamp CMAS/eProcure rows with canonical suppliers
     _build_marts(con)
     return {
         t: _count(con, t)
@@ -942,6 +1028,55 @@ def _build_marts(con):
                    c.earliest_term_start, c.latest_term_end, c.cmas_agreement_numbers
             FROM c
             JOIN gold_canonical_supplier_spend sp ON sp.canonical_id = c.canonical_id""",
+        # -- eProcure SB/DVBE certification integration ----------------------- #
+        # Every certification record in Cal eProcure's registry, flagged with the
+        # warehouse canonical supplier it maps to (matched on normalized name;
+        # NULL = a certified firm we have no SCPRS spend record for). Grain: one
+        # row per certification record — a firm (cert_id) can hold several, e.g.
+        # separate SB and DVBE certifications with different date ranges.
+        "gold_eprocure_certification": """
+            SELECT cert_id, supplier_name, doing_business_as, certification_type,
+                   cert_start_date, cert_end_date, city, state, postal_code,
+                   unspsc, naics, service_areas, industry_type, diversity_certs,
+                   CASE WHEN certification_type LIKE '%SB%' THEN 1 ELSE 0 END
+                        AS cert_small_business,
+                   CASE WHEN certification_type LIKE '%SB(Micro)%' THEN 1 ELSE 0 END
+                        AS cert_micro_business,
+                   CASE WHEN certification_type LIKE '%DVBE%' THEN 1 ELSE 0 END
+                        AS cert_dvbe,
+                   matched_canonical_id, matched_canonical_name,
+                   CASE WHEN matched_canonical_id IS NOT NULL THEN 1 ELSE 0 END
+                        AS matched_to_supplier
+            FROM bronze_eprocure""",
+        # The integration payoff: our canonical suppliers that hold a current
+        # SB/DVBE/micro certification — their SCPRS spend beside their certified
+        # status. Intersection only (INNER on the match). State-certified status
+        # here is authoritative (the registry) vs. the self-reported/derived
+        # flags on CMAS agreements.
+        "gold_supplier_certification": """
+            WITH e AS (
+              SELECT matched_canonical_id AS canonical_id,
+                     COUNT(*) AS cert_record_count,
+                     MAX(CASE WHEN certification_type LIKE '%SB%' THEN 1 ELSE 0 END)
+                        AS cert_small_business,
+                     MAX(CASE WHEN certification_type LIKE '%SB(Micro)%' THEN 1 ELSE 0 END)
+                        AS cert_micro_business,
+                     MAX(CASE WHEN certification_type LIKE '%DVBE%' THEN 1 ELSE 0 END)
+                        AS cert_dvbe,
+                     MIN(cert_start_date) AS earliest_cert_start,
+                     MAX(cert_end_date) AS latest_cert_end,
+                     GROUP_CONCAT(DISTINCT certification_type) AS certification_types
+              FROM bronze_eprocure
+              WHERE matched_canonical_id IS NOT NULL
+              GROUP BY matched_canonical_id)
+            SELECT sp.canonical_id, sp.canonical_name,
+                   sp.registration_count, sp.document_count,
+                   sp.total_value AS scprs_total_value,
+                   e.cert_record_count, e.cert_small_business, e.cert_micro_business,
+                   e.cert_dvbe, e.earliest_cert_start, e.latest_cert_end,
+                   e.certification_types
+            FROM e
+            JOIN gold_canonical_supplier_spend sp ON sp.canonical_id = e.canonical_id""",
         # Supplier share of each department's total spend.
         "gold_supplier_share": """
             WITH v AS (
@@ -1280,6 +1415,19 @@ _DQ_CHECKS = [
         "fact_document (credits/adjustments)",
         "SELECT COUNT(*) FROM fact_document WHERE grand_total < 0",
     ),
+    (
+        "eprocure_cert_has_name",
+        "warn",
+        "bronze_eprocure (source quality)",
+        "SELECT COUNT(*) FROM bronze_eprocure "
+        "WHERE supplier_name IS NULL OR TRIM(supplier_name) = ''",
+    ),
+    (
+        "eprocure_cert_dates_ordered",
+        "warn",
+        "bronze_eprocure (source quality)",
+        "SELECT COUNT(*) FROM bronze_eprocure " "WHERE cert_start_date > cert_end_date",
+    ),
 ]
 
 
@@ -1365,6 +1513,7 @@ def build_all(
     source_path: Path = SOURCE_DB,
     enrichment_db: Path = ENRICHMENT_DB,
     cmas_db: Path = CMAS_DB,
+    eprocure_db: Path = EPROCURE_DB,
     log=print,
 ) -> dict:
     ts = datetime.now().isoformat(timespec="seconds")
@@ -1378,7 +1527,7 @@ def build_all(
             (batch, ts),
         )
         log(f"[{batch}] bronze...")
-        counts = build_bronze(con, batch, ts, enrichment_db, cmas_db)
+        counts = build_bronze(con, batch, ts, enrichment_db, cmas_db, eprocure_db)
         con.commit()
         appended = capture_document_history(con, batch, ts)
         counts["dw_document_history_appended"] = appended
