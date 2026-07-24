@@ -1,8 +1,19 @@
 """Offline tests for the SCPRS extract parser (no network/browser)."""
 
+import re
 from pathlib import Path
 
 from src import scprs
+
+
+def test_grid_banner_matches_live_format():
+    """The site's row-count banner is 'X to Y of Z' — an earlier 'X-Y of Z'
+    pattern never matched, which silently hid multi-page days (#49)."""
+    m = re.search(scprs.GRID_BANNER, "stuff\n1 to 200 of 1,135\nmore")
+    assert m and int(m.group(3).replace(",", "")) == 1135
+    m2 = re.search(scprs.GRID_BANNER, "201 to 206 of 206")
+    assert m2 and m2.group(1) == "201"
+
 
 # A miniature version of the HTML-table ".xls" the site produces.
 SAMPLE_XLS = (

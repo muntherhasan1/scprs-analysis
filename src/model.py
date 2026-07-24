@@ -243,9 +243,10 @@ def build_details_db(
 
     Idempotent per (business_unit, document): reloading a document replaces its
     detail rows for that business unit only. `skip_docs`/`deadline` pass through
-    to the drill (see `scprs.collect_po_details`); the returned counts carry
-    `skipped` and `complete` so a caller tracking day-level progress knows
-    whether the grid was fully covered or cut short by the deadline.
+    to the drill (see `scprs.collect_po_details`), which pages through the FULL
+    results grid (~200 rows/page, #49); the returned counts carry `skipped` and
+    `complete` so a caller tracking day-level progress knows whether every page
+    was covered or the pass was cut short by the deadline.
     """
     import pandas as pd
 
