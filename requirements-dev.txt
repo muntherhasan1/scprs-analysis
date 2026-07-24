@@ -1,12 +1,12 @@
 # Dev + security tooling. Install with: pip install -r requirements-dev.txt
 -r requirements.txt
 
-ruff>=0.15.22        # lint + format
+ruff>=0.16.0        # lint + format
 bandit>=1.9.4        # Python SAST (finds insecure code patterns)
 detect-secrets>=1.5  # secret scanner (local pre-commit; runs via python -m, WDAC-safe)
 pip-audit>=2.10.1    # scans dependencies for known CVEs
-pre-commit>=4.6.0    # runs local hooks before each commit
-pre-commit-hooks>=4.6.0  # standard hygiene hooks via python -m (WDAC-safe, like detect-secrets)
+pre-commit>=4.6.1    # runs local hooks before each commit
+pre-commit-hooks>=6.0.0  # standard hygiene hooks via python -m (WDAC-safe, like detect-secrets)
 pytest>=9.1.1
-matplotlib>=3.11.0      # exercised by tests for src/charting.py (chart/report tools)
-huggingface_hub>=1.23.0  # exercised by tests for src/data_sync.py (serve-DB fetch/publish)
+matplotlib>=3.11.1      # exercised by tests for src/charting.py (chart/report tools)
+huggingface_hub>=1.24.0  # exercised by tests for src/data_sync.py (serve-DB fetch/publish)
