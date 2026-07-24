@@ -5,5 +5,5 @@
 # sqlite3 (read-only) via src/warehouse_query.py — no pandas/playwright/mcp here.
 gradio>=6.20.0,<7  # 6.x clears the gradio-5 CVE cluster (cascades starlette/pillow); pip-audit gated
 httpx>=0.28.1
-huggingface_hub>=1.23.0  # CommitScheduler, for optional query logging (src/query_log.py)
-sentry-sdk>=2.66.0  # optional error tracking (src/observability.py); no-op unless SENTRY_DSN set
+huggingface_hub>=1.24.0  # CommitScheduler, for optional query logging (src/query_log.py)
+sentry-sdk>=2.66.1  # optional error tracking (src/observability.py); no-op unless SENTRY_DSN set
