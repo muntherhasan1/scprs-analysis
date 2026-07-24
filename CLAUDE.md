@@ -26,6 +26,12 @@ into its own `data/cmas.db` + CSVs. `python -m src.cmas extract`. The warehouse
 folds it in as an **optional side input** (like `supplier_enrichment.db`): skipped
 if `data/cmas.db` is absent. See `docs/CMAS.md`.
 
+`eprocure.py` is likewise standalone: Cal eProcure's SB/DVBE certified-supplier
+registry (headless Playwright on the same PeopleSoft host as SCPRS — the overlay
+APIs are not drivable without a browser) into `data/eprocure.db`.
+`python -m src.eprocure extract-registry`. Warehouse fold is a planned follow-up.
+See `docs/EPROCURE.md` for the recon map (WAF quirks, banner formats).
+
 ## Project skills
 
 Six playbooks in `.claude/skills/` distill this repo's hard-won operational

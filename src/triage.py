@@ -87,6 +87,24 @@ _HINTS: dict[str, dict[str, str]] = {
             "nothing was published (upload-on-success held)."
         ),
     },
+    "eProcure registry refresh": {
+        "_default": (
+            "The eProcure registry refresh failed. `eprocure.db` is only published "
+            "on success, so nothing overwrote the good copy."
+        ),
+        "Extract registry": (
+            "The headless registry search/download failed — the FI$Cal PeopleSoft "
+            "site may be throttling Actions' cloud IPs, a control id changed, or "
+            "the extractor's completeness check tripped (export short of the "
+            "site's own banner total). See `docs/EPROCURE.md` for the recon map."
+        ),
+        "Sanity-check": (
+            "The shrink gate tripped — the extract holds <90% of the previously "
+            "published rows, e.g. a cert-type checkbox silently stopped "
+            "committing so the search covered a subset; nothing was published "
+            "(upload-on-success held)."
+        ),
+    },
     "MCP image": {
         "_default": (
             "The MCP server container failed to build or boot its smoke test on "

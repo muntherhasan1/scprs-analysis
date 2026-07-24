@@ -10,6 +10,7 @@ on:
     workflows:
       - "Enrich (Wave 2)"
       - "CMAS refresh (Wave 2)"
+      - "eProcure registry refresh"
       - "Deploy MCP Space"
       - "MCP image"
       - "CI"

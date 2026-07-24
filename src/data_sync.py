@@ -34,6 +34,7 @@ SERVE_FILENAME = "warehouse-serve.db"
 OPERATIONAL_FILENAME = "scprs.db"
 SUPPLIER_FILENAME = "supplier_enrichment.db"
 CMAS_FILENAME = "cmas.db"  # CMAS side input, refreshed device-free by cmas-refresh.yml
+EPROCURE_FILENAME = "eprocure.db"  # eProcure SB/DVBE registry, refreshed by eprocure-refresh.yml
 
 # The always-on front ends that fetch the serve DB at boot. Restarting them is how
 # a freshly published serve DB goes live; mirrors refresh_pipeline.ps1's defaults.
@@ -332,6 +333,39 @@ def publish_cmas_db(db_path: Path, repo: str, token: str | None = None) -> str:
     )
 
 
+def fetch_eprocure_db(dest: Path, repo: str | None = None, token: str | None = None) -> bool:
+    """Best-effort fetch of the eProcure registry side input from the operational
+    dataset. Like ``fetch_cmas_db``: False when unconfigured or not yet published
+    (the refresh workflow's shrink gate treats that as a first publish)."""
+    repo = repo or os.environ.get("SCPRS_DATASET")
+    if not repo:
+        return False
+    try:
+        _download_db(repo, EPROCURE_FILENAME, dest, token or _operational_token())
+    except WarehouseFetchError:
+        return False  # optional side input — absent until first published
+    return True
+
+
+def publish_eprocure_db(db_path: Path, repo: str, token: str | None = None) -> str:
+    """Upload the eProcure registry store (``eprocure.db``) alongside ``scprs.db``
+    in the operational dataset. Written by the scheduled ``eprocure-refresh``
+    workflow (which runs ``src.eprocure extract-registry`` first), never by a
+    person. Returns the commit URL."""
+    db_path = Path(db_path)
+    if not db_path.exists():
+        raise FileNotFoundError(
+            f"{db_path} not found — run `python -m src.eprocure extract-registry` first"
+        )
+    return _upload_db(
+        db_path,
+        repo,
+        EPROCURE_FILENAME,
+        token or _operational_token(),
+        "Publish eProcure registry side input (CI refresh)",
+    )
+
+
 def rollback_serve_db(repo: str, token: str | None = None) -> str:
     """Revert the serve dataset to its previous revision. Returns the commit URL.
 
@@ -442,6 +476,13 @@ def _cli() -> None:
     pcm.add_argument("--dataset", default=os.environ.get("SCPRS_DATASET"))
     pcm.add_argument("--path", default=str(warehouse.CMAS_DB))
 
+    pep = sub.add_parser(
+        "publish-eprocure",
+        help="Upload eprocure.db to the operational dataset (scheduled eprocure-refresh workflow)",
+    )
+    pep.add_argument("--dataset", default=os.environ.get("SCPRS_DATASET"))
+    pep.add_argument("--path", default=None)
+
     rsp = sub.add_parser(
         "restart-spaces",
         help="Best-effort restart of the always-on Spaces so a published serve DB goes live",
@@ -503,6 +544,13 @@ def _cli() -> None:
             raise SystemExit("set --dataset or the SCPRS_DATASET env var")
         url = publish_cmas_db(Path(args.path), args.dataset)
         print(f"Published {CMAS_FILENAME} -> {args.dataset}: {url}")
+    elif args.cmd == "publish-eprocure":
+        from . import eprocure
+
+        if not args.dataset:
+            raise SystemExit("set --dataset or the SCPRS_DATASET env var")
+        url = publish_eprocure_db(Path(args.path or eprocure.DB_PATH), args.dataset)
+        print(f"Published {EPROCURE_FILENAME} -> {args.dataset}: {url}")
     elif args.cmd == "restart-spaces":
         results = restart_spaces(tuple(args.spaces or DEFAULT_SPACES))
         for space, outcome in results:
