@@ -92,7 +92,7 @@ jobs:
 
       - name: Comment the diff on the PR
         if: steps.fetch.outputs.skip != '1'
-        uses: actions/github-script@v7
+        uses: actions/github-script@v9
         with:
           script: |
             const fs = require('fs');
