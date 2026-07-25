@@ -28,7 +28,9 @@ if `data/cmas.db` is absent. See `docs/CMAS.md`.
 
 `eprocure.py` is likewise standalone: Cal eProcure's SB/DVBE certified-supplier
 registry (headless Playwright on the same PeopleSoft host as SCPRS — the overlay
-APIs are not drivable without a browser) into `data/eprocure.db`.
+APIs are not drivable without a browser) plus the lean CSCR event slices
+(`extract-events`: live Posted solicitations + recent Historical years; event
+details carry no award data, verified 2026-07-24) into `data/eprocure.db`.
 `python -m src.eprocure extract-registry`. The warehouse folds it in as an
 optional side input (CMAS pattern): certification flags matched to canonical
 suppliers by normalized name (`gold_eprocure_certification`,
