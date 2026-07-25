@@ -93,11 +93,61 @@ normalized name, marts `gold_eprocure_certification` +
 `gold_supplier_certification`. Absent the file, the build is a clean no-op.
 See `docs/WAREHOUSE.md`.
 
+## CSCR events (lean slices)
+
+**Gate verdict (probed 2026-07-24): event details carry NO award/result data.**
+8/8 sampled Historical event pages hold only solicitation metadata
+(description, dates, buyer contact, UNSPSC, license types, attachments); no
+award search surface or status filter exists; award notices appear only as
+unstructured separate events ("Notification of Intent to Award" titles) or PDF
+attachments. Scope is therefore **solicitation metadata**, and only the lean
+slices: the live **Posted** events plus the **current and two prior Historical
+years** (`default_event_years`). The 2015+ deep archive is a deliberate
+non-goal until something needs it.
+
+```bash
+python -m src.eprocure extract-events                    # Posted + recent years
+python -m src.eprocure extract-events --years 2023 2024  # explicit years
+python -m src.eprocure extract-events --budget-minutes 35
+```
+
+Mechanism (recon 2026-07-24) — the overlay, not the PeopleSoft host:
+
+- Cold direct hits on `suppliers.fiscal.ca.gov/...AUC_MANAGE_BIDS.AUC_RESP_INQ_AUC.GBL`
+  get **TLS-black-holed by IP** (observed live mid-probe). The extractor drives
+  the `caleprocure.ca.gov` overlay (`pages/Events-BS3/event-search.aspx`),
+  which proxies the same component through its `/nlx3` relay.
+- Headless Chromium's default `HeadlessChrome` UA gets a WAF **403**; a normal
+  Chrome UA is set on the context.
+- The overlay clones the hidden PeopleSoft DOM into a visible table — every id
+  exists twice, so only `:visible` elements are driven; grid cells are read by
+  their stable `data-if-label` attributes.
+- The result banner is a **third** live format, `"Showing Results 1-50 of
+  5702"` (see #49). Posted renders in one page; Historical chunks at 50 rows
+  and is paginated with the pager's Next button — the grid's Download button
+  never produces a file (verified twice at 240s).
+- Event names carry set-aside markers (`**SB Only**`, `*DVBE Only*`), derived
+  into `sb_only` / `dvbe_only` flags at load.
+- The Posted grid has **no Published Date column** (Historical adds it), so
+  `published_date` is NULL on every `posted` row — source truth, not a bug.
+- A page turn occasionally sticks (observed live: the final 1-row page of a
+  Historical year; a mid-walk pager that never renders). Mitigations, all
+  proven live: one re-click per turn, a stuck turn within the >=99% tolerance
+  keeps the slice, and a failed slice is retried once at the back of the queue
+  in a new session before it can fail the run.
+
+Store semantics: `events` holds **exactly the slices of the latest run**
+(idempotent per-slice replace; a year outside `--years` ages out on the next
+run). Each slice gates on >=99% of the site's own banner total before writing;
+`--budget-minutes` stops cleanly *between* slices, so a banked slice is always
+complete. `events_meta` records per-slice banner totals. The
+`eprocure-refresh` workflow extracts events after the registry and the shrink
+gate covers both tables.
+
 ## Follow-ups (tracked, not in this change)
 
-- **CSCR events archive (PR C)**: the other eProcure surface
-  (`AUC_MANAGE_BIDS.AUC_RESP_INQ_AUC.GBL`) — Historical years 2015–2026,
-  ~5,610 events in 2025 alone, 50/page `PSGRIDCOUNTER` grid; row grain is
-  BU + event id + name + format/type + dates + buyer contact. **Gated** on
-  first verifying whether event details carry award/result data (the details
-  drill opens a popup; unverified at recon).
+- **Warehouse fold for events**: expose Posted opportunities + set-aside
+  demand beside the certification marts (`gold_supplier_certification`).
+- **Deep Historical archive (2015+)**: would need fetch-then-mutate publishes
+  (compare-and-swap via `parent_commit`) so old slices accumulate instead of
+  aging out; deferred until an analysis needs it.

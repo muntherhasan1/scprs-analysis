@@ -1,12 +1,13 @@
 name: eProcure registry refresh
 
-# Device-free refresh of the eProcure SB/DVBE certified-supplier registry side
-# input. Drives the public PeopleSoft component behind caleprocure.ca.gov with
-# headless Playwright (src/eprocure.py — the site's overlay APIs are not
-# drivable without a browser; see docs/EPROCURE.md) and publishes eprocure.db
-# to the operational dataset. Upload-on-success: a failed/partial run never
-# overwrites good data — the extractor itself refuses to write an export whose
-# unique-firm count falls short of the site's own result banner.
+# Device-free refresh of the eProcure side inputs: the SB/DVBE
+# certified-supplier registry AND the lean CSCR event slices (Posted + recent
+# Historical years). Drives the public PeopleSoft components behind
+# caleprocure.ca.gov with headless Playwright (src/eprocure.py — the site's
+# overlay APIs are not drivable without a browser; see docs/EPROCURE.md) and
+# publishes eprocure.db to the operational dataset. Upload-on-success: a
+# failed/partial run never overwrites good data — the extractor itself refuses
+# to write an export/slice that falls short of the site's own result banner.
 on:
   schedule:
     # Weekly — certifications churn slowly. Offset from the enrich cron slots
@@ -27,7 +28,9 @@ concurrency:
 jobs:
   refresh:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    # Registry ~5 min + events (Posted + 3 Historical years, ~290 grid pages)
+    # ~25 min; the events step self-budgets at 35 so this stays the backstop.
+    timeout-minutes: 50
     env:
       PYTHONUNBUFFERED: "1" # a killed run must still show how far it got
       # The operational store's private dataset (eprocure.db lands alongside scprs.db).
@@ -55,6 +58,14 @@ jobs:
       - name: Extract registry (Playwright -> data/eprocure.db)
         run: python -m src.eprocure extract-registry
 
+      # Lean CSCR event slices: live Posted + the current and two prior
+      # Historical years, into the same store. Per-slice completeness is gated
+      # in-extractor against the site's own banner; the budget stops cleanly
+      # between slices ahead of the job timeout (finished slices are complete
+      # on their own — no half-written slice can publish).
+      - name: Extract events (Posted + recent Historical years)
+        run: python -m src.eprocure extract-events --budget-minutes 35
+
       # Upload-on-success gate (#51): never publish a shrunken extract over good
       # data. The extractor already refuses an export short of the site's own
       # banner total, but that guards one run against itself; this compares
@@ -70,11 +81,22 @@ jobs:
           from pathlib import Path
           from src import data_sync
 
-          q = "SELECT COUNT(*) FROM registry"
-          n = sqlite3.connect("data/eprocure.db").execute(q).fetchone()[0]
-          print(f"new registry rows: {n}")
-          if n <= 0:
-              print("FAIL: empty extract")
+          def count(path, table):
+              con = sqlite3.connect(path)
+              try:
+                  if not con.execute(
+                      "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)
+                  ).fetchone():
+                      return None
+                  return con.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+              finally:
+                  con.close()
+
+          new_reg = count("data/eprocure.db", "registry") or 0
+          new_ev = count("data/eprocure.db", "events") or 0
+          print(f"new registry rows: {new_reg}; new event rows: {new_ev}")
+          if new_reg <= 0:
+              print("FAIL: empty registry extract")
               sys.exit(1)
 
           prev_path = Path("data/eprocure_prev.db")
@@ -86,13 +108,19 @@ jobs:
           if not have_prev:
               print("no previously published eprocure.db — first publish, gate passes")
               sys.exit(0)
-          prev = sqlite3.connect(prev_path).execute(q).fetchone()[0]
-          floor = int(prev * 0.9)
-          print(f"previous rows: {prev}; floor (90%): {floor}")
-          if n < floor:
-              print(f"FAIL: extract shrank below 90% of previous ({n} < {floor}) — "
-                    "likely a partial search/export; NOT publishing")
-              sys.exit(1)
+          # Both tables shrink-gate against the previously published store; a
+          # table absent there (e.g. events before its first extraction) passes.
+          for table, new in (("registry", new_reg), ("events", new_ev)):
+              prev = count(prev_path, table)
+              if prev is None:
+                  print(f"{table}: not in previous store — passes")
+                  continue
+              floor = int(prev * 0.9)
+              print(f"{table}: previous {prev}; floor (90%): {floor}; new {new}")
+              if new < floor:
+                  print(f"FAIL: {table} shrank below 90% of previous ({new} < {floor}) — "
+                        "likely a partial search/export; NOT publishing")
+                  sys.exit(1)
           print("OK: shrink gate passed")
           PY
           {
