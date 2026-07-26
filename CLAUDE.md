@@ -31,10 +31,13 @@ registry (headless Playwright on the same PeopleSoft host as SCPRS — the overl
 APIs are not drivable without a browser) plus the lean CSCR event slices
 (`extract-events`: live Posted solicitations + recent Historical years; event
 details carry no award data, verified 2026-07-24) into `data/eprocure.db`.
-`python -m src.eprocure extract-registry`. The warehouse folds it in as an
-optional side input (CMAS pattern): certification flags matched to canonical
+`python -m src.eprocure extract-registry`. The warehouse folds both in as
+optional side inputs (CMAS pattern): certification flags matched to canonical
 suppliers by normalized name (`gold_eprocure_certification`,
-`gold_supplier_certification`).
+`gold_supplier_certification`), and events deduped to
+`(department_name, event_id)` with BU matched by exact department name
+(`gold_eprocure_event`, `gold_eprocure_posted_opportunity`,
+`gold_eprocure_event_demand`).
 See `docs/EPROCURE.md` for the recon map (WAF quirks, banner formats).
 
 ## Project skills

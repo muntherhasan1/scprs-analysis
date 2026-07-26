@@ -501,10 +501,13 @@ def test_cmas_absent_is_a_clean_noop(tmp_path):
 # --------------------------------------------------------------------------- #
 # eProcure SB/DVBE registry integration
 # --------------------------------------------------------------------------- #
-def _seed_eprocure(path, certs):
+def _seed_eprocure(path, certs, events=None):
     """Minimal eProcure store: a registry table with the source columns the
     warehouse reads. `certs` is a list of (cert_id, legal_name, cert_type,
-    start_date, end_date) tuples; other columns are stubbed."""
+    start_date, end_date) tuples; other columns are stubbed. `events`, when
+    given, seeds the extract-events table with (event_id, event_name,
+    department_name, published_date, end_date, status, sb_only, dvbe_only,
+    search_status, search_year) tuples — omit it to model a pre-events store."""
     con = sqlite3.connect(path)
     cols = list(warehouse._EPROCURE_SOURCE.values())
     coldefs = ", ".join(f'"{c}" TEXT' for c in cols)
@@ -521,6 +524,33 @@ def _seed_eprocure(path, certs):
             f'INSERT INTO "registry" VALUES ({ph})',  # noqa: S608 - fixed arity
             [vals[c] for c in cols],
         )
+    if events is not None:
+        # Real extractor schema (src/eprocure.py): parsed columns plus the raw
+        # display strings and per-slice lineage the warehouse doesn't read.
+        con.execute(
+            "CREATE TABLE events (event_id, event_name, department_name, "
+            "published_raw, published_date, end_raw, end_date, status, "
+            "sb_only, dvbe_only, search_status, search_year, "
+            "slice_key TEXT, extracted_at TEXT)"
+        )
+        for eid, name, dept, pub, end, status, sb, dvbe, sstatus, syear in events:
+            con.execute(
+                "INSERT INTO events VALUES (?, ?, ?, '', ?, '', ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    eid,
+                    name,
+                    dept,
+                    pub,
+                    end,
+                    status,
+                    sb,
+                    dvbe,
+                    sstatus,
+                    syear,
+                    sstatus if syear is None else f"{sstatus}:{syear}",
+                    "2026-07-25T00:00:00+00:00",
+                ),
+            )
     con.commit()
     con.close()
 
@@ -601,5 +631,156 @@ def test_eprocure_absent_is_a_clean_noop(tmp_path):
         assert con.execute("SELECT COUNT(*) FROM bronze_eprocure").fetchone()[0] == 0
         assert con.execute("SELECT COUNT(*) FROM gold_eprocure_certification").fetchone()[0] == 0
         assert con.execute("SELECT COUNT(*) FROM gold_supplier_certification").fetchone()[0] == 0
+        assert con.execute("SELECT COUNT(*) FROM bronze_eprocure_events").fetchone()[0] == 0
+        assert con.execute("SELECT COUNT(*) FROM gold_eprocure_event").fetchone()[0] == 0
+        assert con.execute("SELECT COUNT(*) FROM gold_eprocure_event_demand").fetchone()[0] == 0
+    finally:
+        con.close()
+
+
+def test_eprocure_events_fold(tmp_path):
+    """CSCR events land in bronze, dedupe to (department, event_id) with the
+    completed capture winning over the live one, match departments to BUs by
+    exact unambiguous name, and feed the opportunity + demand marts."""
+    src, wh = tmp_path / "scprs.db", tmp_path / "warehouse.db"
+    epr = tmp_path / "eprocure.db"
+    _seed_source(src)
+    _seed_eprocure(
+        epr,
+        [("100", "Acme, Inc.", "SB", "2025-01-01", "2027-01-31")],
+        events=[
+            # live opportunity, SB-only set-aside, department in references/
+            (
+                "26-001",
+                "Road Work SB ONLY",
+                "Department of Transportation",
+                None,
+                "2026-08-01",
+                "Posted",
+                1,
+                0,
+                "posted",
+                None,
+            ),
+            # completed, DVBE-only
+            (
+                "25-001",
+                "Janitorial DVBE ONLY",
+                "Department of Transportation",
+                "2025-01-05",
+                "2025-02-01",
+                "Event Completed",
+                0,
+                1,
+                "historical",
+                2025,
+            ),
+            # department absent from the FI$Cal reference -> no BU match
+            (
+                "25-002",
+                "Fair Services",
+                "22nd DAA",
+                "2025-03-01",
+                "2025-04-01",
+                "Event Completed",
+                0,
+                0,
+                "historical",
+                2025,
+            ),
+            # same (dept, event_id) captured live AND completed -> completed wins
+            (
+                "25-003",
+                "Bridge Repair",
+                "Department of Transportation",
+                None,
+                "2026-09-01",
+                "Posted",
+                0,
+                0,
+                "posted",
+                None,
+            ),
+            (
+                "25-003",
+                "Bridge Repair",
+                "Department of Transportation",
+                "2025-05-01",
+                "2025-06-01",
+                "Event Completed",
+                0,
+                0,
+                "historical",
+                2025,
+            ),
+        ],
+    )
+    warehouse.build_all(
+        wh_path=wh,
+        source_path=src,
+        enrichment_db=tmp_path / "no_enrich.db",
+        cmas_db=tmp_path / "missing_cmas.db",
+        eprocure_db=epr,
+        log=lambda *a: None,
+    )
+    con = sqlite3.connect(wh)
+    try:
+        assert con.execute("SELECT COUNT(*) FROM bronze_eprocure_events").fetchone()[0] == 5
+        # mart grain: one row per (department, event_id); the lifecycle dupe collapsed
+        assert con.execute("SELECT COUNT(*) FROM gold_eprocure_event").fetchone()[0] == 4
+        assert con.execute(
+            "SELECT status FROM gold_eprocure_event WHERE event_id = '25-003'"
+        ).fetchall() == [("Event Completed",)]
+        # department match: exact reference name -> BU 2660; unknown name -> NULL
+        assert con.execute(
+            "SELECT DISTINCT business_unit, matched_to_department FROM gold_eprocure_event "
+            "WHERE department_name = 'Department of Transportation'"
+        ).fetchall() == [("2660", 1)]
+        assert con.execute(
+            "SELECT business_unit, matched_to_department FROM gold_eprocure_event "
+            "WHERE department_name = '22nd DAA'"
+        ).fetchall() == [(None, 0)]
+        # live opportunities: only the Posted survivor
+        assert con.execute(
+            "SELECT event_id, bid_close_date, sb_only FROM gold_eprocure_posted_opportunity"
+        ).fetchall() == [("26-001", "2026-08-01", 1)]
+        # demand: per department x bid-close year, set-aside counts are a floor
+        demand = {
+            (r[0], r[1]): r[2:]
+            for r in con.execute(
+                "SELECT department_name, event_year, event_count, sb_only_count, "
+                "dvbe_only_count, set_aside_pct FROM gold_eprocure_event_demand"
+            )
+        }
+        assert demand[("Department of Transportation", 2025)] == (2, 0, 1, 50.0)
+        assert demand[("Department of Transportation", 2026)] == (1, 1, 0, 100.0)
+        assert demand[("22nd DAA", 2025)] == (1, 0, 0, 0.0)
+    finally:
+        con.close()
+
+
+def test_eprocure_pre_events_store_is_tolerated(tmp_path):
+    """A registry-only eprocure.db (no events table, as written before
+    extract-events existed) still builds: registry folds in, event marts empty."""
+    src, wh = tmp_path / "scprs.db", tmp_path / "warehouse.db"
+    epr = tmp_path / "eprocure.db"
+    _seed_source(src)
+    _seed_eprocure(epr, [("100", "Acme, Inc.", "SB", "2025-01-01", "2027-01-31")])
+    warehouse.build_all(
+        wh_path=wh,
+        source_path=src,
+        enrichment_db=tmp_path / "no_enrich.db",
+        cmas_db=tmp_path / "missing_cmas.db",
+        eprocure_db=epr,
+        log=lambda *a: None,
+    )
+    con = sqlite3.connect(wh)
+    try:
+        assert con.execute("SELECT COUNT(*) FROM bronze_eprocure").fetchone()[0] == 1
+        assert con.execute("SELECT COUNT(*) FROM bronze_eprocure_events").fetchone()[0] == 0
+        assert con.execute("SELECT COUNT(*) FROM gold_eprocure_event").fetchone()[0] == 0
+        assert (
+            con.execute("SELECT COUNT(*) FROM gold_eprocure_posted_opportunity").fetchone()[0] == 0
+        )
     finally:
         con.close()
