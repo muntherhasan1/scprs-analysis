@@ -170,6 +170,11 @@ def build_bronze(
     # Cal eProcure SB/DVBE certified-supplier registry (standalone store,
     # src/eprocure.py) — same optional side-input contract as cmas.db.
     counts["bronze_eprocure"] = _ingest_eprocure(con, eprocure_db, batch, ts)
+
+    # Cal eProcure CSCR solicitation events (same store, `extract-events`) —
+    # optional like the registry; a pre-events eprocure.db (no events table)
+    # just yields an empty bronze table.
+    counts["bronze_eprocure_events"] = _ingest_eprocure_events(con, eprocure_db, batch, ts)
     return counts
 
 
@@ -304,6 +309,64 @@ def _ingest_eprocure(con: sqlite3.Connection, eprocure_db: Path, batch: str, ts:
         ph = ", ".join("?" * (len(_EPROCURE_COLUMNS) + 3))
         con.executemany(f"INSERT INTO bronze_eprocure VALUES ({ph})", rows)  # noqa: S608 - fixed arity
     return _count(con, "bronze_eprocure")
+
+
+# eProcure events side input: columns copied 1:1 from eprocure.db's events table
+# (already snake_case; written by src/eprocure.py extract-events). The raw display
+# strings (published_raw/end_raw) and per-slice lineage stay in eprocure.db — the
+# warehouse needs only the parsed facts. No supplier key exists on events, so this
+# table is NOT in _SIDE_INPUT_TABLES; the department name is the only join handle.
+_EPROCURE_EVENT_COLUMNS = {
+    "event_id": "TEXT",
+    "event_name": "TEXT",
+    "department_name": "TEXT",
+    "published_date": "TEXT",
+    "end_date": "TEXT",
+    "status": "TEXT",
+    "sb_only": "INTEGER",
+    "dvbe_only": "INTEGER",
+    "search_status": "TEXT",
+    "search_year": "INTEGER",
+}
+
+
+def _ingest_eprocure_events(con: sqlite3.Connection, eprocure_db: Path, batch: str, ts: str) -> int:
+    """Land CSCR solicitation events into bronze_eprocure_events (own store/connection).
+
+    Grain: one grid row; `(department_name, event_id)` is the business key — bare
+    event ids collide across departments (several agencies issue a "25-007").
+    Posted rows have NULL published_date by source design (the Posted grid carries
+    no Published Date column). `sb_only`/`dvbe_only` are title-derived set-aside
+    flags ("SB ONLY"/"DVBE ONLY" in the event name) — a floor, not a census.
+    Optional: an absent eprocure.db, or a pre-events store without the events
+    table, yields an empty table and the build proceeds unaffected.
+    """
+    con.execute("DROP TABLE IF EXISTS bronze_eprocure_events")
+    defs = ", ".join(f"{c} {t}" for c, t in _EPROCURE_EVENT_COLUMNS.items())
+    con.execute(
+        f"CREATE TABLE bronze_eprocure_events ({defs}, "  # noqa: S608 - column names are internal constants
+        "_batch_id TEXT, _loaded_at TEXT, _source TEXT)"
+    )
+    rows = []
+    if eprocure_db.exists():
+        src = sqlite3.connect(eprocure_db, timeout=30)
+        try:
+            if src.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='events'"
+            ).fetchone():
+                cols = list(_EPROCURE_EVENT_COLUMNS)
+                sel = ", ".join(cols)
+                cur = src.execute(f"SELECT {sel} FROM events")  # noqa: S608 - internal constants
+                rows = [[*r, batch, ts, "eprocure.db"] for r in cur.fetchall()]
+        finally:
+            src.close()
+    if rows:
+        ph = ", ".join("?" * (len(_EPROCURE_EVENT_COLUMNS) + 3))
+        con.executemany(
+            f"INSERT INTO bronze_eprocure_events VALUES ({ph})",  # noqa: S608 - fixed arity
+            rows,
+        )
+    return _count(con, "bronze_eprocure_events")
 
 
 # Side-input bronze tables that carry a supplier_norm join key and receive a
@@ -1077,6 +1140,61 @@ def _build_marts(con):
                    e.certification_types
             FROM e
             JOIN gold_canonical_supplier_spend sp ON sp.canonical_id = e.canonical_id""",
+        # -- eProcure CSCR solicitation events -------------------------------- #
+        # One row per solicitation event; (department_name, event_id) is the key
+        # (bare event ids collide across departments). An event captured both
+        # live (Posted) and completed (Historical) resolves to the completed row
+        # — the same current-state discipline as document versions. business_unit
+        # comes from the FI$Cal department reference by exact name, only where
+        # that name maps to a single BU (NULL for DAAs, superior courts, and
+        # ambiguous reference names like "Transportation").
+        "gold_eprocure_event": """
+            WITH dept AS (
+              SELECT UPPER(TRIM(department_name)) AS dept_norm,
+                     MIN(business_unit) AS business_unit
+              FROM silver_department
+              GROUP BY UPPER(TRIM(department_name))
+              HAVING COUNT(DISTINCT business_unit) = 1),
+            ev AS (
+              SELECT *, ROW_NUMBER() OVER (
+                       PARTITION BY department_name, event_id
+                       ORDER BY CASE WHEN search_status = 'historical' THEN 0 ELSE 1 END,
+                                rowid) AS _rn
+              FROM bronze_eprocure_events)
+            SELECT e.event_id, e.event_name, e.department_name, d.business_unit,
+                   CASE WHEN d.business_unit IS NOT NULL THEN 1 ELSE 0 END
+                        AS matched_to_department,
+                   e.published_date, e.end_date, e.status,
+                   e.sb_only, e.dvbe_only, e.search_status, e.search_year
+            FROM ev e
+            LEFT JOIN dept d ON d.dept_norm = UPPER(TRIM(e.department_name))
+            WHERE e._rn = 1""",
+        # Live procurement opportunities: solicitations open for bid as of the
+        # last events extraction, with the bid close date and SB/DVBE set-aside
+        # flags. published_date is always NULL here by source design (the Posted
+        # grid has no Published Date column).
+        "gold_eprocure_posted_opportunity": """
+            SELECT event_id, event_name, department_name, business_unit,
+                   end_date AS bid_close_date, sb_only, dvbe_only
+            FROM gold_eprocure_event
+            WHERE status = 'Posted'""",
+        # Set-aside demand: each department's solicitation volume per calendar
+        # year (year of bid close) and how much of it is SB-only / DVBE-only set
+        # aside — the demand-side companion to gold_supplier_certification's
+        # supply side. The set-aside flags are title-derived ("SB ONLY" /
+        # "DVBE ONLY" in the event name), so these counts are a floor, not a
+        # census. Coverage: Posted plus the recent Historical years extracted —
+        # not the full archive.
+        "gold_eprocure_event_demand": """
+            SELECT department_name, business_unit,
+                   CAST(strftime('%Y', end_date) AS INTEGER) AS event_year,
+                   COUNT(*) AS event_count,
+                   SUM(sb_only) AS sb_only_count,
+                   SUM(dvbe_only) AS dvbe_only_count,
+                   ROUND(100.0 * (SUM(sb_only) + SUM(dvbe_only)) / COUNT(*), 1)
+                         AS set_aside_pct
+            FROM gold_eprocure_event
+            GROUP BY department_name, business_unit, event_year""",
         # Supplier share of each department's total spend.
         "gold_supplier_share": """
             WITH v AS (
@@ -1427,6 +1545,24 @@ _DQ_CHECKS = [
         "warn",
         "bronze_eprocure (source quality)",
         "SELECT COUNT(*) FROM bronze_eprocure " "WHERE cert_start_date > cert_end_date",
+    ),
+    (
+        # Within one search slice a (department, event id) must be unique; a dupe
+        # means the extractor's pagination re-read a page. Across slices the same
+        # event may legitimately appear Posted and Historical (the mart dedupes).
+        "eprocure_event_grain_unique",
+        "warn",
+        "bronze_eprocure_events (extraction grain)",
+        "SELECT COUNT(*) FROM (SELECT 1 FROM bronze_eprocure_events "
+        "GROUP BY department_name, event_id, search_status, search_year "
+        "HAVING COUNT(*) > 1)",
+    ),
+    (
+        "eprocure_event_has_end_date",
+        "warn",
+        "bronze_eprocure_events (source quality)",
+        "SELECT COUNT(*) FROM bronze_eprocure_events "
+        "WHERE end_date IS NULL OR TRIM(end_date) = ''",
     ),
 ]
 

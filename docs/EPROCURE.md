@@ -93,6 +93,15 @@ normalized name, marts `gold_eprocure_certification` +
 `gold_supplier_certification`. Absent the file, the build is a clean no-op.
 See `docs/WAREHOUSE.md`.
 
+The CSCR events fold is likewise shipped: `bronze_eprocure_events` (grid-row
+grain; raw display strings and slice lineage stay here), deduped to
+`(department_name, event_id)` in `gold_eprocure_event` (completed capture wins
+over live), business unit matched by exact FI$Cal department name where
+unambiguous. Marts: `gold_eprocure_posted_opportunity` (live solicitations +
+bid close dates) and `gold_eprocure_event_demand` (department × year
+solicitation volume with SB-only/DVBE-only set-aside counts). A registry-only
+`eprocure.db` from before `extract-events` still builds cleanly.
+
 ## CSCR events (lean slices)
 
 **Gate verdict (probed 2026-07-24): event details carry NO award/result data.**
@@ -146,8 +155,6 @@ gate covers both tables.
 
 ## Follow-ups (tracked, not in this change)
 
-- **Warehouse fold for events**: expose Posted opportunities + set-aside
-  demand beside the certification marts (`gold_supplier_certification`).
 - **Deep Historical archive (2015+)**: would need fetch-then-mutate publishes
   (compare-and-swap via `parent_commit`) so old slices accumulate instead of
   aging out; deferred until an analysis needs it.

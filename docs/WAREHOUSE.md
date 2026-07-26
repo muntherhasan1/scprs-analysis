@@ -131,6 +131,24 @@ The registry's contact PII and owner-demographic columns deliberately stay in
 `eprocure.db`. Absent the file, the build is a clean no-op. See
 `docs/EPROCURE.md`.
 
+**eProcure CSCR events integration:** the same store's `events` table (CSCR
+solicitations: live Posted + the recent Historical years `extract-events`
+covers) is snapshotted to `bronze_eprocure_events`. Grain: one row per
+`(department_name, event_id)` — bare event ids collide across departments, and
+an event captured both live and completed resolves to the completed row in
+**`gold_eprocure_event`**. Departments match to a `business_unit` by **exact
+FI$Cal reference name** (only where the name maps to a single BU; DAAs and
+superior courts stay NULL — ~2% of events). On top sit
+**`gold_eprocure_posted_opportunity`** (solicitations open for bid as of the
+last extraction, with bid close dates) and **`gold_eprocure_event_demand`**
+(per department × bid-close year: solicitation volume and SB-only/DVBE-only
+set-aside counts — the demand-side companion to
+`gold_supplier_certification`). Caveats the marts carry in their definitions:
+the set-aside flags are title-derived ("SB ONLY"/"DVBE ONLY" in the event
+name), so counts are a floor, not a census; coverage is Posted + recent
+Historical years, not the full archive; Posted rows have no published date by
+source design. A pre-events `eprocure.db` (registry only) still builds cleanly.
+
 ## Contract change capture (history over time)
 The bronze/silver/gold layers are a full-refresh snapshot of *current* state, so on
 their own they can't show how a contract changed. **`dw_document_history`** fixes
