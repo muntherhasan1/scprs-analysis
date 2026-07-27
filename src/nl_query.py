@@ -92,6 +92,15 @@ Rules:
   each acquisition_type/acquisition_sub_type (item-level; use for "what UNSPSC
   codes are under X").
 - Dollar amounts are plain numbers. Use LIMIT for "top N" questions.
+- When the result lists years, months, or dates (spend by fiscal year, monthly
+  totals...), ORDER BY the time column DESC so the most recent period is first.
+- "Small business" / "SB" / "DVBE" / certified-supplier questions -> use
+  gold_supplier_certification (canonical suppliers with certification_types and
+  their SCPRS total_value), NOT the sb_dvbe column on gold_supplier_master (a
+  sparse research note, not the registry).
+- Open solicitations / bids / opportunities -> gold_eprocure_posted_opportunity
+  (currently open Cal eProcure events); all/past solicitations ->
+  gold_eprocure_event. These have no award or dollar data.
 - When filtering by a name or text the user typed, match LOOSELY, not with
   equality: use WHERE UPPER(col) LIKE UPPER('%value%'). Stored names are often
   longer and upper-cased (e.g. the user's "MAXIMUS" is "MAXIMUS HUMAN SERVICES

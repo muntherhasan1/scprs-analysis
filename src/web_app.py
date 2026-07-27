@@ -13,10 +13,11 @@ On a Hugging Face Gradio Space, ``app.py`` calls ``build_demo().launch()``.
 from __future__ import annotations
 
 import os
+import tempfile
 
 import gradio as gr
 
-from . import nl_query, query_log
+from . import charting, nl_query, query_log
 from . import warehouse_query as wq
 
 _INTRO = """# 🏛️ Ask the SCPRS procurement warehouse
@@ -37,17 +38,24 @@ _EXAMPLES = [
 _MAX_TABLE_ROWS = 20
 
 
+def _cell(col: str, v) -> str:
+    """One Markdown table cell: money/percent/count formatting from charting,
+    with the characters that would break a Markdown table neutralised."""
+    return charting._fmt_cell(col, v).replace("|", "&#124;").replace("\n", " ")
+
+
 def _md_table(result: dict) -> str:
-    """Render up to `_MAX_TABLE_ROWS` result rows as a Markdown table."""
+    """Render up to `_MAX_TABLE_ROWS` result rows as a Markdown table — money as
+    $1,234,567.89, year-keyed tables newest-first."""
     cols = result.get("columns") or []
     rows = result.get("rows") or []
     if not cols:
         return ""
+    rows = charting._order_rows(cols, rows)
     head = "| " + " | ".join(str(c) for c in cols) + " |"
     sep = "| " + " | ".join("---" for _ in cols) + " |"
     body = [
-        "| " + " | ".join("" if r.get(c) is None else str(r.get(c)) for c in cols) + " |"
-        for r in rows[:_MAX_TABLE_ROWS]
+        "| " + " | ".join(_cell(c, r.get(c)) for c in cols) + " |" for r in rows[:_MAX_TABLE_ROWS]
     ]
     table = "\n".join([head, sep, *body])
     extra = len(rows) - _MAX_TABLE_ROWS
@@ -58,8 +66,80 @@ def _md_table(result: dict) -> str:
     return table
 
 
-def _respond(message: str, history) -> str:
-    """One chat turn → Markdown answer + collapsible SQL + result table."""
+# A chart accompanies the answer when the question asks for a trend or a
+# distribution, or when the result is plainly a time series. Rankings and plain
+# lookups stay table-only — charting everything is noise.
+_TREND_WORDS = (
+    "trend",
+    "over time",
+    "monthly",
+    "by month",
+    "by year",
+    "per year",
+    "history",
+    "growth",
+    "timeline",
+)
+_DIST_WORDS = (
+    "distribution",
+    "share",
+    "breakdown",
+    "versus",
+    " vs ",
+    " vs?",
+    "proportion",
+    "split",
+    "composition",
+)
+_TIME_COL_HINTS = ("year", "month", "date")
+
+
+def _is_time_col(name: str) -> bool:
+    n = name.lower()
+    return any(h in n for h in _TIME_COL_HINTS)
+
+
+def _maybe_chart_png(question: str, result: dict) -> bytes | None:
+    """Render a PNG for trend/distribution-shaped turns; None when no chart fits."""
+    cols = result.get("columns") or []
+    rows = result.get("rows") or []
+    if len(rows) < 3:
+        return None
+    try:
+        x, y = charting._pick_axes(cols, rows, None, None)
+    except ValueError:
+        return None
+    ql = f" {question.lower()} "
+    temporal = _is_time_col(x)
+    if temporal or any(w in ql for w in _TREND_WORDS):
+        kind = "line"
+    elif any(w in ql for w in _DIST_WORDS):
+        kind = "pie" if len(rows) <= 8 else "bar"
+    else:
+        return None
+    data = rows
+    if temporal:  # charts read left-to-right in time, even when the table is newest-first
+        if all(charting._to_float(r.get(x)) is not None for r in rows):
+            data = sorted(rows, key=lambda r: charting._to_float(r.get(x)))
+        else:
+            data = sorted(rows, key=lambda r: str(r.get(x)))
+    try:
+        return charting.render_chart(
+            cols,
+            data,
+            kind=kind,
+            title=question.strip().rstrip("?")[:70],
+            x=x,
+            y=y,
+            max_points=60 if kind == "line" else 20,
+        )
+    except Exception:  # noqa: BLE001 — a chart is a bonus, never break the answer
+        return None
+
+
+def _respond(message: str, history):
+    """One chat turn → Markdown answer + collapsible SQL + result table, plus a
+    chart message when the question is trend/distribution-shaped."""
     message = (message or "").strip()
     if not message:
         return "Ask me something about the SCPRS procurement data."
@@ -75,9 +155,19 @@ def _respond(message: str, history) -> str:
     parts = [out["answer"]]
     if out.get("sql"):
         parts.append(f"<details><summary>SQL</summary>\n\n```sql\n{out['sql']}\n```\n</details>")
+    png = None
     if out.get("result") and out["result"].get("columns"):
         parts.append(_md_table(out["result"]))
-    return "\n\n".join(p for p in parts if p)
+        png = _maybe_chart_png(message, out["result"])
+    text = "\n\n".join(p for p in parts if p)
+    if png is None:
+        return text
+    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as fh:
+        fh.write(png)
+    return [
+        gr.ChatMessage(content=text),
+        gr.ChatMessage(content=gr.Image(value=fh.name)),
+    ]
 
 
 def build_demo() -> gr.Blocks:

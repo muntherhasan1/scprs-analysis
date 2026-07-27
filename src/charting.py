@@ -165,6 +165,9 @@ def render_chart(
             )
             _style_axes(ax, xgrid=False)
             ax.yaxis.set_major_formatter(FuncFormatter(lambda v, _p: _compact(v)))
+            if len(labels) > 12:  # dense series: thin ticks so labels stay legible
+                step = -(-len(labels) // 12)
+                ax.set_xticks(range(0, len(labels), step))
             for lab in ax.get_xticklabels():
                 lab.set_rotation(30)
                 lab.set_ha("right")
@@ -225,7 +228,7 @@ _COUNTISH = ("count", "documents", "lines", "records", "num", "qty", "quantity",
 # Percent columns (e.g. pct_noncompetitive_value, value_pct_change) share money hint
 # words but are percentages — render them with % rather than $.
 _PCTISH = ("pct", "percent", "share")
-_YEAR_COLS = ("fiscal_year", "calendar_year", "year")
+_YEAR_COLS = ("fiscal_year", "calendar_year", "year", "year_month", "month", "date")
 
 
 def _fmt_cell(col: str, v) -> str:
@@ -248,18 +251,23 @@ def _fmt_cell(col: str, v) -> str:
 
 
 def _order_rows(columns: list[str], rows: list[dict]) -> list[dict]:
-    """Present year-keyed tables newest-first. Only reorders when exactly one year
-    column is a unique key (one row per year) — a time series — so multi-key tables
-    (e.g. supplier×year) keep the query's order and charts (built from the original
-    rows) are unaffected."""
-    year_cols = [c for c in columns if c.lower() in _YEAR_COLS]
-    if len(year_cols) != 1:
+    """Present time-keyed tables newest-first. Only reorders when exactly one
+    year/month/date column is a unique key (one row per period) — a time series —
+    so multi-key tables (e.g. supplier×year) keep the query's order and charts
+    (built from the original rows) are unaffected. Numeric keys (years) sort
+    numerically; string keys ('2025-07', ISO dates) sort lexicographically,
+    which is chronological for those formats."""
+    time_cols = [c for c in columns if c.lower() in _YEAR_COLS]
+    if len(time_cols) != 1:
         return rows
-    yc = year_cols[0]
-    yv = [_to_float(r.get(yc)) for r in rows]
-    if any(v is None for v in yv) or len(set(yv)) != len(yv):
+    tc = time_cols[0]
+    raw = [r.get(tc) for r in rows]
+    if any(v is None for v in raw) or len(set(map(str, raw))) != len(raw):
         return rows
-    return sorted(rows, key=lambda r: _to_float(r.get(yc)) or 0.0, reverse=True)
+    nums = [_to_float(v) for v in raw]
+    if all(v is not None for v in nums):
+        return sorted(rows, key=lambda r: _to_float(r.get(tc)) or 0.0, reverse=True)
+    return sorted(rows, key=lambda r: str(r.get(tc)), reverse=True)
 
 
 def _html_table(columns: list[str], rows: list[dict], max_rows: int = 15) -> str:

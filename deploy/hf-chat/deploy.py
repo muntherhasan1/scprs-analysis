@@ -40,6 +40,7 @@ COPIES = [
     ("requirements-web.txt", "requirements-web.txt"),
     ("app.py", "app.py"),
     ("src/web_app.py", "src/web_app.py"),
+    ("src/charting.py", "src/charting.py"),  # trend/distribution charts in chat answers
     ("src/nl_query.py", "src/nl_query.py"),
     ("src/query_log.py", "src/query_log.py"),
     ("src/warehouse_query.py", "src/warehouse_query.py"),
