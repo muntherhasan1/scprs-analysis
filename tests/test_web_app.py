@@ -1,7 +1,11 @@
 """Presentation behavior of the NL web app: table formatting/ordering and the
 trend/distribution chart heuristic (2026-07-27 demo feedback)."""
 
-from src import web_app
+import pytest
+
+pytest.importorskip("gradio")  # web-image dep (requirements-web.txt), not in CI's set
+
+from src import web_app  # noqa: E402
 
 PNG_MAGIC = b"\x89PNG"
 
