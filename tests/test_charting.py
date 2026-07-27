@@ -95,6 +95,30 @@ def test_html_table_orders_fiscal_year_descending():
     assert table.index("2026") < table.index("2025") < table.index("2024")
 
 
+def test_order_rows_month_strings_newest_first():
+    # A unique year_month string key is a time series too — newest first, and
+    # lexicographic order is chronological for 'YYYY-MM'.
+    cols = ["year_month", "total_spend"]
+    rows = [
+        {"year_month": "2026-01", "total_spend": 1.0},
+        {"year_month": "2025-12", "total_spend": 2.0},
+        {"year_month": "2026-02", "total_spend": 3.0},
+    ]
+    ordered = charting._order_rows(cols, rows)
+    assert [r["year_month"] for r in ordered] == ["2026-02", "2026-01", "2025-12"]
+
+
+def test_render_chart_line_thins_dense_tick_labels():
+    # 36 monthly points must still render (ticks are thinned, not dropped rows).
+    cols = ["year_month", "total_spend"]
+    rows = [
+        {"year_month": f"20{24 + i // 12}-{i % 12 + 1:02d}", "total_spend": float(i)}
+        for i in range(36)
+    ]
+    png = charting.render_chart(cols, rows, kind="line", max_points=60)
+    assert png[:4] == b"\x89PNG"
+
+
 def test_html_table_keeps_order_for_multikey_year_tables():
     # fiscal_year repeats (supplier×year) → not a unique key → query order kept.
     cols = ["fiscal_year", "supplier", "total_spend"]

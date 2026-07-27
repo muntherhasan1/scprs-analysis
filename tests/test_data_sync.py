@@ -461,9 +461,21 @@ def test_fetch_operational_cli(tmp_path, monkeypatch):
         return True
 
     monkeypatch.setattr(data_sync, "fetch_operational_db", recorder)
-    # The CLI also best-effort fetches the optional side inputs — stub them offline.
-    monkeypatch.setattr(data_sync, "fetch_supplier_db", lambda dest, repo=None: False)
-    monkeypatch.setattr(data_sync, "fetch_cmas_db", lambda dest, repo=None: False)
+    # The CLI also best-effort fetches the optional side inputs — stub them offline
+    # and record which were attempted (a missing one means empty marts in CI, the
+    # 2026-07-27 eprocure gap).
+    side_inputs = set()
+
+    def side_stub(name):
+        def stub(dest, repo=None):
+            side_inputs.add(name)
+            return False
+
+        return stub
+
+    monkeypatch.setattr(data_sync, "fetch_supplier_db", side_stub("supplier"))
+    monkeypatch.setattr(data_sync, "fetch_cmas_db", side_stub("cmas"))
+    monkeypatch.setattr(data_sync, "fetch_eprocure_db", side_stub("eprocure"))
     dest = tmp_path / "scprs.db"
     monkeypatch.setattr(
         sys,
@@ -473,6 +485,7 @@ def test_fetch_operational_cli(tmp_path, monkeypatch):
     data_sync._cli()
     assert captured["repo"] == "acme/op"
     assert captured["dest"] == str(dest)
+    assert side_inputs == {"supplier", "cmas", "eprocure"}
 
 
 def test_fetch_cmas_db_noop_without_dataset(tmp_path, monkeypatch):

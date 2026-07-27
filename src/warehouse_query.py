@@ -75,6 +75,25 @@ MART_DESCRIPTIONS: dict[str, str] = {
         "Prefer over per-supplier_id marts, which double-count split vendors."
     ),
     "gold_supplier_master": "One row per canonical vendor (id/name crosswalk); deduped rollups.",
+    "gold_eprocure_posted_opportunity": (
+        "Solicitations currently OPEN for bidding on Cal eProcure (live Posted events) — "
+        "THE mart for 'what's open for bid / current solicitations / opportunities'."
+    ),
+    "gold_eprocure_event": (
+        "All Cal eProcure solicitation events, posted + historical, one row per "
+        "(department, event). No award/winner data — for spend use gold_document."
+    ),
+    "gold_supplier_certification": (
+        "SB/DVBE certification (Cal eProcure registry) per canonical supplier, with their "
+        "SCPRS document_count/total_value — THE mart for 'spend with small-business or "
+        "DVBE certified suppliers'. Do NOT use gold_supplier_master.sb_dvbe (sparse "
+        "web-research notes, not the registry)."
+    ),
+    "gold_contract_amendments": (
+        "Contract growth via amendments, derived from captured version history — covers "
+        "only documents re-drilled at 2+ versions (sparse; deepest for BU 8660). Caveat "
+        "coverage when ranking 'contracts that grew the most'."
+    ),
 }
 
 

@@ -453,7 +453,8 @@ def _cli() -> None:
 
     fop = sub.add_parser(
         "fetch-operational",
-        help="Download scprs.db (and the supplier side input, if published) from its dataset",
+        help="Download scprs.db (and the supplier/CMAS/eProcure side inputs, if published) "
+        "from its dataset",
     )
     fop.add_argument("--dataset", default=os.environ.get("SCPRS_DATASET"))
     fop.add_argument("--dest", default=str(model.DB_PATH))
@@ -524,6 +525,7 @@ def _cli() -> None:
         for label, path, fetch in (
             (SUPPLIER_FILENAME, warehouse.ENRICHMENT_DB, fetch_supplier_db),
             (CMAS_FILENAME, warehouse.CMAS_DB, fetch_cmas_db),
+            (EPROCURE_FILENAME, warehouse.EPROCURE_DB, fetch_eprocure_db),
         ):
             if fetch(path, repo=args.dataset):
                 print(f"Fetched {label} <- {args.dataset}")
