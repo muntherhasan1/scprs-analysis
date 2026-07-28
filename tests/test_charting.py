@@ -74,6 +74,8 @@ def test_fmt_cell_money_years_and_ids():
     # Years and ids: raw digits, no grouping / decimals.
     assert charting._fmt_cell("fiscal_year", 2026) == "2026"
     assert charting._fmt_cell("supplier_id", 12345.0) == "12345"
+    # Business-unit codes are identifiers, never 3,340-style grouped numbers.
+    assert charting._fmt_cell("business_unit", 3340) == "3340"
     # Count-like column that shares a hint word stays a plain grouped integer.
     assert charting._fmt_cell("total_documents", 1500) == "1,500"
     # Percent columns share money hints ("value") but must render as % not $.
