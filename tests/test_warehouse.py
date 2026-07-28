@@ -339,6 +339,32 @@ def test_export_mart_csvs_from_serve_db(tmp_path):
     assert counts["department_fiscal_year_spend"] > 0
 
 
+def test_export_star_parquet_is_join_ready(tmp_path):
+    """The star exports carry the shared surrogate keys BI relationships bind on
+    — a renamed key breaks here, not in a Power BI refresh."""
+    import pandas as pd
+
+    src, wh = tmp_path / "scprs.db", tmp_path / "warehouse.db"
+    serve = tmp_path / "warehouse-serve.db"
+    _seed_source(src)
+    warehouse.build_all(
+        wh_path=wh, source_path=src, enrichment_db=tmp_path / "no_enrich.db", log=lambda *a: None
+    )
+    warehouse.export_serve_db(wh_path=wh, serve_path=serve, log=lambda *a: None)
+    star_dir = tmp_path / "star"
+    counts = warehouse.export_star_parquet(serve_path=serve, star_dir=star_dir, log=lambda *a: None)
+    assert set(counts) == {v.removeprefix("lv_") for v in warehouse._STAR_EXPORTS}
+    fact = pd.read_parquet(star_dir / "fact_document.parquet")
+    sup = pd.read_parquet(star_dir / "dim_supplier.parquet")
+    dates = pd.read_parquet(star_dir / "dim_date.parquet")
+    # Friendly (un-abbreviated) shared keys, and every fact key resolves.
+    assert "supplier_key" in fact.columns and "supplier_key" in sup.columns
+    assert "grand_total" in fact.columns  # measures keep logical names too
+    assert fact["supplier_key"].isin(sup["supplier_key"]).all()
+    assert fact["start_date_key"].isin(dates["date_key"]).all()
+    assert counts["fact_document"] == len(fact) > 0
+
+
 def test_contract_change_capture(tmp_path):
     """Append-only history records amendments; the change-log derives the transition."""
     src, wh = tmp_path / "scprs.db", tmp_path / "warehouse.db"
