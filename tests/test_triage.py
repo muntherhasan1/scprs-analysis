@@ -26,6 +26,12 @@ def test_report_deploy_verify_names_the_packaging_gap():
     assert "COPIES" in r["body"] and "requirements-mcp.txt" in r["body"]
 
 
+def test_report_covers_ground_truth_recon():
+    r = triage.build_report("Ground-truth recon", ["Probe the live site"], "https://run/15")
+    # the repair path is the load-bearing hint.
+    assert "Summary build" in r["body"] and "SETTLED month" in r["body"]
+
+
 def test_report_covers_summary_build():
     r = triage.build_report(
         "Summary build", ["Build summaries (per-unit shrink gate)"], "https://run/13"

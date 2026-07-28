@@ -21,6 +21,24 @@ stale serving, zero alerts) and the audit that followed (issues #43–#56).
 5. Verify serving with `python -m src.golive_check` (never the local stdio MCP
    tools — those hit the local DB, not the Space).
 
+## Change-impact checklist (run BEFORE any change to data volume, cadence, or surfaces)
+
+Born 2026-07-28: a 5x data expansion doubled build times and nobody's plan
+mentioned it. Answer these five in the plan, in writing:
+
+1. **Capacity** — what happens to build/scrape/publish DURATION and does it
+   still fit inside every `timeout-minutes` it runs under (check the build
+   timings trend in recent enrich step summaries)?
+2. **Storage/cost** — what grows (HF LFS revisions, dataset size, runner
+   minutes) and at what rate?
+3. **Consumers** — which downstream surfaces bind to what this changes
+   (MCP/NL schema, mart CSV columns, star parquet keys, Copilot, dashboards)?
+   Column names in the BI feed are a public contract.
+4. **Alarms** — which existing monitor covers the new failure/erosion mode;
+   if none, add one IN THE SAME CHANGE (report-only is fine).
+5. **Rollback** — how does this un-ship if wrong (and does the shrink-gate /
+   upload-on-success contract already cover it)?
+
 ## Invariants for ANY workflow change
 
 - **Upload-on-success**: gates run before publishes; a blocked publish leaves
@@ -45,6 +63,14 @@ stale serving, zero alerts) and the audit that followed (issues #43–#56).
 - Workflow inputs pass via `env:`, never inline `${{ }}` in bash.
 
 ## Alerting stack (who watches what)
+
+- **recon.yml** (weekly, Wed): ground truth — samples (BU, month) windows and
+  compares the store against the LIVE site; the only check that catches
+  silently-lost data (all others are internal-consistency).
+- **backup.yml** (weekly, Sun): cold-copies scprs.db to the backup dataset;
+  fails loudly until `HF_BACKUP_TOKEN` exists.
+- **query-review.yml** (weekly, Mon): replays logged user questions; content
+  regressions become issues.
 
 - **triage.yml**: failed/cancelled main-branch runs → idempotent issue,
   auto-closes on recovery.
