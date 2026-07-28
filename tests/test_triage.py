@@ -26,6 +26,14 @@ def test_report_deploy_verify_names_the_packaging_gap():
     assert "COPIES" in r["body"] and "requirements-mcp.txt" in r["body"]
 
 
+def test_report_covers_query_review():
+    r = triage.build_report("Query review", ["Replay logged questions"], "https://run/11")
+    # infra vs content regression is the load-bearing distinction.
+    assert "GEMINI_API_KEY" in r["body"] and "content regression" in r["body"]
+    r = triage.build_report("Query review", ["Set up job"], "https://run/12")
+    assert "Read-only job" in r["body"]  # the _default frames it
+
+
 def test_report_falls_back_to_default_when_no_step_matches():
     r = triage.build_report("CMAS refresh (Wave 2)", ["Set up job"], "https://run/3")
     # no specific hint for "Set up job" -> the workflow's _default frames it.

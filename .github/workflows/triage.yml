@@ -14,6 +14,7 @@ on:
       - "Deploy MCP Space"
       - "MCP image"
       - "CI"
+      - "Query review"
     types: [completed]
 
 permissions:

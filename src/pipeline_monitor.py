@@ -20,9 +20,9 @@ import argparse
 import os
 from datetime import datetime, timezone
 
-# The serve dataset publishes on every successful enrich run (every 6h), so a
-# healthy pipeline commits at least 4x/day. 14h = two missed slots + runtime.
-DEFAULT_MAX_HOURS = 14.0
+# The serve dataset publishes on every successful enrich run (every 3h), so a
+# healthy pipeline commits at least 8x/day. 8h = two missed slots + runtime.
+DEFAULT_MAX_HOURS = 8.0
 DEFAULT_DATASET = "munther-hasan/scprs-warehouse-data"
 
 

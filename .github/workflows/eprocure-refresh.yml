@@ -10,9 +10,9 @@ name: eProcure registry refresh
 # to write an export/slice that falls short of the site's own result banner.
 on:
   schedule:
-    # Weekly — certifications churn slowly. Offset from the enrich cron slots
-    # (17 past 02/08/14/20) and the CMAS cron (06:37) so the shared writer
-    # lock rarely queues.
+    # Weekly — certifications churn slowly. Enrich now runs every 3h (17 */3);
+    # 04:53 trails the 03:17 slot's worst case (~04:47) and may briefly queue
+    # on the shared writer lock — safe by design (queue, never cancel).
     - cron: "53 4 * * 2"
   workflow_dispatch:
 

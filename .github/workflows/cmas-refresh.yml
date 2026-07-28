@@ -8,8 +8,9 @@ name: CMAS refresh (Wave 2)
 # blocked/failed run (e.g. cloud IPs refused) never overwrites good data.
 on:
   schedule:
-    # Daily — CMAS agreements change slowly. Offset from the enrich cron slots
-    # (17 past 02/08/14/20) so the two rarely queue on the shared writer lock.
+    # Daily — CMAS agreements change slowly. Enrich now runs every 3h (17 */3),
+    # so 06:37 trails the 06:17 slot and may QUEUE up to ~90 min on the shared
+    # writer lock — safe by design (queue, never cancel), just occasionally slow.
     - cron: "37 6 * * *"
   workflow_dispatch:
 

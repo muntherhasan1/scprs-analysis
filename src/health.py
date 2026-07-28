@@ -14,7 +14,7 @@ checks: an `error` finding exits non-zero so a scheduled CI job can alert on it.
 
     python -m src.health                 # human report; exit 1 on any error finding
     python -m src.health --json          # machine-readable, for a workflow to parse
-    python -m src.health --stale-hours 72 --min-coverage 0.25
+    python -m src.health --stale-hours 72 --unit-stale-hours 240 --min-coverage 0.25
 
 It intentionally does no network I/O and no writes, so it is fast, deterministic,
 and safe to run anywhere (locally, in CI, against a copy).
@@ -31,9 +31,15 @@ from pathlib import Path
 
 from .model import DB_PATH
 
-# Defaults chosen for the daily cadence: the enrich job runs once a day, so a unit
-# that still has work to do but hasn't advanced in two days is a real red flag.
+# Two thresholds, two failure shapes. The GLOBAL check (pipeline_idle) catches a
+# dead scheduler: with the enrich cron advancing SOME unit every few hours, two
+# silent days is a real red flag. The PER-UNIT check (enrichment_stalled) must
+# instead respect the rotation: each run advances the single most-stale unit, so
+# with ~20+ units carrying pending work a healthy unit legitimately waits days
+# between picks — 7 days (~2x the observed rotation period) means it stopped
+# being picked at all, not that it is waiting its turn.
 DEFAULT_STALE_HOURS = 48.0
+DEFAULT_UNIT_STALE_HOURS = 168.0
 DEFAULT_MIN_COVERAGE = 0.10  # 10% — a rollout floor; raise as coverage matures.
 
 
@@ -108,6 +114,7 @@ def evaluate(
     con: sqlite3.Connection,
     *,
     stale_hours: float = DEFAULT_STALE_HOURS,
+    unit_stale_hours: float = DEFAULT_UNIT_STALE_HOURS,
     min_coverage: float = DEFAULT_MIN_COVERAGE,
     now: datetime | None = None,
 ) -> list[Finding]:
@@ -115,8 +122,10 @@ def evaluate(
 
     The checks, and why each exists:
       * enrichment_stalled (error) — a unit that has been enriched before and still
-        has pending days, but hasn't advanced within `stale_hours`. This is the
-        exact shape of the silent daily-job failure.
+        has pending days, but hasn't advanced within `unit_stale_hours` (the
+        LONGER per-unit threshold: the one-unit-per-run rotation means a healthy
+        unit waits days between picks). This is the exact shape of the silent
+        daily-job failure.
       * pipeline_idle (error) — belt-and-suspenders: *nothing anywhere* has been
         recorded within `stale_hours` while pending work exists. Catches a fully
         dead scheduler even if per-unit logic is fooled.
@@ -158,13 +167,13 @@ def evaluate(
     for u in units:
         if u.pending_days > 0 and u.enriched_days > 0 and u.last_enriched is not None:
             idle_h = (now - u.last_enriched).total_seconds() / 3600
-            if idle_h > stale_hours:
+            if idle_h > unit_stale_hours:
                 findings.append(
                     Finding(
                         "enrichment_stalled",
                         "error",
                         u.business_unit,
-                        f"Last advanced {idle_h:.0f}h ago (threshold {stale_hours:.0f}h); "
+                        f"Last advanced {idle_h:.0f}h ago (threshold {unit_stale_hours:.0f}h); "
                         f"{u.pending_days} of {u.summary_days} day(s) still pending.",
                     )
                 )
@@ -234,6 +243,7 @@ def _print_report(findings: list[Finding]) -> None:
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="SCPRS operational-store health & freshness checks.")
     ap.add_argument("--stale-hours", type=float, default=DEFAULT_STALE_HOURS)
+    ap.add_argument("--unit-stale-hours", type=float, default=DEFAULT_UNIT_STALE_HOURS)
     ap.add_argument("--min-coverage", type=float, default=DEFAULT_MIN_COVERAGE)
     ap.add_argument("--db", type=Path, default=DB_PATH, help="Path to scprs.db")
     ap.add_argument("--json", action="store_true", help="Emit findings as JSON")
@@ -270,7 +280,12 @@ def main(argv: list[str] | None = None) -> int:
     # Read-only: never let a health check mutate the store it inspects.
     con = sqlite3.connect(f"file:{args.db}?mode=ro", uri=True)
     try:
-        findings = evaluate(con, stale_hours=args.stale_hours, min_coverage=args.min_coverage)
+        findings = evaluate(
+            con,
+            stale_hours=args.stale_hours,
+            unit_stale_hours=args.unit_stale_hours,
+            min_coverage=args.min_coverage,
+        )
     finally:
         con.close()
 

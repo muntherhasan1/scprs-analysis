@@ -136,6 +136,24 @@ _HINTS: dict[str, dict[str, str]] = {
             "incident). Verify the shipped boot chain imports cleanly."
         ),
     },
+    "Query review": {
+        "_default": (
+            "The weekly query-review replay failed. Read-only job — nothing was "
+            "published and nothing needs rolling back; the next weekly run retries "
+            "the same window."
+        ),
+        "Fetch serve DB": (
+            "The serve-DB download failed — check `HF_WAREHOUSE_TOKEN` and the "
+            "serve dataset (same fetch path the Spaces use at boot)."
+        ),
+        "Replay logged questions": (
+            "rc>=2 means the reviewer's own plumbing broke: `GEMINI_API_KEY` "
+            "missing/exhausted or `HF_QUERY_LOG_READ_TOKEN` lacking read on the "
+            "query-log dataset. rc=1 means REAL user questions error on replay — "
+            "a content regression: read the review issue, then strengthen "
+            "`nl_query._GUIDE` / `MART_DESCRIPTIONS` and redeploy the Spaces."
+        ),
+    },
 }
 
 

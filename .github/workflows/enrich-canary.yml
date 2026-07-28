@@ -12,9 +12,12 @@ name: Enrich (Wave 2)
 # still accept explicit inputs and default to a small 8660 canary slice.
 on:
   schedule:
-    # Every 6 hours, offset from the top of the hour. 4 runs/day x limit 50
-    # ≈ 200 day-slices/day, matching the manual enrichment-pass cadence.
-    - cron: "17 2,8,14,20 * * *"
+    # Every 3 hours, offset from the top of the hour. 8 runs/day x limit 50
+    # ≈ 400 day-slices/day. Safe at this density: the 90-min timeout-minutes
+    # backstop is well under the 180-min slot gap, and the
+    # scprs-operational-writer concurrency group QUEUES (never cancels) any
+    # overlap, so back-to-back slots serialize rather than collide.
+    - cron: "17 */3 * * *"
   workflow_dispatch:
     inputs:
       business_unit:
@@ -266,7 +269,7 @@ jobs:
       # verifiably serving a different snapshot (positive evidence). rc=2
       # (timeout / unreachable) proves nothing about the data: the run fails
       # loudly but leaves the publish alone — the old on-any-failure trigger
-      # would have rolled back good data every 6h on a mere token rotation.
+      # would have rolled back good data every 3h on a mere token rotation.
       - name: Roll back serve DB on verified mismatch
         if: ${{ always() && steps.golive.outputs.rc == '1' }}
         env:

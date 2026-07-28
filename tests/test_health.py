@@ -59,14 +59,14 @@ def _by_check(findings):
 
 
 def test_stalled_unit_is_an_error(tmp_path):
-    """A unit enriched before but stale for >stale_hours while days remain."""
+    """A unit enriched before but stale for >unit_stale_hours while days remain."""
     db = tmp_path / "scprs.db"
     _seed(db)
     _add_summary(db, "8660", ["2026-01-01", "2026-01-02", "2026-01-03"])
     # One day done 3 days ago; two still pending -> stalled.
     _mark_done(db, "8660", ["2026-01-01"], NOW - timedelta(hours=72))
 
-    findings = _evaluate(db, stale_hours=48)
+    findings = _evaluate(db, stale_hours=48, unit_stale_hours=48)
     checks = _by_check(findings)
     assert "enrichment_stalled" in checks
     stalled = checks["enrichment_stalled"][0]
@@ -80,8 +80,38 @@ def test_recently_advanced_unit_is_not_stalled(tmp_path):
     _add_summary(db, "8660", ["2026-01-01", "2026-01-02", "2026-01-03"])
     _mark_done(db, "8660", ["2026-01-01"], NOW - timedelta(hours=6))
 
-    findings = _evaluate(db, stale_hours=48)
+    findings = _evaluate(db, stale_hours=48, unit_stale_hours=48)
     assert "enrichment_stalled" not in _by_check(findings)
+
+
+def test_unit_waiting_for_rotation_is_not_stalled(tmp_path):
+    """The noise fix: one-unit-per-run rotation means a unit idle for days is
+    normal while ANY unit advances. Under the split defaults (48h global /
+    168h per-unit) a 100h-idle unit with a fresh sibling raises nothing."""
+    db = tmp_path / "scprs.db"
+    _seed(db)
+    _add_summary(db, "2660", ["2026-01-01", "2026-01-02"])
+    _mark_done(db, "2660", ["2026-01-01"], NOW - timedelta(hours=100))
+    _add_summary(db, "8660", ["2026-01-01", "2026-01-02"])
+    _mark_done(db, "8660", ["2026-01-01"], NOW - timedelta(hours=6))
+
+    findings = _evaluate(db)  # library defaults — the shipped behavior
+    assert not [f for f in findings if f.severity == "error"]
+
+
+def test_unit_stalled_past_unit_threshold_is_error(tmp_path):
+    """Past the per-unit threshold the alarm still fires — scoped to that unit,
+    with the global check quiet because a sibling is advancing."""
+    db = tmp_path / "scprs.db"
+    _seed(db)
+    _add_summary(db, "2660", ["2026-01-01", "2026-01-02"])
+    _mark_done(db, "2660", ["2026-01-01"], NOW - timedelta(hours=200))
+    _add_summary(db, "8660", ["2026-01-01", "2026-01-02"])
+    _mark_done(db, "8660", ["2026-01-01"], NOW - timedelta(hours=6))
+
+    checks = _by_check(_evaluate(db))
+    assert "pipeline_idle" not in checks
+    assert [f.scope for f in checks["enrichment_stalled"]] == ["2660"]
 
 
 def test_fully_covered_unit_has_no_error(tmp_path):
@@ -205,3 +235,20 @@ def test_main_exits_nonzero_on_error(tmp_path):
     _mark_done(db, "8660", ["2026-01-01"], datetime(2026, 1, 1, tzinfo=timezone.utc))
 
     assert health.main(["--db", str(db), "--json"]) == 1
+
+
+def test_main_accepts_unit_stale_hours_flag(tmp_path, capsys):
+    """--unit-stale-hours reaches evaluate(): a unit idle a few hours trips a
+    1h per-unit threshold. main() uses the real clock, so timestamps are seeded
+    relative to now — the sibling done minutes ago keeps the global check quiet."""
+    db = tmp_path / "scprs.db"
+    _seed(db)
+    real_now = datetime.now(timezone.utc)
+    _add_summary(db, "2660", ["2026-01-01", "2026-01-02"])
+    _mark_done(db, "2660", ["2026-01-01"], real_now - timedelta(hours=3))
+    _add_summary(db, "8660", ["2026-01-01", "2026-01-02"])
+    _mark_done(db, "8660", ["2026-01-01"], real_now - timedelta(minutes=10))
+
+    assert health.main(["--db", str(db), "--json", "--unit-stale-hours", "1"]) == 1
+    out = capsys.readouterr().out
+    assert '"enrichment_stalled"' in out and '"2660"' in out

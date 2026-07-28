@@ -1,0 +1,136 @@
+name: Query review
+
+# Weekly replay of real user questions (the private query-log dataset) through
+# the app's NL->SQL path against a freshly fetched serve DB. Errors, empties,
+# NO_QUERY declines, and wrong-mart smells become a step summary + an
+# idempotent issue — the loop that caught the 2026-07-27 SB/DVBE wrong-answer
+# by hand, made scheduled. Read-only: fetches the serve DB, publishes nothing,
+# so it needs no writer lock and nothing here can corrupt data.
+on:
+  schedule:
+    # Weekly, Monday 05:41 UTC — clear of the enrich slots (17 */3), the
+    # eProcure cron (Tue 04:53) and CMAS (06:37). Being read-only it wouldn't
+    # contend anyway; the offset just keeps runner noise apart.
+    - cron: "41 5 * * 1"
+  workflow_dispatch:
+    inputs:
+      limit:
+        description: Max unique questions to replay (LLM budget)
+        default: "150"
+      since_days:
+        description: Look-back window in days (0 = all history)
+        default: "8"
+
+permissions:
+  contents: read
+  issues: write # open/comment/close the review issue
+
+concurrency:
+  group: query-review
+  cancel-in-progress: true # read-only job; a superseded run has no value
+
+env:
+  REVIEW_LABEL: query-review
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    # Basis: serve-DB fetch ~2 min + <=150 questions at free-tier Gemini rates
+    # (2 calls/question incl. nl_query's 429 backoff) ≈ 15 min; 2x headroom.
+    timeout-minutes: 30
+    env:
+      PYTHONUNBUFFERED: "1" # a killed run must still show how far it got
+      QUERY_LOG_DATASET: munther-hasan/scprs-query-log
+      WAREHOUSE_DATASET: munther-hasan/scprs-warehouse-data
+      # Point the query guard at the fetched serve DB (gold + star only — all
+      # nl_query ever touches); no warehouse build needed.
+      WAREHOUSE_DB: data/warehouse-serve.db
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        # httpx (nl_query's Gemini client) lives in requirements-web.txt with
+        # gradio; install it alone — this job needs no UI.
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt "httpx>=0.28.1"
+
+      - name: Fetch serve DB
+        env:
+          HF_TOKEN: ${{ secrets.HF_WAREHOUSE_TOKEN }} # RW on the serve dataset => read works
+        run: python -m src.data_sync fetch-serve
+
+      - name: Replay logged questions
+        id: replay
+        env:
+          HF_TOKEN: ${{ secrets.HF_QUERY_LOG_READ_TOKEN }} # read on the query-log dataset
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          LIMIT: ${{ inputs.limit }}
+          SINCE_DAYS: ${{ inputs.since_days }}
+        run: |
+          set +e
+          python -m src.query_review --limit "${LIMIT:-150}" \
+            --since-days "${SINCE_DAYS:-8}" --report review.md
+          rc=$?
+          set -e
+          if [ "$rc" -ge 2 ]; then
+            echo "::error::query review itself failed (rc=$rc) — check tokens / GEMINI_API_KEY"
+            exit "$rc"
+          fi
+          cat review.md >> "$GITHUB_STEP_SUMMARY"
+          echo "errors=$rc" >> "$GITHUB_OUTPUT"
+          if grep -q "No findings" review.md; then
+            echo "clean=1" >> "$GITHUB_OUTPUT"
+          else
+            echo "clean=0" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Ensure review label exists
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh label create "$REVIEW_LABEL" -c 1D76DB \
+            -d "Weekly query-review findings" 2>/dev/null || true
+
+      - name: File findings issue
+        if: steps.replay.outputs.clean == '0'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          body="$(cat review.md)"$'\n\n'"Fix loop: strengthen nl_query._GUIDE / MART_DESCRIPTIONS in src/warehouse_query.py for anything the model got wrong, then redeploy the Spaces."$'\n\n'"Run: $RUN_URL"
+          existing=$(gh issue list --label "$REVIEW_LABEL" --state open \
+            --json number --jq '.[0].number')
+          if [ -n "$existing" ]; then
+            echo "Commenting on existing review issue #$existing"
+            gh issue comment "$existing" --body "$body"
+          else
+            gh issue create --title "🔎 Query review: logged questions need attention" \
+              --label "$REVIEW_LABEL" --body "$body"
+          fi
+
+      - name: Resolve on clean pass
+        if: steps.replay.outputs.clean == '1'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          for n in $(gh issue list --label "$REVIEW_LABEL" --state open \
+            --json number --jq '.[].number'); do
+            echo "Resolving review issue #$n"
+            gh issue close "$n" \
+              --comment "✅ Clean weekly replay — every logged question answers without findings. Run: $RUN_URL"
+          done
+
+      - name: Fail on replay errors
+        if: steps.replay.outputs.errors == '1'
+        run: |
+          echo "::error::real user questions are ERRORING on replay — see the review issue"
+          exit 1

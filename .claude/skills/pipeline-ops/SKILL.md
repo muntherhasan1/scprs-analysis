@@ -49,11 +49,12 @@ stale serving, zero alerts) and the audit that followed (issues #43–#56).
 - **triage.yml**: failed/cancelled main-branch runs → idempotent issue,
   auto-closes on recovery.
 - **pipeline-monitor.yml** (6h): watches from OUTSIDE — last successful enrich
-  age + serve-dataset commit age (14h thresholds) + cron keep-alive (GitHub
-  disables schedules after 60 idle days).
+  age + serve-dataset commit age (8h thresholds; enrich runs every 3h) + cron
+  keep-alive (GitHub disables schedules after 60 idle days).
 - **healthchecks.io dead-man's switch** (`HEALTHCHECK_PING_URL`): the one alarm
   outside GitHub — pinged by healthy enrich runs and clean monitor passes;
-  silence ≈14h pages by email even if GitHub's schedulers are the thing that died.
+  grace ≈14h pages by email even if GitHub's schedulers are the thing that died
+  (can be tightened to ~8h in the healthchecks.io UI now that pings are 3-hourly).
 
 ## Tokens (least privilege, 4-token model)
 
