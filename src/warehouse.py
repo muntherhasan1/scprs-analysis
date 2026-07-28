@@ -1564,6 +1564,21 @@ _DQ_CHECKS = [
         "SELECT COUNT(*) FROM bronze_eprocure_events "
         "WHERE end_date IS NULL OR TRIM(end_date) = ''",
     ),
+    (
+        # Crosswalk decay watch: the curated supplier_master.csv unifies KNOWN
+        # duplicate registrations, but every newly scraped department brings new
+        # ones. A name spanning 2+ supplier_ids that still maps to 2+ canonical
+        # ids is an uncurated duplicate — canonical rollups double-count it.
+        # Warn tier: the count TRENDING UP after an expansion is the signal to
+        # extend references/supplier_master.csv.
+        "canonical_crosswalk_gaps",
+        "warn",
+        "dim_supplier (uncurated duplicate names)",
+        "SELECT COUNT(*) FROM (SELECT UPPER(TRIM(supplier_name)) AS nm FROM dim_supplier "
+        "WHERE supplier_name IS NOT NULL AND TRIM(supplier_name) != '' "
+        "GROUP BY nm HAVING COUNT(DISTINCT supplier_id) > 1 "
+        "AND COUNT(DISTINCT canonical_id) > 1)",
+    ),
 ]
 
 
