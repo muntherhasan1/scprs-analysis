@@ -114,9 +114,14 @@ def check_window(
     tolerance_pct: float = DEFAULT_TOLERANCE_PCT,
     settle_days: int = DEFAULT_SETTLE_DAYS,
     today: datetime.date | None = None,
-    site_count_fn=_site_count,
+    site_count_fn=None,
 ) -> Finding:
-    """Reconcile one (bu, month) window: live site vs store."""
+    """Reconcile one (bu, month) window: live site vs store.
+
+    ``site_count_fn`` resolves LATE (module lookup at call time, not a bound
+    default) so tests can monkeypatch ``_site_count`` — a def-time default
+    silently kept the real scraper and hit the live site from the test suite."""
+    site_count_fn = site_count_fn or _site_count
     today = today or datetime.date.today()
     from_date, to_date, iso_first, iso_last = _month_bounds(year, month)
     scope = f"{bu} {year}-{month:02d}"
@@ -156,9 +161,10 @@ def run(
     samples: int = DEFAULT_SAMPLES,
     seed: int | None = None,
     targeted: tuple[str, int, int] | None = None,
-    site_count_fn=_site_count,
+    site_count_fn=None,
     log=print,
 ) -> list[Finding]:
+    site_count_fn = site_count_fn or _site_count
     con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
     try:
         windows = [targeted] if targeted else pick_windows(con, samples, seed=seed)
