@@ -136,6 +136,24 @@ _HINTS: dict[str, dict[str, str]] = {
             "incident). Verify the shipped boot chain imports cleanly."
         ),
     },
+    "Summary build": {
+        "_default": (
+            "A dataset-expansion summary build failed. Upload-on-success: the "
+            "published scprs.db is untouched — re-dispatch the same unit(s) when "
+            "the cause is fixed."
+        ),
+        "Build summaries": (
+            "Either the scrape failed (SCPRS throttling Actions IPs, or a page "
+            "change — see src/scprs.py quirks) or a unit's **shrink gate** tripped: "
+            "`model build` REPLACES a unit's rows, and the dispatched window held "
+            "fewer rows than the store already had. Re-dispatch with the unit's "
+            "FULL history window (check `model info` for its current first/last)."
+        ),
+        "Publish scprs.db": (
+            "The operational publish failed — check `HF_SCPRS_TOKEN` scope or a "
+            "CAS parent-commit conflict with a concurrent writer."
+        ),
+    },
     "Query review": {
         "_default": (
             "The weekly query-review replay failed. Read-only job — nothing was "

@@ -1,0 +1,107 @@
+name: Summary build
+
+# Dataset expansion: scrape the SCPRS summary for one or more business units
+# and publish the grown scprs.db. Dispatch-only — expansion is a deliberate,
+# staggered act (Track A: deepen the loaded units to the full priority window;
+# Track B: onboard new departments a few at a time so never-enriched units
+# don't monopolize the enrichment picker).
+#
+# CRITICAL SEMANTICS: `model build` DELETES the unit's entire summary and
+# replaces it with the scraped window (model.build_db). Always dispatch the
+# FULL history you want a unit to have — never a partial top-up window. The
+# per-unit shrink gate below blocks the publish if a build would lose rows
+# (e.g. running 8660 with the 2021+ default would drop its 2016-2021 history).
+on:
+  workflow_dispatch:
+    inputs:
+      business_units:
+        description: Comma-separated BU codes (e.g. "5180,0820"); 3-4 mid-size units per run
+        required: true
+      from_date:
+        description: Window start (MM/DD/YYYY) — the unit's FULL desired history
+        default: "07/01/2021"
+      to_date:
+        description: Window end (MM/DD/YYYY)
+        default: "06/30/2028"
+
+permissions:
+  contents: read
+
+# Single-writer guarantee shared with the enrich/CMAS/eProcure crons: only one
+# run may mutate scprs.db at a time; queue, never cancel. NOTE GitHub keeps at
+# most ONE pending run per group — dispatch batches sequentially, not en masse
+# (a second pending dispatch silently cancels the first).
+concurrency:
+  group: scprs-operational-writer
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    # Basis: the largest loaded unit (3540) is ~127k rows for ONE fiscal year
+    # ≈ 2-3 bisected 65k exports; a 7-year window worst-cases ~15-20 slices at
+    # ~3-5 min each ≈ 60-100 min. 150 min covers a jumbo solo dispatch or a
+    # 3-4 unit mid-size batch; sizing beyond that belongs in separate runs.
+    timeout-minutes: 150
+    env:
+      PYTHONUNBUFFERED: "1" # a killed run must still show how far it got
+      SCPRS_DATASET: ${{ vars.SCPRS_DATASET || 'munther-hasan/scprs-operational-db' }}
+      HF_SCPRS_TOKEN: ${{ secrets.HF_SCPRS_TOKEN }}
+      PLAYWRIGHT_NO_SANDBOX: "1"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt "huggingface_hub>=0.25"
+          playwright install --with-deps chromium
+
+      - name: Fetch scprs.db from the dataset
+        run: python -m src.data_sync fetch-operational
+
+      # Build each unit, gating on row count: `model build` REPLACES the unit's
+      # rows, so post-build count < pre-build count means the window was
+      # narrower than what the store already had — refuse to publish that loss.
+      # A unit failing its gate fails the whole run BEFORE the publish step
+      # (upload-on-success: the dataset copy stays untouched, next run retries).
+      - name: Build summaries (per-unit shrink gate)
+        env:
+          IN_BUS: ${{ inputs.business_units }}
+          IN_FROM: ${{ inputs.from_date }}
+          IN_TO: ${{ inputs.to_date }}
+        run: |
+          FROM="${IN_FROM:-07/01/2021}"
+          TO="${IN_TO:-06/30/2028}"
+          count_bu() {
+            python -c "import sqlite3,sys; print(sqlite3.connect('data/scprs.db').execute('SELECT COUNT(*) FROM purchases WHERE business_unit=?',(sys.argv[1],)).fetchone()[0])" "$1"
+          }
+          echo "### Summary build ($FROM..$TO)" >> "$GITHUB_STEP_SUMMARY"
+          for bu in $(echo "$IN_BUS" | tr ',' ' '); do
+            before=$(count_bu "$bu")
+            start=$SECONDS
+            python -m src.model build "$bu" "$FROM" "$TO"
+            after=$(count_bu "$bu")
+            mins=$(( (SECONDS - start) / 60 ))
+            echo "| $bu | $before -> $after rows | ${mins}m |" >> "$GITHUB_STEP_SUMMARY"
+            if [ "$after" -lt "$before" ]; then
+              echo "::error::BU $bu shrank ($before -> $after rows) — the window is narrower than the stored history; publish blocked"
+              exit 1
+            fi
+          done
+
+      # Only reached if every unit built and passed its gate.
+      - name: Publish scprs.db back to the dataset
+        run: python -m src.data_sync publish-operational
+
+      # No warehouse rebuild here: the enrich cron (every 3h) fetches this
+      # store, rebuilds, and republishes the serve DB — new units appear in
+      # the served warehouse within one cycle and enter the enrichment picker
+      # as never-enriched (first in line) automatically.

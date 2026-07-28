@@ -15,6 +15,7 @@ on:
       - "MCP image"
       - "CI"
       - "Query review"
+      - "Summary build"
     types: [completed]
 
 permissions:
