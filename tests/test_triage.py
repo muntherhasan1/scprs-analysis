@@ -26,6 +26,16 @@ def test_report_deploy_verify_names_the_packaging_gap():
     assert "COPIES" in r["body"] and "requirements-mcp.txt" in r["body"]
 
 
+def test_report_covers_summary_build():
+    r = triage.build_report(
+        "Summary build", ["Build summaries (per-unit shrink gate)"], "https://run/13"
+    )
+    # the replace-semantics footgun is the load-bearing hint.
+    assert "REPLACES" in r["body"] and "shrink gate" in r["body"]
+    r = triage.build_report("Summary build", ["Set up job"], "https://run/14")
+    assert "untouched" in r["body"]
+
+
 def test_report_covers_query_review():
     r = triage.build_report("Query review", ["Replay logged questions"], "https://run/11")
     # infra vs content regression is the load-bearing distinction.
