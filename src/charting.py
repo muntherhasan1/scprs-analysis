@@ -241,7 +241,14 @@ def _fmt_cell(col: str, v) -> str:
     if f is None:
         return html.escape(str(v))
     name = col.lower()
-    if name == "id" or name.endswith("_id") or "year" in name or "zip" in name or "fips" in name:
+    if (
+        name == "id"
+        or name.endswith("_id")
+        or name in ("business_unit", "bu")
+        or "year" in name
+        or "zip" in name
+        or "fips" in name
+    ):
         return html.escape(str(int(f)) if f == int(f) else str(v))
     if any(p in name for p in _PCTISH):  # percentages before money (they share hints)
         return f"{f:,.1f}%"
