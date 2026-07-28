@@ -52,6 +52,56 @@ number, dates → Date.
   Anonymous and "Skip test connection" if prompted. Rotating the HF token
   means updating the `Token` parameter, nothing else.
 
+## Star schema (relationships + drill-through)
+
+For a properly modeled dashboard — slicers that cross-filter everything, and
+drill-through from any tile to document detail — load the **star exports**
+under `marts/star/` instead of (or alongside) the flat CSVs. They are the
+warehouse's Kimball star via the `lv_*` logical views, as Parquet:
+
+`fact_document` (~1.5M rows), `fact_line`, `fact_associated_po`,
+`dim_supplier`, `dim_department`, `dim_date`, `dim_acquisition`, `dim_buyer`,
+`dim_unspsc`.
+
+```m
+let
+    Token = "hf_xxx",   // same read-scoped token
+    Name  = "fact_document",
+    Url   = "https://huggingface.co/datasets/munther-hasan/scprs-warehouse-data/resolve/main/marts/star/" & Name & ".parquet",
+    Table = Parquet.Document(Web.Contents(Url, [Headers=[Authorization="Bearer " & Token]]))
+in
+    Table
+```
+
+Wire the relationships in Model view (all many-to-one, single direction,
+fact side → dim side):
+
+| fact column | dim table.column |
+|---|---|
+| `fact_document.supplier_key` | `dim_supplier.supplier_key` |
+| `fact_document.dept_key` | `dim_department.dept_key` |
+| `fact_document.acq_key` | `dim_acquisition.acq_key` |
+| `fact_document.buyer_key` | `dim_buyer.buyer_key` |
+| `fact_document.start_date_key` | `dim_date.date_key` |
+| `fact_line.*_key` | same dims, plus `fact_line.unspsc_key` → `dim_unspsc.unspsc_key` |
+| `fact_associated_po.dept_key` / `start_date_key` | `dim_department` / `dim_date` |
+
+Mark `dim_date` as the model's date table (`full_date`); use `fiscal_year` /
+`fiscal_quarter` from it for CA fiscal framing. Measures live on the facts:
+`SUM(grand_total)` (document grain, complete), `SUM(line_amount)` (line grain,
+**enriched documents only** — never use it for totals). For drill-through,
+build a "Document detail" page filtering `fact_document` (carry
+`purchase_document`, `status`, `grand_total`, `line_count`) and add
+drill-through fields for supplier/department/acquisition — the flat CSV tiles
+and the star pages share dims, so right-click drill-through from any summary
+visual lands on the underlying documents.
+
+Two grain rules the model must respect: `fact_document` is one row per
+document **current version** (no version double-counting), and vendor slicers
+should use `dim_supplier.canonical_name` (one company can hold several
+`supplier_id` registrations — slice on canonical, show `supplier_name` in
+detail tables).
+
 ## Modeling notes (the usual traps)
 
 - Vendor rollups: use `gold_canonical_supplier_spend` /

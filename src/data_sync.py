@@ -184,7 +184,10 @@ def publish_serve_db(serve_path: Path, repo: str, token: str | None = None) -> s
         serve_path, repo, SERVE_FILENAME, token or os.environ.get("HF_TOKEN"), "Publish serve DB"
     )
     marts_dir = serve_path.parent / "marts"
-    if marts_dir.is_dir() and any(marts_dir.glob("*.csv")):
+    has_feed = marts_dir.is_dir() and (
+        any(marts_dir.glob("*.csv")) or any(marts_dir.glob("star/*.parquet"))
+    )
+    if has_feed:
         from huggingface_hub import HfApi
 
         _with_retries(
@@ -193,10 +196,10 @@ def publish_serve_db(serve_path: Path, repo: str, token: str | None = None) -> s
                 repo_id=repo,
                 repo_type="dataset",
                 path_in_repo="marts",
-                allow_patterns=["*.csv"],
-                commit_message="Publish BI mart CSVs",
+                allow_patterns=["*.csv", "star/*.parquet"],
+                commit_message="Publish BI mart CSVs + star parquet",
             ),
-            what=f"mart-CSV publish to {repo}",
+            what=f"BI feed publish to {repo}",
         )
     return url
 

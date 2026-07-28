@@ -1804,6 +1804,54 @@ _MART_CSV_EXPORTS: dict[str, str] = {
 }
 
 
+# The Kimball star, exported join-ready for BI relationship modeling (Power BI
+# drill-through). Exported through the lv_* logical views so key/attribute
+# names are the friendly ones; facts and dims share surrogate keys
+# (supplier_key, dept_key, acq_key, buyer_key, unspsc_key, start_date_key ->
+# dim_date.date_key). Parquet, not CSV: fact_document is ~1.5M rows and this
+# ships on every publish cycle.
+_STAR_EXPORTS = (
+    "lv_fact_document",
+    "lv_fact_line",
+    "lv_fact_associated_po",
+    "lv_dim_supplier",
+    "lv_dim_department",
+    "lv_dim_date",
+    "lv_dim_acquisition",
+    "lv_dim_buyer",
+    "lv_dim_unspsc",
+)
+
+
+def export_star_parquet(
+    serve_path: Path = SERVE_DB, star_dir: Path | None = None, log=print
+) -> dict[str, int]:
+    """Write the star schema as Parquet files under ``marts/star/`` for BI tools.
+
+    Reads the ``lv_*`` views from the slim serve DB (run ``export_serve_db``
+    first); published with the mart CSVs by ``data_sync.publish_serve_db``."""
+    import pandas as pd
+
+    serve_path = Path(serve_path)
+    star_dir = Path(star_dir) if star_dir else MARTS_DIR / "star"
+    if not serve_path.exists():
+        raise FileNotFoundError(f"{serve_path} not found — run `warehouse serve-export` first")
+    star_dir.mkdir(parents=True, exist_ok=True)
+    counts: dict[str, int] = {}
+    con = sqlite3.connect(f"file:{serve_path}?mode=ro", uri=True)
+    try:
+        for view in _STAR_EXPORTS:
+            name = view.removeprefix("lv_")
+            df = pd.read_sql(f'SELECT * FROM "{view}"', con)  # noqa: S608 - internal constant
+            out = star_dir / f"{name}.parquet"
+            df.to_parquet(out, index=False)
+            counts[name] = len(df)
+            log(f"star-parquet: {out.name} ({len(df)} rows)")
+    finally:
+        con.close()
+    return counts
+
+
 def export_mart_csvs(
     serve_path: Path = SERVE_DB, marts_dir: Path = MARTS_DIR, log=print
 ) -> dict[str, int]:
@@ -1857,6 +1905,7 @@ def _cli() -> None:
     elif args.cmd == "serve-export":
         export_serve_db()
         export_mart_csvs()
+        export_star_parquet()
     elif args.cmd == "dq":
         con = _connect()
         try:
