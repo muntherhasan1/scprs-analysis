@@ -16,6 +16,8 @@ on:
       - "CI"
       - "Query review"
       - "Summary build"
+      - "Ground-truth recon"
+      - "Operational backup"
     types: [completed]
 
 permissions:

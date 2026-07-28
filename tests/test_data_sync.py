@@ -453,6 +453,70 @@ def test_restart_spaces_cli_require_passes_when_that_space_restarts(monkeypatch,
     assert "restarted" in capsys.readouterr().out
 
 
+def test_backup_operational_requires_write_token(monkeypatch):
+    """A backup that can silently green-skip is worse than none: no
+    HF_BACKUP_TOKEN must be a loud SystemExit, never a pass."""
+    import pytest
+
+    monkeypatch.delenv("HF_BACKUP_TOKEN", raising=False)
+    with pytest.raises(SystemExit, match="HF_BACKUP_TOKEN"):
+        data_sync.backup_operational(
+            "acme/backup",
+            source_repo="acme/op",
+            read_token="r",  # noqa: S106 - test stub, not a credential
+        )
+
+
+def test_backup_operational_copies_and_prunes(tmp_path, monkeypatch):
+    uploads, deletes = [], []
+
+    class FakeApi:
+        def __init__(self, token=None):
+            self.token = token
+
+        def create_repo(self, repo, repo_type, private, exist_ok):
+            pass
+
+        def list_repo_files(self, repo, repo_type):
+            if repo == "acme/op":
+                return ["scprs.db", "cmas.db", "README.md"]
+            # backup repo: two old snapshots + the fresh one
+            return [
+                "2026-06-01/scprs.db",
+                "2026-06-08/scprs.db",
+                "2026-07-28/scprs.db",
+            ]
+
+        def upload_file(self, *, path_or_fileobj, path_in_repo, repo_id, repo_type, commit_message):
+            uploads.append(path_in_repo)
+
+        def create_commit(self, *, repo_id, repo_type, operations, commit_message):
+            deletes.extend(op.path_in_repo for op in operations)
+
+    def fake_download(repo, name, repo_type, token=None, local_dir=None):
+        from pathlib import Path
+
+        p = Path(local_dir) / name
+        p.write_bytes(b"db")
+        return str(p)
+
+    import huggingface_hub
+
+    monkeypatch.setattr(huggingface_hub, "HfApi", FakeApi)
+    monkeypatch.setattr(huggingface_hub, "hf_hub_download", fake_download)
+    folder = data_sync.backup_operational(
+        "acme/backup",
+        source_repo="acme/op",
+        read_token="r",  # noqa: S106 - test stub, not a credential
+        write_token="w",  # noqa: S106 - test stub, not a credential
+        keep=2,
+        today="2026-07-28",
+    )
+    assert folder == "2026-07-28"
+    assert uploads == ["2026-07-28/scprs.db", "2026-07-28/cmas.db"]  # .db only
+    assert deletes == ["2026-06-01/"]  # newest 2 kept
+
+
 def test_fetch_operational_cli(tmp_path, monkeypatch):
     captured = {}
 

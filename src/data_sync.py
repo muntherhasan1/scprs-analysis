@@ -23,6 +23,7 @@ read access to the private dataset; a publish needs read+write.
 
 from __future__ import annotations
 
+import datetime
 import os
 import shutil
 import time
@@ -184,7 +185,10 @@ def publish_serve_db(serve_path: Path, repo: str, token: str | None = None) -> s
         serve_path, repo, SERVE_FILENAME, token or os.environ.get("HF_TOKEN"), "Publish serve DB"
     )
     marts_dir = serve_path.parent / "marts"
-    if marts_dir.is_dir() and any(marts_dir.glob("*.csv")):
+    has_feed = marts_dir.is_dir() and (
+        any(marts_dir.glob("*.csv")) or any(marts_dir.glob("star/*.parquet"))
+    )
+    if has_feed:
         from huggingface_hub import HfApi
 
         _with_retries(
@@ -193,12 +197,92 @@ def publish_serve_db(serve_path: Path, repo: str, token: str | None = None) -> s
                 repo_id=repo,
                 repo_type="dataset",
                 path_in_repo="marts",
-                allow_patterns=["*.csv"],
-                commit_message="Publish BI mart CSVs",
+                allow_patterns=["*.csv", "star/*.parquet"],
+                commit_message="Publish BI mart CSVs + star parquet",
             ),
-            what=f"mart-CSV publish to {repo}",
+            what=f"BI feed publish to {repo}",
         )
     return url
+
+
+def backup_operational(
+    backup_repo: str,
+    *,
+    source_repo: str | None = None,
+    read_token: str | None = None,
+    write_token: str | None = None,
+    keep: int = 4,
+    today: str | None = None,
+) -> str:
+    """Weekly cold backup: copy the operational stores to a SECOND dataset.
+
+    ``scprs.db`` is the one non-rebuildable artifact in the pipeline — months of
+    scraping living in a single HF dataset whose revision history protects
+    against bad writes but not against repo deletion or token misuse. This
+    copies ``scprs.db`` + the side inputs into ``backup_repo`` under a dated
+    folder and prunes to the newest ``keep`` snapshots. Same-account residual
+    risk (an account-level compromise takes both) is documented in the workflow;
+    a quarterly manual download covers that tail.
+
+    ``today`` (YYYY-MM-DD) names the snapshot folder; defaults to the current
+    date. Returns the folder name."""
+    import tempfile
+
+    from huggingface_hub import CommitOperationDelete, HfApi, hf_hub_download
+
+    source_repo = source_repo or os.environ.get("SCPRS_DATASET")
+    if not source_repo:
+        raise SystemExit("set --dataset or the SCPRS_DATASET env var")
+    read_tok = read_token or _operational_token()
+    write_tok = write_token or os.environ.get("HF_BACKUP_TOKEN")
+    if not write_tok:
+        raise SystemExit("set HF_BACKUP_TOKEN (write on the backup dataset)")
+    api = HfApi(token=write_tok)
+    api.create_repo(backup_repo, repo_type="dataset", private=True, exist_ok=True)
+
+    folder = today or datetime.date.today().isoformat()
+    src_api = HfApi(token=read_tok)
+    names = [
+        f for f in src_api.list_repo_files(source_repo, repo_type="dataset") if f.endswith(".db")
+    ]
+    with tempfile.TemporaryDirectory() as tmp:
+        for name in names:
+            # nosec B615 — backing up the LATEST revision of our own private
+            # dataset is the entire point; pinning a commit would freeze it.
+            local = hf_hub_download(  # nosec B615
+                source_repo,
+                name,
+                repo_type="dataset",
+                token=read_tok,
+                local_dir=tmp,
+            )
+            _with_retries(
+                lambda local=local, name=name: api.upload_file(
+                    path_or_fileobj=local,
+                    path_in_repo=f"{folder}/{name}",
+                    repo_id=backup_repo,
+                    repo_type="dataset",
+                    commit_message=f"Cold backup {folder}: {name}",
+                ),
+                what=f"backup upload of {name}",
+            )
+
+    # Retention: keep the newest `keep` dated snapshot folders.
+    backup_files = api.list_repo_files(backup_repo, repo_type="dataset")
+    snapshots = sorted({f.split("/", 1)[0] for f in backup_files if "/" in f})
+    stale = snapshots[:-keep] if keep and len(snapshots) > keep else []
+    if stale:
+        ops = [CommitOperationDelete(path_in_repo=f"{s}/", is_folder=True) for s in stale]
+        _with_retries(
+            lambda: api.create_commit(
+                repo_id=backup_repo,
+                repo_type="dataset",
+                operations=ops,
+                commit_message=f"Prune backups beyond newest {keep}: {', '.join(stale)}",
+            ),
+            what="backup retention prune",
+        )
+    return folder
 
 
 # --------------------------------------------------------------- operational DB (Wave 2)
@@ -475,6 +559,17 @@ def _cli() -> None:
     )
     fsv.add_argument("--dest", default=str(warehouse.SERVE_DB))
 
+    bck = sub.add_parser(
+        "backup-operational",
+        help="Cold-copy scprs.db + side inputs to a second dataset (weekly backup.yml)",
+    )
+    bck.add_argument("--dataset", default=os.environ.get("SCPRS_DATASET"))
+    bck.add_argument(
+        "--backup-dataset",
+        default=os.environ.get("SCPRS_BACKUP_DATASET", "munther-hasan/scprs-operational-backup"),
+    )
+    bck.add_argument("--keep", type=int, default=4)
+
     fop = sub.add_parser(
         "fetch-operational",
         help="Download scprs.db (and the supplier/CMAS/eProcure side inputs, if published) "
@@ -544,6 +639,9 @@ def _cli() -> None:
         if not ensure_local_db(Path(args.dest)):
             raise SystemExit("set the WAREHOUSE_DATASET env var")
         print(f"Fetched {SERVE_FILENAME} into {args.dest}")
+    elif args.cmd == "backup-operational":
+        folder = backup_operational(args.backup_dataset, source_repo=args.dataset, keep=args.keep)
+        print(f"Backed up operational stores -> {args.backup_dataset}/{folder} (keep {args.keep})")
     elif args.cmd == "fetch-operational":
         if not args.dataset:
             raise SystemExit("set --dataset or the SCPRS_DATASET env var")

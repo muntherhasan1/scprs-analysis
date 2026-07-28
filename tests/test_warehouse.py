@@ -99,6 +99,9 @@ def test_warehouse_build(tmp_path):
         wh_path=wh, source_path=src, enrichment_db=tmp_path / "no_enrich.db", log=lambda *a: None
     )
 
+    # Per-stage timings ship with every build (duration-erosion observability).
+    assert set(result["timings"]) == {"bronze", "history", "silver", "gold", "dq"}
+
     con = sqlite3.connect(wh)
     try:
         # Silver document grain: one row per document (A's two versions collapsed)
@@ -318,6 +321,31 @@ def test_export_serve_db_is_slim_and_self_contained(tmp_path):
         full.close()
 
 
+def test_dq_flags_uncurated_duplicate_supplier_names(tmp_path):
+    """Crosswalk decay watch: the same name under two supplier_ids that the
+    crosswalk does NOT unify must surface as a warn (never a gate)."""
+    src, wh = tmp_path / "scprs.db", tmp_path / "warehouse.db"
+    _seed_source(src)
+    con = sqlite3.connect(src)
+    # A second registration of "Acme" (S1 already exists) with no crosswalk row.
+    con.execute(
+        "INSERT INTO purchases (business_unit, purchase_document, version, grand_total, "
+        "start_date, acquisition_type_sub_type, acquisition_method, supplier_id, supplier_name, "
+        "buyer_name, buyer_email, status, department_name, associated_pos) "
+        "VALUES ('8660','C','1',10.0,'2021-04-01','IT Goods','Formal - COMPETITIVE',"
+        "'S9','Acme','Bob','b@x','Active','PUC',NULL)"
+    )
+    con.commit()
+    con.close()
+    result = warehouse.build_all(
+        wh_path=wh, source_path=src, enrichment_db=tmp_path / "no_enrich.db", log=lambda *a: None
+    )
+    gaps = [d for d in result["dq"] if d["check"] == "canonical_crosswalk_gaps"]
+    assert gaps and gaps[0]["severity"] == "warn"
+    assert gaps[0]["failed"] >= 1  # Acme spans S1+S9 with two canonical ids
+    assert not result["errors"]  # warn tier never gates the build
+
+
 def test_export_mart_csvs_from_serve_db(tmp_path):
     """Every curated BI export runs against the slim serve DB and writes a CSV
     with a header row — a mart renamed/dropped in gold must fail HERE, not in a
@@ -337,6 +365,32 @@ def test_export_mart_csvs_from_serve_db(tmp_path):
         assert len(lines) == counts[name] + 1  # header + data rows
     # The seeded source has documents, so the export-only aggregates carry data.
     assert counts["department_fiscal_year_spend"] > 0
+
+
+def test_export_star_parquet_is_join_ready(tmp_path):
+    """The star exports carry the shared surrogate keys BI relationships bind on
+    — a renamed key breaks here, not in a Power BI refresh."""
+    import pandas as pd
+
+    src, wh = tmp_path / "scprs.db", tmp_path / "warehouse.db"
+    serve = tmp_path / "warehouse-serve.db"
+    _seed_source(src)
+    warehouse.build_all(
+        wh_path=wh, source_path=src, enrichment_db=tmp_path / "no_enrich.db", log=lambda *a: None
+    )
+    warehouse.export_serve_db(wh_path=wh, serve_path=serve, log=lambda *a: None)
+    star_dir = tmp_path / "star"
+    counts = warehouse.export_star_parquet(serve_path=serve, star_dir=star_dir, log=lambda *a: None)
+    assert set(counts) == {v.removeprefix("lv_") for v in warehouse._STAR_EXPORTS}
+    fact = pd.read_parquet(star_dir / "fact_document.parquet")
+    sup = pd.read_parquet(star_dir / "dim_supplier.parquet")
+    dates = pd.read_parquet(star_dir / "dim_date.parquet")
+    # Friendly (un-abbreviated) shared keys, and every fact key resolves.
+    assert "supplier_key" in fact.columns and "supplier_key" in sup.columns
+    assert "grand_total" in fact.columns  # measures keep logical names too
+    assert fact["supplier_key"].isin(sup["supplier_key"]).all()
+    assert fact["start_date_key"].isin(dates["date_key"]).all()
+    assert counts["fact_document"] == len(fact) > 0
 
 
 def test_contract_change_capture(tmp_path):
