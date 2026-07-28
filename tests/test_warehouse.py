@@ -99,6 +99,9 @@ def test_warehouse_build(tmp_path):
         wh_path=wh, source_path=src, enrichment_db=tmp_path / "no_enrich.db", log=lambda *a: None
     )
 
+    # Per-stage timings ship with every build (duration-erosion observability).
+    assert set(result["timings"]) == {"bronze", "history", "silver", "gold", "dq"}
+
     con = sqlite3.connect(wh)
     try:
         # Silver document grain: one row per document (A's two versions collapsed)

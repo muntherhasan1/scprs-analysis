@@ -1652,10 +1652,31 @@ def build_all(
     eprocure_db: Path = EPROCURE_DB,
     log=print,
 ) -> dict:
+    import time
+
     ts = datetime.now().isoformat(timespec="seconds")
     # microseconds keep the batch id unique even for rapid successive rebuilds
     batch = "batch_" + datetime.now().strftime("%Y%m%d_%H%M%S_%f")
     con = _connect(wh_path, source_path)
+    # Build-speed pragmas, SAFE ONLY HERE: warehouse.db is a fully derived
+    # artifact rebuilt from scratch — a crash mid-build costs a retry, never
+    # data. Durability is off for the build connection only (the shared
+    # _connect stays default for readers/DQ-only runs).
+    for pragma in (
+        "PRAGMA journal_mode=OFF",
+        "PRAGMA synchronous=OFF",
+        "PRAGMA temp_store=MEMORY",
+        "PRAGMA cache_size=-262144",  # 256MB page cache
+    ):
+        con.execute(pragma)
+    timings: dict[str, float] = {}
+
+    def _timed(stage: str, fn):
+        t0 = time.monotonic()
+        out = fn()
+        timings[stage] = round(time.monotonic() - t0, 1)
+        return out
+
     try:
         _ensure_control(con)
         con.execute(
@@ -1663,19 +1684,21 @@ def build_all(
             (batch, ts),
         )
         log(f"[{batch}] bronze...")
-        counts = build_bronze(con, batch, ts, enrichment_db, cmas_db, eprocure_db)
+        counts = _timed(
+            "bronze", lambda: build_bronze(con, batch, ts, enrichment_db, cmas_db, eprocure_db)
+        )
         con.commit()
-        appended = capture_document_history(con, batch, ts)
+        appended = _timed("history", lambda: capture_document_history(con, batch, ts))
         counts["dw_document_history_appended"] = appended
         log(f"[{batch}] history: +{appended} snapshot(s)")
         log(f"[{batch}] silver...")
-        counts |= build_silver(con, batch, ts)
+        counts |= _timed("silver", lambda: build_silver(con, batch, ts))
         con.commit()
         log(f"[{batch}] gold...")
-        counts |= build_gold(con, batch, ts)
+        counts |= _timed("gold", lambda: build_gold(con, batch, ts))
         con.commit()
         log(f"[{batch}] data quality...")
-        dq = run_dq(con, batch, ts)
+        dq = _timed("dq", lambda: run_dq(con, batch, ts))
         fin = datetime.now().isoformat(timespec="seconds")
         # Error-severity checks GATE the build: record the batch as failed (not "ok")
         # so downstream serve-export/publish and the CLI exit code refuse to proceed.
@@ -1689,6 +1712,13 @@ def build_all(
     finally:
         con.close()
     warns = [d for d in dq if not d["passed"] and d["severity"] == "warn"]
+    total = round(sum(timings.values()), 1)
+    # One greppable line per build — the enrich workflow lifts it into the step
+    # summary so duration EROSION is a visible trend, not a surprise timeout
+    # (the 2026-07-28 lesson: the 5x data expansion took builds from ~7 to
+    # ~15+ min and nothing announced it).
+    stage_str = " ".join(f"{k}={v}s" for k, v in timings.items())
+    log(f"[{batch}] build timings: {stage_str} total={total}s")
     log(f"[{batch}] done. rows={counts}")
     if warns:
         log(f"[{batch}] DQ warnings: {[(d['check'], d['failed']) for d in warns]}")
@@ -1699,7 +1729,7 @@ def build_all(
             f"{len(errors)} error-severity data-quality check(s) failed: {failed}. "
             "Batch recorded as 'error'; fix the source data and rebuild before publishing."
         )
-    return {"batch": batch, "counts": counts, "dq": dq, "errors": errors}
+    return {"batch": batch, "counts": counts, "dq": dq, "errors": errors, "timings": timings}
 
 
 def export_serve_db(wh_path: Path = WAREHOUSE_DB, serve_path: Path = SERVE_DB, log=print) -> dict:
@@ -1713,6 +1743,9 @@ def export_serve_db(wh_path: Path = WAREHOUSE_DB, serve_path: Path = SERVE_DB, l
     **materialized** into tables so the slim DB is self-contained and returns
     identical results. Query-relevant indexes are recreated, then VACUUM compacts.
     """
+    import time
+
+    t0 = time.monotonic()
     wh_path, serve_path = Path(wh_path), Path(serve_path)
     if not wh_path.exists():
         raise FileNotFoundError(f"{wh_path} not found — build the warehouse first")
@@ -1760,7 +1793,8 @@ def export_serve_db(wh_path: Path = WAREHOUSE_DB, serve_path: Path = SERVE_DB, l
     log(
         f"serve-export: {before / 1e6:.0f}MB -> {after / 1e6:.0f}MB "
         f"({len(tables)} tables, {len(dep_views)} marts materialized, "
-        f"{len(pure_views)} views, {len(idx_ddl)} indexes)"
+        f"{len(pure_views)} views, {len(idx_ddl)} indexes) "
+        f"in {time.monotonic() - t0:.0f}s"
     )
     return {
         "tables": len(tables),
