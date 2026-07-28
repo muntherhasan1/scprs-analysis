@@ -25,8 +25,10 @@ concurrency:
 jobs:
   diff:
     runs-on: ubuntu-latest
-    # TWO full warehouse builds; measured 14m45s on 2026-07-23 (PR #42) and
-    # growing ~3h-ly with enrichment — 45 min keeps headroom ahead of growth.
+    # TWO full warehouse builds worst case (measured ~36m on 2026-07-28 at
+    # 1.53M docs; ONE build ~18m when the cached base snapshot hits) — 45 min
+    # holds for the cached path; revisit if the tripwire in enrich-canary
+    # shows single-build growth past ~20m.
     timeout-minutes: 45
     env:
       PYTHONUNBUFFERED: "1" # a killed run must still show how far it got
@@ -70,13 +72,26 @@ jobs:
           python -m src.warehouse build
           python -m src.warehouse_diff snapshot --db data/warehouse.db --out head.json
 
+      # The base snapshot is pure function of (base code, fetched data files):
+      # cache it so consecutive pushes to the same PR pay for ONE build, not
+      # two (~18 min saved at 1.5M docs). hashFiles covers scprs.db AND every
+      # optional side input, so a refreshed side input can never pair a stale
+      # cached base against a fresh head (phantom-diff hazard).
+      - name: Restore cached base snapshot
+        if: steps.fetch.outputs.skip != '1'
+        id: cache-base
+        uses: actions/cache@v4
+        with:
+          path: base.json
+          key: warehouse-diff-base-${{ github.event.pull_request.base.sha }}-${{ hashFiles('data/scprs.db', 'data/supplier_enrichment.db', 'data/cmas.db', 'data/eprocure.db') }}
+
       # Swap ONLY the code to the base commit, rebuild against the same data, then
       # restore head so the (head) diff tool snapshots the base build. The base
       # build must start from a CLEAN warehouse.db: dw_document_history is
       # append-only (not dropped on rebuild), so reusing the head build's file
       # would cross-contaminate the history-derived marts and show a phantom diff.
       - name: Build (base) + snapshot
-        if: steps.fetch.outputs.skip != '1'
+        if: steps.fetch.outputs.skip != '1' && steps.cache-base.outputs.cache-hit != 'true'
         run: |
           rm -f data/warehouse.db
           git checkout ${{ github.event.pull_request.base.sha }} -- src references

@@ -136,6 +136,29 @@ _HINTS: dict[str, dict[str, str]] = {
             "incident). Verify the shipped boot chain imports cleanly."
         ),
     },
+    "Operational backup": {
+        "_default": (
+            "The weekly cold backup of scprs.db failed — the pipeline is fine, but "
+            "the non-rebuildable store is one incident away from being singular "
+            "again. Most likely `HF_BACKUP_TOKEN` is missing or lacks write on the "
+            "backup dataset (it must NOT have write on the operational dataset). "
+            "The next weekly run retries; dispatch manually after fixing the token."
+        ),
+    },
+    "Ground-truth recon": {
+        "_default": (
+            "The weekly live-site reconciliation failed. Read-only probe — nothing "
+            "was written; the next weekly run re-probes a fresh sample."
+        ),
+        "Probe the live site": (
+            "rc>=2 means the probe's own plumbing broke (site unreachable / store "
+            "fetch failed) — transient site outages self-heal next week. rc=1 means "
+            "a SETTLED month has materially fewer store rows than the live site: "
+            "lost or never-loaded data (the per-FY rebuild bug's signature). "
+            "Re-dispatch 'Summary build' for that unit with its FULL window, then "
+            "re-run this probe targeted (bu/month inputs) to confirm the repair."
+        ),
+    },
     "Summary build": {
         "_default": (
             "A dataset-expansion summary build failed. Upload-on-success: the "

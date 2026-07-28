@@ -1,0 +1,143 @@
+name: Ground-truth recon
+
+# Weekly reconciliation of the operational store against the LIVE SCPRS site:
+# sample a few random (business unit, month) windows from the coverage policy
+# window, re-export each from the site, and compare row counts. This is the
+# check that would have caught the 2026-07 per-FY rebuild data loss in days
+# instead of weeks — every other gate is internal and stays green when data
+# vanishes cleanly. Read-only everywhere: fetches the store with the read
+# token, never publishes anything.
+on:
+  schedule:
+    # Weekly, Wednesday 05:07 UTC — clear of enrich (17 */3), query review
+    # (Mon 05:41), eProcure (Tue 04:53), CMAS (06:37). Read-only, so the
+    # offset is about runner noise, not the writer lock.
+    - cron: "7 5 * * 3"
+  workflow_dispatch:
+    inputs:
+      samples:
+        description: Number of (BU, month) windows to probe
+        default: "5"
+      bu:
+        description: "Targeted spot-check: business unit (use with month)"
+        default: ""
+      month:
+        description: "Targeted spot-check: YYYY-MM (use with bu)"
+        default: ""
+
+permissions:
+  contents: read
+  issues: write # open/comment/close the recon issue
+
+concurrency:
+  group: ground-truth-recon
+  cancel-in-progress: true # read-only; a superseded probe has no value
+
+env:
+  RECON_LABEL: ground-truth
+
+jobs:
+  recon:
+    runs-on: ubuntu-latest
+    # Basis: 5 windows x (search + export download) ~2-4 min each on the
+    # PeopleSoft site = ~20 min worst case; 2x headroom.
+    timeout-minutes: 40
+    env:
+      PYTHONUNBUFFERED: "1"
+      SCPRS_DATASET: ${{ vars.SCPRS_DATASET || 'munther-hasan/scprs-operational-db' }}
+      # Read-only by design (#54 pattern): the probe never writes the store.
+      HF_SCPRS_TOKEN: ${{ secrets.HF_SCPRS_READ_TOKEN }}
+      PLAYWRIGHT_NO_SANDBOX: "1"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt "huggingface_hub>=0.25"
+          playwright install --with-deps chromium
+
+      - name: Fetch scprs.db from the dataset
+        run: python -m src.data_sync fetch-operational
+
+      - name: Probe the live site
+        id: probe
+        env:
+          SAMPLES: ${{ inputs.samples }}
+          BU: ${{ inputs.bu }}
+          MONTH: ${{ inputs.month }}
+        run: |
+          set +e
+          args="--samples ${SAMPLES:-5}"
+          if [ -n "$BU" ] && [ -n "$MONTH" ]; then
+            args="--bu $BU --month $MONTH"
+          fi
+          python -m src.recon $args 2>&1 | tee recon.log
+          rc=$?
+          set -e
+          if [ "$rc" -ge 2 ]; then
+            echo "::error::recon itself failed (rc=$rc) — site unreachable or store missing"
+            exit "$rc"
+          fi
+          {
+            echo "### Ground-truth recon"
+            echo '```'
+            cat recon.log
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "errors=$rc" >> "$GITHUB_OUTPUT"
+          if grep -qE "\((error|warn)\)" recon.log; then
+            echo "clean=0" >> "$GITHUB_OUTPUT"
+          else
+            echo "clean=1" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Ensure recon label exists
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh label create "$RECON_LABEL" -c D93F0B \
+            -d "Ground-truth reconciliation findings" 2>/dev/null || true
+
+      - name: File findings issue
+        if: steps.probe.outputs.clean == '0'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          body="$(cat recon.log)"$'\n\n'"An ERROR here means a settled month has materially fewer rows in the store than on the live site — lost or never-loaded data. Re-dispatch 'Summary build' for the affected unit with its FULL window to repair, then re-run this probe targeted (bu/month inputs) to confirm."$'\n\n'"Run: $RUN_URL"
+          existing=$(gh issue list --label "$RECON_LABEL" --state open \
+            --json number --jq '.[0].number')
+          if [ -n "$existing" ]; then
+            echo "Commenting on existing recon issue #$existing"
+            gh issue comment "$existing" --body "$body"
+          else
+            gh issue create --title "🔴 Ground-truth recon: store diverges from the live site" \
+              --label "$RECON_LABEL" --body "$body"
+          fi
+
+      - name: Resolve on clean pass
+        if: steps.probe.outputs.clean == '1'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          for n in $(gh issue list --label "$RECON_LABEL" --state open \
+            --json number --jq '.[].number'); do
+            echo "Resolving recon issue #$n"
+            gh issue close "$n" \
+              --comment "✅ Clean probe — sampled windows match the live site. Run: $RUN_URL"
+          done
+
+      - name: Fail on ground-truth errors
+        if: steps.probe.outputs.errors == '1'
+        run: |
+          echo "::error::a settled month is missing data vs the live site — see the recon issue"
+          exit 1

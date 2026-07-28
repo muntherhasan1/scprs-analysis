@@ -99,6 +99,9 @@ def test_warehouse_build(tmp_path):
         wh_path=wh, source_path=src, enrichment_db=tmp_path / "no_enrich.db", log=lambda *a: None
     )
 
+    # Per-stage timings ship with every build (duration-erosion observability).
+    assert set(result["timings"]) == {"bronze", "history", "silver", "gold", "dq"}
+
     con = sqlite3.connect(wh)
     try:
         # Silver document grain: one row per document (A's two versions collapsed)
@@ -316,6 +319,31 @@ def test_export_serve_db_is_slim_and_self_contained(tmp_path):
     finally:
         s.close()
         full.close()
+
+
+def test_dq_flags_uncurated_duplicate_supplier_names(tmp_path):
+    """Crosswalk decay watch: the same name under two supplier_ids that the
+    crosswalk does NOT unify must surface as a warn (never a gate)."""
+    src, wh = tmp_path / "scprs.db", tmp_path / "warehouse.db"
+    _seed_source(src)
+    con = sqlite3.connect(src)
+    # A second registration of "Acme" (S1 already exists) with no crosswalk row.
+    con.execute(
+        "INSERT INTO purchases (business_unit, purchase_document, version, grand_total, "
+        "start_date, acquisition_type_sub_type, acquisition_method, supplier_id, supplier_name, "
+        "buyer_name, buyer_email, status, department_name, associated_pos) "
+        "VALUES ('8660','C','1',10.0,'2021-04-01','IT Goods','Formal - COMPETITIVE',"
+        "'S9','Acme','Bob','b@x','Active','PUC',NULL)"
+    )
+    con.commit()
+    con.close()
+    result = warehouse.build_all(
+        wh_path=wh, source_path=src, enrichment_db=tmp_path / "no_enrich.db", log=lambda *a: None
+    )
+    gaps = [d for d in result["dq"] if d["check"] == "canonical_crosswalk_gaps"]
+    assert gaps and gaps[0]["severity"] == "warn"
+    assert gaps[0]["failed"] >= 1  # Acme spans S1+S9 with two canonical ids
+    assert not result["errors"]  # warn tier never gates the build
 
 
 def test_export_mart_csvs_from_serve_db(tmp_path):

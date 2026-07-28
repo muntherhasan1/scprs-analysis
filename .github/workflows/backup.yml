@@ -1,0 +1,73 @@
+name: Operational backup
+
+# Weekly cold backup of the one NON-REBUILDABLE artifact: scprs.db (plus the
+# side-input .db files) copied from the operational dataset to a second,
+# private backup dataset under a dated folder, keeping the newest 4 snapshots.
+# The operational dataset's revision history protects against bad writes; this
+# protects against repo deletion and token misuse. Residual risk: both live in
+# the SAME HF account — an account-level compromise takes both. Cover that
+# tail with an occasional manual download (quarterly is plenty).
+#
+# FAILS LOUDLY until HF_BACKUP_TOKEN exists (fine-grained, write on the backup
+# dataset) — a backup system that silently green-skips is worse than none.
+on:
+  schedule:
+    # Weekly, Sunday 05:29 UTC — clear of enrich (17 */3) and the other weekly
+    # crons (query review Mon, eProcure Tue, recon Wed). Read-only on the
+    # source dataset: no writer-lock contention.
+    - cron: "29 5 * * 0"
+  workflow_dispatch:
+    inputs:
+      keep:
+        description: Dated snapshots to retain
+        default: "4"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: operational-backup
+  cancel-in-progress: false # never interrupt a backup mid-upload
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+    # Basis: download + re-upload ~1GB of .db files at runner bandwidth
+    # ~5-10 min; 3x headroom for dataset growth.
+    timeout-minutes: 30
+    env:
+      PYTHONUNBUFFERED: "1"
+      SCPRS_DATASET: ${{ vars.SCPRS_DATASET || 'munther-hasan/scprs-operational-db' }}
+      SCPRS_BACKUP_DATASET: ${{ vars.SCPRS_BACKUP_DATASET || 'munther-hasan/scprs-operational-backup' }}
+      # Read the source with the read-only token; write the backup with a
+      # token scoped to the backup dataset ONLY (never the operational one —
+      # a backup credential must not be able to corrupt what it protects).
+      HF_SCPRS_TOKEN: ${{ secrets.HF_SCPRS_READ_TOKEN }}
+      HF_BACKUP_TOKEN: ${{ secrets.HF_BACKUP_TOKEN }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install minimal deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install "huggingface_hub>=0.25" python-dotenv
+
+      - name: Copy operational stores to the backup dataset
+        env:
+          KEEP: ${{ inputs.keep }}
+        run: |
+          python -m src.data_sync backup-operational --keep "${KEEP:-4}" \
+            2>&1 | tee backup.log
+          {
+            echo "### Operational backup"
+            echo '```'
+            tail -3 backup.log
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

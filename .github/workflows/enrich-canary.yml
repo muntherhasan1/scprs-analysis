@@ -195,8 +195,25 @@ jobs:
       # (non-zero exit on failure), so a bad build never reaches the publish step.
       - name: Rebuild warehouse + export serve DB
         run: |
-          python -m src.warehouse build
-          python -m src.warehouse serve-export
+          set -o pipefail
+          start=$SECONDS
+          python -m src.warehouse build 2>&1 | tee build.log
+          python -m src.warehouse serve-export 2>&1 | tee -a build.log
+          {
+            echo "### Warehouse rebuild"
+            echo '```'
+            grep -F "build timings:" build.log | tail -1
+            grep -F "serve-export:" build.log | tail -1
+            echo "rebuild step took $(( (SECONDS - start) / 60 ))m $(( (SECONDS - start) % 60 ))s"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          # Duration-erosion tripwire (report-only). Basis: 2026-07-28, 1.53M
+          # docs => build+export ~15-18 min; 25 min = data growth or a slow
+          # mart is eating the 90-min job backstop — investigate before it
+          # starts killing runs (the enrich-livelock lesson, build edition).
+          if [ $(( SECONDS - start )) -gt 1500 ]; then
+            echo "::warning::warehouse rebuild took $(( (SECONDS - start) / 60 ))m (>25m tripwire) — check the build-timings trend in recent step summaries"
+          fi
 
       - name: Publish serve DB
         env:
