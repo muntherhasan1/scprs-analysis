@@ -1772,6 +1772,74 @@ def export_serve_db(wh_path: Path = WAREHOUSE_DB, serve_path: Path = SERVE_DB, l
     }
 
 
+MARTS_DIR = scprs.DATA_DIR / "marts"  # BI-friendly CSV exports (Power BI / Excel)
+
+# Curated BI export surface: modest-sized, dashboard-shaped marts plus two
+# export-only aggregates over gold_document (document grain would be ~1.5M rows
+# of CSV churn per publish — aggregate here instead; drill-through needs go to
+# the MCP/NL front ends, not the CSV feed).
+_MART_CSV_EXPORTS: dict[str, str] = {
+    "gold_monthly_spend": "SELECT * FROM gold_monthly_spend",
+    "gold_canonical_supplier_spend": "SELECT * FROM gold_canonical_supplier_spend",
+    "gold_acquisition_spend": "SELECT * FROM gold_acquisition_spend",
+    "gold_supplier_acquisition_profile": "SELECT * FROM gold_supplier_acquisition_profile",
+    "gold_market_concentration": "SELECT * FROM gold_market_concentration",
+    "gold_supplier_certification": "SELECT * FROM gold_supplier_certification",
+    "gold_supplier_cmas": "SELECT * FROM gold_supplier_cmas",
+    "gold_eprocure_posted_opportunity": "SELECT * FROM gold_eprocure_posted_opportunity",
+    "gold_eprocure_event_demand": "SELECT * FROM gold_eprocure_event_demand",
+    "gold_contract_amendments": "SELECT * FROM gold_contract_amendments",
+    "department_fiscal_year_spend": (
+        "SELECT department_name, business_unit, fiscal_year, "
+        "COUNT(*) AS document_count, SUM(grand_total) AS total_value "
+        "FROM gold_document WHERE fiscal_year IS NOT NULL "
+        "GROUP BY department_name, business_unit, fiscal_year"
+    ),
+    "supplier_fiscal_year_spend": (
+        "SELECT canonical_name, fiscal_year, "
+        "COUNT(*) AS document_count, SUM(grand_total) AS total_value "
+        "FROM gold_document WHERE fiscal_year IS NOT NULL "
+        "GROUP BY canonical_name, fiscal_year"
+    ),
+}
+
+
+def export_mart_csvs(
+    serve_path: Path = SERVE_DB, marts_dir: Path = MARTS_DIR, log=print
+) -> dict[str, int]:
+    """Write the curated marts as CSVs for BI tools (Power BI Web connector).
+
+    Reads from the slim SERVE DB (self-contained — run ``export_serve_db``
+    first), so the CSVs always match what the online front ends serve. The
+    directory is published next to ``warehouse-serve.db`` by
+    ``data_sync.publish_serve_db`` and refreshes on the same CI cadence.
+    """
+    import csv
+
+    serve_path, marts_dir = Path(serve_path), Path(marts_dir)
+    if not serve_path.exists():
+        raise FileNotFoundError(f"{serve_path} not found — run `warehouse serve-export` first")
+    marts_dir.mkdir(parents=True, exist_ok=True)
+    counts: dict[str, int] = {}
+    con = sqlite3.connect(f"file:{serve_path}?mode=ro", uri=True)
+    try:
+        for name, sql in _MART_CSV_EXPORTS.items():
+            cur = con.execute(sql)
+            out = marts_dir / f"{name}.csv"
+            with out.open("w", newline="", encoding="utf-8") as fh:
+                writer = csv.writer(fh)
+                writer.writerow([d[0] for d in cur.description])
+                rows = 0
+                for row in cur:
+                    writer.writerow(row)
+                    rows += 1
+            counts[name] = rows
+            log(f"mart-csv: {out.name} ({rows} rows)")
+    finally:
+        con.close()
+    return counts
+
+
 def _cli() -> None:
     ap = argparse.ArgumentParser(description="SCPRS medallion warehouse (bronze/silver/gold).")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -1779,7 +1847,8 @@ def _cli() -> None:
     sub.add_parser("dq", help="Run data-quality checks against the current warehouse")
     sub.add_parser("info", help="Show layer row counts and last batch")
     sub.add_parser(
-        "serve-export", help="Write the slim serving-only DB (gold + star) for the front ends"
+        "serve-export",
+        help="Write the slim serving-only DB (gold + star) + the BI mart CSVs for Power BI",
     )
     args = ap.parse_args()
 
@@ -1787,6 +1856,7 @@ def _cli() -> None:
         build_all()
     elif args.cmd == "serve-export":
         export_serve_db()
+        export_mart_csvs()
     elif args.cmd == "dq":
         con = _connect()
         try:

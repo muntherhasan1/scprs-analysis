@@ -173,7 +173,10 @@ with a browser. Never duplicate the query guard into a front end — extend
 has `generate_chart` / `generate_report` tools (matplotlib via `src/charting.py`;
 reports served at unauthenticated `/files/` capability URLs) so a **Microsoft 365
 / Copilot Studio agent** can produce query results *and* executive reports — see
-`docs/COPILOT_STUDIO.md`.
+`docs/COPILOT_STUDIO.md`. A third, non-LLM feed: `serve-export` also writes
+curated **BI mart CSVs** (`warehouse._MART_CSV_EXPORTS` → `data/marts/`),
+published under `marts/` in the serve dataset for Power BI's Web connector —
+see `docs/POWER_BI.md`.
 
 ## Security & conventions
 

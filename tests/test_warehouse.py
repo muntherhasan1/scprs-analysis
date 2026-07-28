@@ -318,6 +318,27 @@ def test_export_serve_db_is_slim_and_self_contained(tmp_path):
         full.close()
 
 
+def test_export_mart_csvs_from_serve_db(tmp_path):
+    """Every curated BI export runs against the slim serve DB and writes a CSV
+    with a header row — a mart renamed/dropped in gold must fail HERE, not in a
+    Power BI refresh."""
+    src, wh = tmp_path / "scprs.db", tmp_path / "warehouse.db"
+    serve = tmp_path / "warehouse-serve.db"
+    _seed_source(src)
+    warehouse.build_all(
+        wh_path=wh, source_path=src, enrichment_db=tmp_path / "no_enrich.db", log=lambda *a: None
+    )
+    warehouse.export_serve_db(wh_path=wh, serve_path=serve, log=lambda *a: None)
+    marts_dir = tmp_path / "marts"
+    counts = warehouse.export_mart_csvs(serve_path=serve, marts_dir=marts_dir, log=lambda *a: None)
+    assert set(counts) == set(warehouse._MART_CSV_EXPORTS)
+    for name in counts:
+        lines = (marts_dir / f"{name}.csv").read_text(encoding="utf-8").splitlines()
+        assert len(lines) == counts[name] + 1  # header + data rows
+    # The seeded source has documents, so the export-only aggregates carry data.
+    assert counts["department_fiscal_year_spend"] > 0
+
+
 def test_contract_change_capture(tmp_path):
     """Append-only history records amendments; the change-log derives the transition."""
     src, wh = tmp_path / "scprs.db", tmp_path / "warehouse.db"

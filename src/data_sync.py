@@ -173,14 +173,32 @@ def publish_serve_db(serve_path: Path, repo: str, token: str | None = None) -> s
     """Upload the serve DB to the private HF Dataset ``repo`` (created if missing).
 
     Returns the commit URL. Called by the pipeline after a build; the token defaults
-    to ``HF_TOKEN`` / the caller's cached HF login.
+    to ``HF_TOKEN`` / the caller's cached HF login. When the sibling BI mart-CSV
+    directory exists (``warehouse serve-export`` writes it), it is published too,
+    under ``marts/`` — the Power BI Web-connector feed (docs/POWER_BI.md).
     """
     serve_path = Path(serve_path)
     if not serve_path.exists():
         raise FileNotFoundError(f"{serve_path} not found — run `warehouse serve-export` first")
-    return _upload_db(
+    url = _upload_db(
         serve_path, repo, SERVE_FILENAME, token or os.environ.get("HF_TOKEN"), "Publish serve DB"
     )
+    marts_dir = serve_path.parent / "marts"
+    if marts_dir.is_dir() and any(marts_dir.glob("*.csv")):
+        from huggingface_hub import HfApi
+
+        _with_retries(
+            lambda: HfApi(token=token or os.environ.get("HF_TOKEN")).upload_folder(
+                folder_path=str(marts_dir),
+                repo_id=repo,
+                repo_type="dataset",
+                path_in_repo="marts",
+                allow_patterns=["*.csv"],
+                commit_message="Publish BI mart CSVs",
+            ),
+            what=f"mart-CSV publish to {repo}",
+        )
+    return url
 
 
 # --------------------------------------------------------------- operational DB (Wave 2)
