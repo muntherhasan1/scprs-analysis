@@ -22,8 +22,9 @@ name: Pipeline monitor
 # grace period means the pipeline OR its monitor is down.
 on:
   schedule:
-    # Offset ~35 min behind enrich's "17 2,8,14,20" so each monitor tick sees
-    # the slot's outcome without racing it.
+    # Offset ~35 min behind an enrich slot start ("17 */3"). A tick can land
+    # while that slot is still running — harmless: the check is on the age of
+    # the last SUCCESS, not the current run.
     - cron: "52 3,9,15,21 * * *"
   workflow_dispatch:
 
@@ -38,8 +39,8 @@ concurrency:
 
 env:
   ALERT_LABEL: pipeline-monitor-alert
-  # Enrich publishes every 6h; 14h = two missed slots + runtime.
-  MAX_AGE_HOURS: "14"
+  # Enrich publishes every 3h; 8h = two missed slots + ~1.5h runtime headroom.
+  MAX_AGE_HOURS: "8"
 
 jobs:
   monitor:

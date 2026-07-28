@@ -26,7 +26,7 @@ jobs:
   diff:
     runs-on: ubuntu-latest
     # TWO full warehouse builds; measured 14m45s on 2026-07-23 (PR #42) and
-    # growing ~6h-ly with enrichment — 45 min keeps headroom ahead of growth.
+    # growing ~3h-ly with enrichment — 45 min keeps headroom ahead of growth.
     timeout-minutes: 45
     env:
       PYTHONUNBUFFERED: "1" # a killed run must still show how far it got

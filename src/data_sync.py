@@ -451,6 +451,12 @@ def _cli() -> None:
     pub = sub.add_parser("publish", help="Upload data/warehouse-serve.db to the dataset")
     pub.add_argument("--dataset", default=os.environ.get("WAREHOUSE_DATASET"))
 
+    fsv = sub.add_parser(
+        "fetch-serve",
+        help="Download warehouse-serve.db from WAREHOUSE_DATASET (read-only review/replay jobs)",
+    )
+    fsv.add_argument("--dest", default=str(warehouse.SERVE_DB))
+
     fop = sub.add_parser(
         "fetch-operational",
         help="Download scprs.db (and the supplier/CMAS/eProcure side inputs, if published) "
@@ -516,6 +522,10 @@ def _cli() -> None:
             raise SystemExit("set --dataset or the WAREHOUSE_DATASET env var")
         url = publish_serve_db(warehouse.SERVE_DB, args.dataset, token=_publish_token())
         print(f"Published {warehouse.SERVE_DB.name} -> {args.dataset}: {url}")
+    elif args.cmd == "fetch-serve":
+        if not ensure_local_db(Path(args.dest)):
+            raise SystemExit("set the WAREHOUSE_DATASET env var")
+        print(f"Fetched {SERVE_FILENAME} into {args.dest}")
     elif args.cmd == "fetch-operational":
         if not args.dataset:
             raise SystemExit("set --dataset or the SCPRS_DATASET env var")
