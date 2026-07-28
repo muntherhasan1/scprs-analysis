@@ -57,10 +57,12 @@ jobs:
 
       - name: Install dependencies
         # httpx (nl_query's Gemini client) lives in requirements-web.txt with
-        # gradio; install it alone — this job needs no UI.
+        # gradio — install it alone, this job needs no UI. huggingface_hub is
+        # NOT in requirements.txt (the pipeline workflows all add it
+        # explicitly); data_sync + the log fetch need it here.
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt "httpx>=0.28.1"
+          pip install -r requirements.txt "huggingface_hub>=0.25" "httpx>=0.28.1"
 
       - name: Fetch serve DB
         env:
