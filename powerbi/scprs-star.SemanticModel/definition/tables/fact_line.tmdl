@@ -1,0 +1,158 @@
+table fact_line
+	lineageTag: 38a57ccd-8d7c-4f18-a20d-48d426e66f27
+
+	measure 'Line Amount (enriched docs only)' = SUM(fact_line[line_amount])
+		lineageTag: 018a8dd6-cddd-4ac6-894b-1295ed086873
+
+	column line_sk
+		dataType: int64
+		isHidden
+		lineageTag: f1f276f4-f42a-460c-8f8d-9a6184f0f0c8
+		summarizeBy: none
+		sourceColumn: line_sk
+
+		annotation SummarizationSetBy = Automatic
+
+	column document_bk
+		dataType: string
+		isHidden
+		lineageTag: 9b11b8bd-de31-4202-aecb-8a9aa49d379c
+		summarizeBy: none
+		sourceColumn: document_bk
+
+		annotation SummarizationSetBy = Automatic
+
+	column purchase_document
+		dataType: string
+		lineageTag: e5bcbc81-d359-4c54-82ce-dee70195b6fc
+		summarizeBy: none
+		sourceColumn: purchase_document
+
+		annotation SummarizationSetBy = Automatic
+
+	column line_number
+		dataType: int64
+		lineageTag: 752aef3b-e1c0-4e12-b5e0-439cb7aeeb02
+		summarizeBy: none
+		sourceColumn: line_number
+
+		annotation SummarizationSetBy = Automatic
+
+	column line_status
+		dataType: string
+		lineageTag: bf47136b-8d5c-4f43-a393-a08e381953fb
+		summarizeBy: none
+		sourceColumn: line_status
+
+		annotation SummarizationSetBy = Automatic
+
+	column item_description
+		dataType: string
+		lineageTag: 9e514fc6-bfdf-4b56-9452-bd09fd454787
+		summarizeBy: none
+		sourceColumn: item_description
+
+		annotation SummarizationSetBy = Automatic
+
+	column start_date_key
+		dataType: int64
+		isHidden
+		lineageTag: 86146019-d7f8-4551-b949-ee29a945d81b
+		summarizeBy: none
+		sourceColumn: start_date_key
+
+		annotation SummarizationSetBy = Automatic
+
+	column dept_key
+		dataType: int64
+		isHidden
+		lineageTag: 590d51a7-0b6e-4351-be48-4b225abc6c37
+		summarizeBy: none
+		sourceColumn: dept_key
+
+		annotation SummarizationSetBy = Automatic
+
+	column supplier_key
+		dataType: int64
+		isHidden
+		lineageTag: d826d146-bfd9-4eaa-bf0f-02c3c124750b
+		summarizeBy: none
+		sourceColumn: supplier_key
+
+		annotation SummarizationSetBy = Automatic
+
+	column buyer_key
+		dataType: int64
+		isHidden
+		lineageTag: 23654528-66ee-4293-a0ab-196e37131ddb
+		summarizeBy: none
+		sourceColumn: buyer_key
+
+		annotation SummarizationSetBy = Automatic
+
+	column acq_key
+		dataType: int64
+		isHidden
+		lineageTag: 643cf389-523c-479e-b064-87730232e879
+		summarizeBy: none
+		sourceColumn: acq_key
+
+		annotation SummarizationSetBy = Automatic
+
+	column unspsc_key
+		dataType: int64
+		isHidden
+		lineageTag: da487bf5-c1b1-4052-8e03-72d8798a69cb
+		summarizeBy: none
+		sourceColumn: unspsc_key
+
+		annotation SummarizationSetBy = Automatic
+
+	column quantity
+		dataType: double
+		lineageTag: 2ba67e28-6be5-4231-816f-b162ad8b0adc
+		summarizeBy: sum
+		sourceColumn: quantity
+
+		annotation SummarizationSetBy = Automatic
+
+	column unit_price
+		dataType: double
+		lineageTag: 927b5ffe-f3f1-4208-8a43-cecf3393188d
+		summarizeBy: none
+		sourceColumn: unit_price
+
+		annotation SummarizationSetBy = Automatic
+
+	column line_amount
+		dataType: double
+		lineageTag: d22017f9-8705-468a-a36d-f81be9a47d26
+		summarizeBy: sum
+		sourceColumn: line_amount
+
+		annotation SummarizationSetBy = Automatic
+
+	column dw_batch_id
+		dataType: string
+		isHidden
+		lineageTag: 8504be5f-6b89-4d77-b208-9c6890f44dd1
+		summarizeBy: none
+		sourceColumn: dw_batch_id
+
+		annotation SummarizationSetBy = Automatic
+
+	column dw_loaded_at
+		dataType: string
+		isHidden
+		lineageTag: c735fc1c-c2ce-46d1-89a3-4bf2c355a42e
+		summarizeBy: none
+		sourceColumn: dw_loaded_at
+
+		annotation SummarizationSetBy = Automatic
+
+	partition fact_line = m
+		mode: import
+		source =
+				LoadStar("fact_line")
+
+	annotation PBI_ResultType = Table

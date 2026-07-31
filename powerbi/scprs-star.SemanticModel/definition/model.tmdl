@@ -1,0 +1,21 @@
+model Model
+	culture: en-US
+	defaultPowerBIDataSourceVersion: powerBI_V3
+	sourceQueryCulture: en-US
+	dataAccessOptions
+		legacyRedirects
+		returnErrorValuesAsNull
+
+	annotation PBI_QueryOrder = ["Token", "LoadMart", "LoadStar", "fact_document", "fact_line", "fact_associated_po", "dim_supplier", "dim_department", "dim_date", "dim_acquisition", "dim_buyer", "dim_unspsc"]
+
+	annotation __PBI_TimeIntelligenceEnabled = 0
+
+ref table fact_document
+ref table fact_line
+ref table fact_associated_po
+ref table dim_supplier
+ref table dim_department
+ref table dim_date
+ref table dim_acquisition
+ref table dim_buyer
+ref table dim_unspsc

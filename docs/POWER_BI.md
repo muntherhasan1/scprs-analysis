@@ -42,10 +42,14 @@ let
     Url   = "https://huggingface.co/datasets/munther-hasan/scprs-warehouse-data/resolve/main/marts/" & Name & ".csv",
     Raw   = Web.Contents(Url, [Headers=[Authorization="Bearer " & Token]]),
     Csv   = Csv.Document(Raw, [Delimiter=",", Encoding=65001, QuoteStyle=QuoteStyle.Csv]),
-    Table = Table.PromoteHeaders(Csv, [PromoteAllScalars=true])
+    Promoted = Table.PromoteHeaders(Csv, [PromoteAllScalars=true])
 in
-    Table
+    Promoted
 ```
+
+(Don't name that step `Table` — M's `let` scope is recursive, so a local named
+`Table` shadows the standard library and `Table.PromoteHeaders` becomes a
+cyclic reference.)
 
 Query `LoadStar` (Parquet star exports, see below):
 
@@ -142,6 +146,18 @@ document **current version** (no version double-counting), and vendor slicers
 should use `dim_supplier.canonical_name` (one company can hold several
 `supplier_id` registrations — slice on canonical, show `supplier_name` in
 detail tables).
+
+## Ready-made PBIP project (skip all of the above)
+
+`powerbi/scprs-star.pbip` is a Power BI Project with the whole star pre-wired:
+the `Token` parameter, `LoadMart`/`LoadStar` functions, all nine tables (typed
+columns, surrogate keys hidden), the twelve relationships, `dim_date` marked
+as the date table (`full_date` coerced string→date in its partition), and
+starter measures that encode the grain rules (`Total Contract Value` =
+document-grain `grand_total`; the line-amount measure is labeled
+enriched-docs-only). Open it in Power BI Desktop (a 2024+ build — the model is
+stored as TMDL), set `Token` under Transform data → Manage parameters, and
+Refresh. `powerbi/.gitignore` keeps Desktop's local `.pbi/` caches out of git.
 
 ## Modeling notes (the usual traps)
 

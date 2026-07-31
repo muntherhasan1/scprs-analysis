@@ -1,0 +1,67 @@
+table dim_supplier
+	lineageTag: dcbcbf12-6353-4ced-9be3-a281fbeec9c5
+
+	column supplier_key
+		dataType: int64
+		isHidden
+		lineageTag: d92ae56e-5f3d-43c6-8655-5965ec528b30
+		summarizeBy: none
+		sourceColumn: supplier_key
+
+		annotation SummarizationSetBy = Automatic
+
+	column supplier_id
+		dataType: string
+		lineageTag: b0b6d1cf-c96e-4406-a780-d7f49207639c
+		summarizeBy: none
+		sourceColumn: supplier_id
+
+		annotation SummarizationSetBy = Automatic
+
+	column supplier_name
+		dataType: string
+		lineageTag: 82bb758c-c255-4bc3-82af-e441ae0974fe
+		summarizeBy: none
+		sourceColumn: supplier_name
+
+		annotation SummarizationSetBy = Automatic
+
+	column dw_loaded_at
+		dataType: string
+		isHidden
+		lineageTag: 0c2dbb53-72a7-450a-b19e-250b9b0112e2
+		summarizeBy: none
+		sourceColumn: dw_loaded_at
+
+		annotation SummarizationSetBy = Automatic
+
+	column canonical_id
+		dataType: string
+		lineageTag: 6016af44-ab95-40f1-bba6-de5e00db0bb7
+		summarizeBy: none
+		sourceColumn: canonical_id
+
+		annotation SummarizationSetBy = Automatic
+
+	column canonical_name
+		dataType: string
+		lineageTag: 026f3f4a-2fb3-4921-9de0-60f3a913a3a5
+		summarizeBy: none
+		sourceColumn: canonical_name
+
+		annotation SummarizationSetBy = Automatic
+
+	column parent_name
+		dataType: string
+		lineageTag: 4a68a2f2-79d5-4dd8-ae57-28796949120f
+		summarizeBy: none
+		sourceColumn: parent_name
+
+		annotation SummarizationSetBy = Automatic
+
+	partition dim_supplier = m
+		mode: import
+		source =
+				LoadStar("dim_supplier")
+
+	annotation PBI_ResultType = Table
