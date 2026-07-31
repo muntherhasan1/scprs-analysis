@@ -68,10 +68,15 @@ let
     Token = "hf_xxx",   // same read-scoped token
     Name  = "fact_document",
     Url   = "https://huggingface.co/datasets/munther-hasan/scprs-warehouse-data/resolve/main/marts/star/" & Name & ".parquet",
-    Table = Parquet.Document(Web.Contents(Url, [Headers=[Authorization="Bearer " & Token]]))
+    Table = Parquet.Document(Binary.Buffer(Web.Contents(Url, [Headers=[Authorization="Bearer " & Token]])))
 in
     Table
 ```
+
+`Binary.Buffer` is required: `Web.Contents` returns a streamed binary, and
+`Parquet.Document` errors on streams ("cannot be used with streamed binary
+values") because it must seek to the file-footer metadata. Buffering reads the
+whole file into memory first — fine at these sizes.
 
 Wire the relationships in Model view (all many-to-one, single direction,
 fact side → dim side):
