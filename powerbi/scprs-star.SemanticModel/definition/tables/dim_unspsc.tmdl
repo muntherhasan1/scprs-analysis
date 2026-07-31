@@ -1,0 +1,43 @@
+table dim_unspsc
+	lineageTag: a6655335-53f4-4c3f-bd78-0f9c13bd0fff
+
+	column unspsc_key
+		dataType: int64
+		isHidden
+		lineageTag: 42bbb202-4cd1-4bf8-85b4-e07be51a82e4
+		summarizeBy: none
+		sourceColumn: unspsc_key
+
+		annotation SummarizationSetBy = Automatic
+
+	column unspsc
+		dataType: string
+		lineageTag: ef1ff1d4-27e4-4d75-a46e-bf6b61cd60fe
+		summarizeBy: none
+		sourceColumn: unspsc
+
+		annotation SummarizationSetBy = Automatic
+
+	column unspsc_description
+		dataType: string
+		lineageTag: 35df06dc-9406-497e-b829-4c48339f4a94
+		summarizeBy: none
+		sourceColumn: unspsc_description
+
+		annotation SummarizationSetBy = Automatic
+
+	column dw_loaded_at
+		dataType: string
+		isHidden
+		lineageTag: 70a1b946-86e4-4ef8-b504-fd56645b8a04
+		summarizeBy: none
+		sourceColumn: dw_loaded_at
+
+		annotation SummarizationSetBy = Automatic
+
+	partition dim_unspsc = m
+		mode: import
+		source =
+				LoadStar("dim_unspsc")
+
+	annotation PBI_ResultType = Table

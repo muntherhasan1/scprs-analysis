@@ -1,0 +1,51 @@
+relationship f2113891-1d16-43a2-b274-a365f51db28b
+	fromColumn: fact_document.supplier_key
+	toColumn: dim_supplier.supplier_key
+
+relationship bf6f79e2-0f0d-4b77-ab52-75fefa2d17e0
+	fromColumn: fact_document.dept_key
+	toColumn: dim_department.dept_key
+
+relationship 2ccf9230-96b9-4ea4-8fd3-619ac0eab611
+	fromColumn: fact_document.acq_key
+	toColumn: dim_acquisition.acq_key
+
+relationship 8066179d-c3cb-49e3-bfca-0d537cfa241b
+	fromColumn: fact_document.buyer_key
+	toColumn: dim_buyer.buyer_key
+
+relationship 8b246c0f-9415-4f9b-8da4-f5f6ae9679e9
+	fromColumn: fact_document.start_date_key
+	toColumn: dim_date.date_key
+
+relationship 81813791-b957-4cba-9b43-88a52aec9424
+	fromColumn: fact_line.supplier_key
+	toColumn: dim_supplier.supplier_key
+
+relationship 0ccb8c41-46dd-4e34-96e9-fbf156152514
+	fromColumn: fact_line.dept_key
+	toColumn: dim_department.dept_key
+
+relationship 2b11c622-f6c5-4f7a-89ad-b0a1fa669c61
+	fromColumn: fact_line.acq_key
+	toColumn: dim_acquisition.acq_key
+
+relationship 519da3b5-c420-4395-8ad2-a183f2056a4a
+	fromColumn: fact_line.buyer_key
+	toColumn: dim_buyer.buyer_key
+
+relationship d7cd3169-921e-4075-9ca3-6e1b71730475
+	fromColumn: fact_line.unspsc_key
+	toColumn: dim_unspsc.unspsc_key
+
+relationship 25f2e01e-9f5c-47c2-9f5a-38bb0e3bc117
+	fromColumn: fact_line.start_date_key
+	toColumn: dim_date.date_key
+
+relationship 12d4536b-f996-498e-a513-394cc11be5ea
+	fromColumn: fact_associated_po.dept_key
+	toColumn: dim_department.dept_key
+
+relationship 8dacbf05-44c4-4c09-9bd2-6a786dda4ad6
+	fromColumn: fact_associated_po.start_date_key
+	toColumn: dim_date.date_key

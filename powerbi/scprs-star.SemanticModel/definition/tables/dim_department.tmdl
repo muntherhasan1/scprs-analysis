@@ -1,0 +1,43 @@
+table dim_department
+	lineageTag: 4849013f-55f1-4a3c-b1c8-b0e4ebb41e25
+
+	column dept_key
+		dataType: int64
+		isHidden
+		lineageTag: e2cec6af-1c46-48b5-8f48-59f6aa679ec8
+		summarizeBy: none
+		sourceColumn: dept_key
+
+		annotation SummarizationSetBy = Automatic
+
+	column business_unit
+		dataType: string
+		lineageTag: 9c264620-90c9-484b-9da6-a507a7fe35fb
+		summarizeBy: none
+		sourceColumn: business_unit
+
+		annotation SummarizationSetBy = Automatic
+
+	column department_name
+		dataType: string
+		lineageTag: 522fc331-29b7-4e1b-bdcd-2f6efd12c27d
+		summarizeBy: none
+		sourceColumn: department_name
+
+		annotation SummarizationSetBy = Automatic
+
+	column dw_loaded_at
+		dataType: string
+		isHidden
+		lineageTag: 9830b667-3fc5-4688-9f7c-5561b6ca9768
+		summarizeBy: none
+		sourceColumn: dw_loaded_at
+
+		annotation SummarizationSetBy = Automatic
+
+	partition dim_department = m
+		mode: import
+		source =
+				LoadStar("dim_department")
+
+	annotation PBI_ResultType = Table

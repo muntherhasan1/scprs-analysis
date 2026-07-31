@@ -1,0 +1,95 @@
+table fact_associated_po
+	lineageTag: cc924002-7603-457d-8620-27be955d125e
+
+	column po_sk
+		dataType: int64
+		isHidden
+		lineageTag: 5d9a38bd-c546-4d39-8cab-96052ed807c7
+		summarizeBy: none
+		sourceColumn: po_sk
+
+		annotation SummarizationSetBy = Automatic
+
+	column document_bk
+		dataType: string
+		isHidden
+		lineageTag: 88184ac0-710e-485f-a626-44b384ab710a
+		summarizeBy: none
+		sourceColumn: document_bk
+
+		annotation SummarizationSetBy = Automatic
+
+	column purchase_document
+		dataType: string
+		lineageTag: c21bdb38-e153-4fea-bb04-b79f56a650d7
+		summarizeBy: none
+		sourceColumn: purchase_document
+
+		annotation SummarizationSetBy = Automatic
+
+	column po_id
+		dataType: string
+		lineageTag: e6072b3d-bacc-466e-a1d6-f1ffdd9364d8
+		summarizeBy: none
+		sourceColumn: po_id
+
+		annotation SummarizationSetBy = Automatic
+
+	column po_status
+		dataType: string
+		lineageTag: 41c1f57b-4de4-4458-8b1b-6b25d0ebd007
+		summarizeBy: none
+		sourceColumn: po_status
+
+		annotation SummarizationSetBy = Automatic
+
+	column start_date_key
+		dataType: int64
+		isHidden
+		lineageTag: 5cc8cfb5-04ab-4a37-bb98-f8f721973a07
+		summarizeBy: none
+		sourceColumn: start_date_key
+
+		annotation SummarizationSetBy = Automatic
+
+	column dept_key
+		dataType: int64
+		isHidden
+		lineageTag: d84341b8-12ff-40ce-9f9b-598a6c953d25
+		summarizeBy: none
+		sourceColumn: dept_key
+
+		annotation SummarizationSetBy = Automatic
+
+	column po_total
+		dataType: double
+		lineageTag: 21f691e0-7c07-4d80-b022-5057f989ae72
+		summarizeBy: sum
+		sourceColumn: po_total
+
+		annotation SummarizationSetBy = Automatic
+
+	column dw_batch_id
+		dataType: string
+		isHidden
+		lineageTag: 6b9f69ba-6d67-4820-bc59-6de81d561e4c
+		summarizeBy: none
+		sourceColumn: dw_batch_id
+
+		annotation SummarizationSetBy = Automatic
+
+	column dw_loaded_at
+		dataType: string
+		isHidden
+		lineageTag: a7dfbeae-261e-4241-9b42-ed44630de673
+		summarizeBy: none
+		sourceColumn: dw_loaded_at
+
+		annotation SummarizationSetBy = Automatic
+
+	partition fact_associated_po = m
+		mode: import
+		source =
+				LoadStar("fact_associated_po")
+
+	annotation PBI_ResultType = Table

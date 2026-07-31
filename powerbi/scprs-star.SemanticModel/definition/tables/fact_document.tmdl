@@ -1,0 +1,192 @@
+table fact_document
+	lineageTag: f5f8f44f-03e4-4d4c-8dd7-6fd4f76c7bc9
+
+	measure 'Total Contract Value' = SUM(fact_document[grand_total])
+		lineageTag: 8940f946-7363-4fe1-a262-5aed7b59c088
+
+	measure 'Document Count' = COUNTROWS(fact_document)
+		lineageTag: 48de0901-54c9-4d56-8034-419d01bc5684
+
+	column document_sk
+		dataType: int64
+		isHidden
+		lineageTag: d10842b6-8656-4275-8899-a8e3bd07e900
+		summarizeBy: none
+		sourceColumn: document_sk
+
+		annotation SummarizationSetBy = Automatic
+
+	column document_bk
+		dataType: string
+		isHidden
+		lineageTag: 6b16374d-0040-4259-9fd4-d03c4040f27f
+		summarizeBy: none
+		sourceColumn: document_bk
+
+		annotation SummarizationSetBy = Automatic
+
+	column purchase_document
+		dataType: string
+		lineageTag: ef5ec2c1-288a-41b5-af74-27d875566421
+		summarizeBy: none
+		sourceColumn: purchase_document
+
+		annotation SummarizationSetBy = Automatic
+
+	column bill_code
+		dataType: string
+		lineageTag: 55548ebd-c602-4730-a38c-d651950ba481
+		summarizeBy: none
+		sourceColumn: bill_code
+
+		annotation SummarizationSetBy = Automatic
+
+	column status
+		dataType: string
+		lineageTag: 7e5afba4-dd0c-4fbe-940a-6cb8fb33c057
+		summarizeBy: none
+		sourceColumn: status
+
+		annotation SummarizationSetBy = Automatic
+
+	column version
+		dataType: double
+		lineageTag: df19af53-181e-42b5-85d8-399a37f7f9e2
+		summarizeBy: none
+		sourceColumn: version
+
+		annotation SummarizationSetBy = Automatic
+
+	column is_enriched
+		dataType: int64
+		lineageTag: 7b9afb85-b067-484b-ad30-0db744051bff
+		summarizeBy: none
+		sourceColumn: is_enriched
+
+		annotation SummarizationSetBy = Automatic
+
+	column has_associated_pos
+		dataType: int64
+		lineageTag: ed9fe7f1-d4f3-491f-a54e-a2ab7e1b5fc4
+		summarizeBy: none
+		sourceColumn: has_associated_pos
+
+		annotation SummarizationSetBy = Automatic
+
+	column start_date_key
+		dataType: int64
+		isHidden
+		lineageTag: 7003ab6b-18a8-477c-a85c-306e8ec8c435
+		summarizeBy: none
+		sourceColumn: start_date_key
+
+		annotation SummarizationSetBy = Automatic
+
+	column dept_key
+		dataType: int64
+		isHidden
+		lineageTag: ebdf8667-708e-44b9-918d-66bcb6469118
+		summarizeBy: none
+		sourceColumn: dept_key
+
+		annotation SummarizationSetBy = Automatic
+
+	column supplier_key
+		dataType: int64
+		isHidden
+		lineageTag: 054c8e98-9499-42d7-8a9e-657133220002
+		summarizeBy: none
+		sourceColumn: supplier_key
+
+		annotation SummarizationSetBy = Automatic
+
+	column buyer_key
+		dataType: int64
+		isHidden
+		lineageTag: 26ce5f36-956b-4952-a4cf-e3b6511ca02d
+		summarizeBy: none
+		sourceColumn: buyer_key
+
+		annotation SummarizationSetBy = Automatic
+
+	column acq_key
+		dataType: int64
+		isHidden
+		lineageTag: 5eeadc98-e5f9-4ecf-9721-e8993e3a7814
+		summarizeBy: none
+		sourceColumn: acq_key
+
+		annotation SummarizationSetBy = Automatic
+
+	column merchandise_amount
+		dataType: double
+		lineageTag: 0b8ae5ea-7e03-4ef1-b708-97f58052cec0
+		summarizeBy: sum
+		sourceColumn: merchandise_amount
+
+		annotation SummarizationSetBy = Automatic
+
+	column freight_tax_misc
+		dataType: double
+		lineageTag: d171170f-a9ee-472d-a4d9-5967b662d4de
+		summarizeBy: sum
+		sourceColumn: freight_tax_misc
+
+		annotation SummarizationSetBy = Automatic
+
+	column grand_total
+		dataType: double
+		lineageTag: f214c730-23cc-4802-bcdd-b886dc272362
+		summarizeBy: sum
+		sourceColumn: grand_total
+
+		annotation SummarizationSetBy = Automatic
+
+	column line_count
+		dataType: int64
+		lineageTag: f6f8f43e-bd27-48a9-bdb2-43d4c88f13dc
+		summarizeBy: sum
+		sourceColumn: line_count
+
+		annotation SummarizationSetBy = Automatic
+
+	column associated_po_count
+		dataType: int64
+		lineageTag: 9c154a9b-bc5f-4f41-8089-7825d426368f
+		summarizeBy: sum
+		sourceColumn: associated_po_count
+
+		annotation SummarizationSetBy = Automatic
+
+	column dq_line_reconciles
+		dataType: double
+		lineageTag: b6d36593-9b4b-4566-9aa7-c48e76b7518c
+		summarizeBy: none
+		sourceColumn: dq_line_reconciles
+
+		annotation SummarizationSetBy = Automatic
+
+	column dw_batch_id
+		dataType: string
+		isHidden
+		lineageTag: ef51dbba-b138-4fa8-80c3-9da00c55d658
+		summarizeBy: none
+		sourceColumn: dw_batch_id
+
+		annotation SummarizationSetBy = Automatic
+
+	column dw_loaded_at
+		dataType: string
+		isHidden
+		lineageTag: 801cc6e4-2369-49be-9453-8319b4ec651e
+		summarizeBy: none
+		sourceColumn: dw_loaded_at
+
+		annotation SummarizationSetBy = Automatic
+
+	partition fact_document = m
+		mode: import
+		source =
+				LoadStar("fact_document")
+
+	annotation PBI_ResultType = Table

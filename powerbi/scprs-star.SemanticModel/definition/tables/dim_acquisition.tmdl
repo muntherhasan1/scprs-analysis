@@ -1,0 +1,59 @@
+table dim_acquisition
+	lineageTag: 5a3cc5d1-a1ca-40e9-b140-d8eabdf07aee
+
+	column acq_key
+		dataType: int64
+		isHidden
+		lineageTag: 563a8d41-9e9e-474f-b5b3-9f015b8662b0
+		summarizeBy: none
+		sourceColumn: acq_key
+
+		annotation SummarizationSetBy = Automatic
+
+	column acquisition_type
+		dataType: string
+		lineageTag: f4f02fd5-8c87-4ffe-895f-4b9fc4cf7339
+		summarizeBy: none
+		sourceColumn: acquisition_type
+
+		annotation SummarizationSetBy = Automatic
+
+	column acquisition_sub_type
+		dataType: string
+		lineageTag: 312e279a-8e5a-4b0c-844f-ad6e89c7a6f0
+		summarizeBy: none
+		sourceColumn: acquisition_sub_type
+
+		annotation SummarizationSetBy = Automatic
+
+	column acquisition_method
+		dataType: string
+		lineageTag: 5c7cd21a-187c-480d-92a8-fcafd5d72232
+		summarizeBy: none
+		sourceColumn: acquisition_method
+
+		annotation SummarizationSetBy = Automatic
+
+	column competitive_flag
+		dataType: string
+		lineageTag: 88f17fe4-a63e-4155-a749-231544328f0b
+		summarizeBy: none
+		sourceColumn: competitive_flag
+
+		annotation SummarizationSetBy = Automatic
+
+	column dw_loaded_at
+		dataType: string
+		isHidden
+		lineageTag: fb8b22a9-8151-41ec-990b-cef70f1c45df
+		summarizeBy: none
+		sourceColumn: dw_loaded_at
+
+		annotation SummarizationSetBy = Automatic
+
+	partition dim_acquisition = m
+		mode: import
+		source =
+				LoadStar("dim_acquisition")
+
+	annotation PBI_ResultType = Table

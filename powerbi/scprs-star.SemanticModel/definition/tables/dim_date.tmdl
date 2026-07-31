@@ -1,0 +1,107 @@
+table dim_date
+	lineageTag: 28fd9572-be76-4872-a750-ae34f29798ca
+	dataCategory: Time
+
+	column date_key
+		dataType: int64
+		isHidden
+		lineageTag: d839aba5-08ee-4923-ac7f-07415609cceb
+		summarizeBy: none
+		sourceColumn: date_key
+
+		annotation SummarizationSetBy = Automatic
+
+	column full_date
+		dataType: dateTime
+		isKey
+		formatString: Long Date
+		lineageTag: 188c78ad-e603-4d2b-bdb9-ae992af37ec3
+		summarizeBy: none
+		sourceColumn: full_date
+
+		annotation SummarizationSetBy = Automatic
+
+		annotation UnderlyingDateTimeDataType = Date
+
+	column year
+		dataType: int64
+		lineageTag: 8bf90356-7636-4bf5-a2c1-9a22e2c317f0
+		summarizeBy: none
+		sourceColumn: year
+
+		annotation SummarizationSetBy = Automatic
+
+	column quarter
+		dataType: int64
+		lineageTag: 14915079-92dd-46e8-8374-0c16493fed22
+		summarizeBy: none
+		sourceColumn: quarter
+
+		annotation SummarizationSetBy = Automatic
+
+	column month
+		dataType: int64
+		lineageTag: e83bec6e-35b3-4dd2-9f09-cd7793b01ada
+		summarizeBy: none
+		sourceColumn: month
+
+		annotation SummarizationSetBy = Automatic
+
+	column month_name
+		dataType: string
+		lineageTag: a8e35a3e-7c39-4c46-9b41-8a457561a043
+		summarizeBy: none
+		sourceColumn: month_name
+
+		annotation SummarizationSetBy = Automatic
+
+	column day
+		dataType: int64
+		lineageTag: 2b445cae-669d-442c-8147-0ebba1d4ac67
+		summarizeBy: none
+		sourceColumn: day
+
+		annotation SummarizationSetBy = Automatic
+
+	column day_of_week
+		dataType: string
+		lineageTag: b4028e1a-6907-49d9-b362-c1b33677e5d5
+		summarizeBy: none
+		sourceColumn: day_of_week
+
+		annotation SummarizationSetBy = Automatic
+
+	column fiscal_year
+		dataType: int64
+		lineageTag: e30b5d4b-f4f5-4e5d-b7fc-f493a5fc8f0e
+		summarizeBy: none
+		sourceColumn: fiscal_year
+
+		annotation SummarizationSetBy = Automatic
+
+	column fiscal_quarter
+		dataType: int64
+		lineageTag: 94330720-0c7d-40cb-9b7d-a53692f305b8
+		summarizeBy: none
+		sourceColumn: fiscal_quarter
+
+		annotation SummarizationSetBy = Automatic
+
+	partition dim_date = m
+		mode: import
+		source =
+				let
+					Source = LoadStar("dim_date"),
+					Typed = Table.TransformColumnTypes(Source, {
+						{"full_date", type date},
+						{"year", Int64.Type},
+						{"quarter", Int64.Type},
+						{"month", Int64.Type},
+						{"day", Int64.Type},
+						{"fiscal_year", Int64.Type},
+						{"fiscal_quarter", Int64.Type}
+					})
+				in
+					Typed
+
+	annotation PBI_ResultType = Table

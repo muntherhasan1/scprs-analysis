@@ -1,0 +1,17 @@
+{
+  "config": "{\"version\": \"5.43\"}",
+  "filters": "[]",
+  "layoutOptimization": 0,
+  "sections": [
+    {
+      "config": "{}",
+      "displayName": "Overview",
+      "displayOption": 1,
+      "filters": "[]",
+      "height": 720.0,
+      "name": "ReportSection",
+      "visualContainers": [],
+      "width": 1280.0
+    }
+  ]
+}

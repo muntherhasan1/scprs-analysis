@@ -1,0 +1,11 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/fabric/gitIntegration/platformProperties/2.0.0/schema.json",
+  "metadata": {
+    "type": "Report",
+    "displayName": "scprs-star"
+  },
+  "config": {
+    "version": "2.0",
+    "logicalId": "71badfc5-e000-4b0d-8beb-3e0cbbbd71b2"
+  }
+}
