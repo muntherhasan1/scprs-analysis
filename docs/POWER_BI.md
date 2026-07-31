@@ -22,21 +22,51 @@ belongs to the MCP/NL front ends.
 
 1. **Mint a token** (huggingface.co/settings/tokens): fine-grained, **read**
    on `munther-hasan/scprs-warehouse-data` only. Don't reuse a write token.
-2. In Power BI Desktop: **Get Data → Blank Query → Advanced Editor**, paste
-   the M below, one query per mart (rename the query to the mart name).
+2. In Power BI Desktop, define the plumbing **once** — a `Token` parameter and
+   two loader functions (Get Data → Blank Query → Advanced Editor, one query
+   each, named exactly as shown). Every table is then a one-liner.
 3. First connect: choose **Anonymous** when Power BI asks for credentials —
    authorization is carried by the explicit header, not the credential UI.
 
+Query `Token` (a text parameter — token rotation = edit this one value):
+
 ```m
+"hf_xxx" meta [IsParameterQuery=true, Type="Text", IsParameterQueryRequired=true]
+```
+
+Query `LoadMart` (flat CSV marts):
+
+```m
+(Name as text) =>
 let
-    Token = "hf_xxx",   // read-scoped; store as a Power BI parameter
-    Mart  = "department_fiscal_year_spend",
-    Url   = "https://huggingface.co/datasets/munther-hasan/scprs-warehouse-data/resolve/main/marts/" & Mart & ".csv",
+    Url   = "https://huggingface.co/datasets/munther-hasan/scprs-warehouse-data/resolve/main/marts/" & Name & ".csv",
     Raw   = Web.Contents(Url, [Headers=[Authorization="Bearer " & Token]]),
     Csv   = Csv.Document(Raw, [Delimiter=",", Encoding=65001, QuoteStyle=QuoteStyle.Csv]),
     Table = Table.PromoteHeaders(Csv, [PromoteAllScalars=true])
 in
     Table
+```
+
+Query `LoadStar` (Parquet star exports, see below):
+
+```m
+(Name as text) =>
+Parquet.Document(
+    Binary.Buffer(
+        Web.Contents(
+            "https://huggingface.co/datasets/munther-hasan/scprs-warehouse-data/resolve/main/marts/star/" & Name & ".parquet",
+            [Headers=[Authorization="Bearer " & Token]]
+        )
+    )
+)
+```
+
+Then each table is a New Blank Query with a single formula-bar line — rename
+the query to the table name and Close & Apply loads them all in one pass:
+
+```m
+= LoadMart("department_fiscal_year_spend")
+= LoadStar("fact_document")
 ```
 
 Then set column types in the query editor (Power BI infers text for
@@ -63,20 +93,26 @@ warehouse's Kimball star via the `lv_*` logical views, as Parquet:
 `dim_supplier`, `dim_department`, `dim_date`, `dim_acquisition`, `dim_buyer`,
 `dim_unspsc`.
 
+Load all nine as one-liners over the `LoadStar` function from the setup
+section (one blank query each, named after the table):
+
 ```m
-let
-    Token = "hf_xxx",   // same read-scoped token
-    Name  = "fact_document",
-    Url   = "https://huggingface.co/datasets/munther-hasan/scprs-warehouse-data/resolve/main/marts/star/" & Name & ".parquet",
-    Table = Parquet.Document(Binary.Buffer(Web.Contents(Url, [Headers=[Authorization="Bearer " & Token]])))
-in
-    Table
+= LoadStar("fact_document")
+= LoadStar("fact_line")
+= LoadStar("fact_associated_po")
+= LoadStar("dim_supplier")
+= LoadStar("dim_department")
+= LoadStar("dim_date")
+= LoadStar("dim_acquisition")
+= LoadStar("dim_buyer")
+= LoadStar("dim_unspsc")
 ```
 
-`Binary.Buffer` is required: `Web.Contents` returns a streamed binary, and
-`Parquet.Document` errors on streams ("cannot be used with streamed binary
-values") because it must seek to the file-footer metadata. Buffering reads the
-whole file into memory first — fine at these sizes.
+The `Binary.Buffer` inside `LoadStar` is required: `Web.Contents` returns a
+streamed binary, and `Parquet.Document` errors on streams ("cannot be used
+with streamed binary values") because it must seek to the file-footer
+metadata. Buffering reads the whole file into memory first — fine at these
+sizes.
 
 Wire the relationships in Model view (all many-to-one, single direction,
 fact side → dim side):
