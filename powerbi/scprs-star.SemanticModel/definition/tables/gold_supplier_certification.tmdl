@@ -1,0 +1,122 @@
+table gold_supplier_certification
+	lineageTag: 14a49d6b-36bd-4134-9b4d-3e0bdc5b6af7
+
+	column canonical_id
+		dataType: string
+		lineageTag: 54eb18a1-d226-414e-ba1b-e406b0d2f6bb
+		summarizeBy: none
+		sourceColumn: canonical_id
+
+		annotation SummarizationSetBy = Automatic
+
+	column canonical_name
+		dataType: string
+		lineageTag: 58704956-49c1-476b-a822-f2cd15b1f78f
+		summarizeBy: none
+		sourceColumn: canonical_name
+
+		annotation SummarizationSetBy = Automatic
+
+	column registration_count
+		dataType: int64
+		lineageTag: b08b6d61-b9af-4eb9-9332-01ba980294f0
+		summarizeBy: none
+		sourceColumn: registration_count
+
+		annotation SummarizationSetBy = Automatic
+
+	column document_count
+		dataType: int64
+		lineageTag: a78df0a8-f7d4-4ff4-835f-6b2e872d1ec0
+		summarizeBy: sum
+		sourceColumn: document_count
+
+		annotation SummarizationSetBy = Automatic
+
+	column scprs_total_value
+		dataType: double
+		lineageTag: 3c262c98-8670-40c7-bb81-94598612c86c
+		summarizeBy: sum
+		sourceColumn: scprs_total_value
+
+		annotation SummarizationSetBy = Automatic
+
+	column cert_record_count
+		dataType: int64
+		lineageTag: 91dcd151-6807-4c7e-a38f-68e0f672b453
+		summarizeBy: none
+		sourceColumn: cert_record_count
+
+		annotation SummarizationSetBy = Automatic
+
+	column cert_small_business
+		dataType: int64
+		lineageTag: 4088a4d6-3da8-4bfb-a594-78edd619b562
+		summarizeBy: none
+		sourceColumn: cert_small_business
+
+		annotation SummarizationSetBy = Automatic
+
+	column cert_micro_business
+		dataType: int64
+		lineageTag: a6e4a93a-6179-445b-8903-6f3e5a71cde9
+		summarizeBy: none
+		sourceColumn: cert_micro_business
+
+		annotation SummarizationSetBy = Automatic
+
+	column cert_dvbe
+		dataType: int64
+		lineageTag: 75b8afa4-46a9-47d2-ba4e-f393d131dc5d
+		summarizeBy: none
+		sourceColumn: cert_dvbe
+
+		annotation SummarizationSetBy = Automatic
+
+	column earliest_cert_start
+		dataType: dateTime
+		lineageTag: ef7e70a9-6a5f-4728-b97b-3f025d969550
+		summarizeBy: none
+		sourceColumn: earliest_cert_start
+
+		annotation SummarizationSetBy = Automatic
+
+	column latest_cert_end
+		dataType: dateTime
+		lineageTag: 92f09ecb-a2fc-4f89-a5d8-4258fefabfab
+		summarizeBy: none
+		sourceColumn: latest_cert_end
+
+		annotation SummarizationSetBy = Automatic
+
+	column certification_types
+		dataType: string
+		lineageTag: 35c52d6d-45df-45ce-8102-ebf2e0799e7b
+		summarizeBy: none
+		sourceColumn: certification_types
+
+		annotation SummarizationSetBy = Automatic
+
+	partition gold_supplier_certification = m
+		mode: import
+		source =
+				let
+					Source = LoadMart("gold_supplier_certification"),
+					Typed = Table.TransformColumnTypes(Source, {
+						{"canonical_id", type text},
+						{"canonical_name", type text},
+						{"registration_count", Int64.Type},
+						{"document_count", Int64.Type},
+						{"scprs_total_value", type number},
+						{"cert_record_count", Int64.Type},
+						{"cert_small_business", Int64.Type},
+						{"cert_micro_business", Int64.Type},
+						{"cert_dvbe", Int64.Type},
+						{"earliest_cert_start", type date},
+						{"latest_cert_end", type date},
+						{"certification_types", type text}
+					}, "en-US")
+				in
+					Typed
+
+	annotation PBI_ResultType = Table

@@ -1,0 +1,86 @@
+table gold_contract_amendments
+	lineageTag: 953414f7-4a74-48bf-9993-36a04bfd1813
+
+	column business_unit
+		dataType: string
+		lineageTag: efc8070d-dad8-4f6d-9bb5-b600e4e3cc31
+		summarizeBy: none
+		sourceColumn: business_unit
+
+		annotation SummarizationSetBy = Automatic
+
+	column purchase_document
+		dataType: string
+		lineageTag: a3d98206-6679-4eb5-9c49-ce9a0f4c5657
+		summarizeBy: none
+		sourceColumn: purchase_document
+
+		annotation SummarizationSetBy = Automatic
+
+	column amendment_count
+		dataType: int64
+		lineageTag: 139894ae-1072-4c87-b50d-2ba0b97aaa4f
+		summarizeBy: sum
+		sourceColumn: amendment_count
+
+		annotation SummarizationSetBy = Automatic
+
+	column snapshots_captured
+		dataType: int64
+		lineageTag: ed8acca5-6fd4-41d5-beb3-5a2c5ea1dad6
+		summarizeBy: none
+		sourceColumn: snapshots_captured
+
+		annotation SummarizationSetBy = Automatic
+
+	column current_value
+		dataType: double
+		lineageTag: f2b2de71-c33d-4e02-adec-9022d7691f80
+		summarizeBy: sum
+		sourceColumn: current_value
+
+		annotation SummarizationSetBy = Automatic
+
+	column value_growth
+		dataType: double
+		lineageTag: 9275bf57-ad73-4fe0-b262-238f45338c70
+		summarizeBy: sum
+		sourceColumn: value_growth
+
+		annotation SummarizationSetBy = Automatic
+
+	column first_observed
+		dataType: dateTime
+		lineageTag: afb6ae5f-d50f-479a-90c3-78fe440910a5
+		summarizeBy: none
+		sourceColumn: first_observed
+
+		annotation SummarizationSetBy = Automatic
+
+	column last_observed
+		dataType: dateTime
+		lineageTag: 97b72dac-d713-4f74-9880-de544abb2184
+		summarizeBy: none
+		sourceColumn: last_observed
+
+		annotation SummarizationSetBy = Automatic
+
+	partition gold_contract_amendments = m
+		mode: import
+		source =
+				let
+					Source = LoadMart("gold_contract_amendments"),
+					Typed = Table.TransformColumnTypes(Source, {
+						{"business_unit", type text},
+						{"purchase_document", type text},
+						{"amendment_count", Int64.Type},
+						{"snapshots_captured", Int64.Type},
+						{"current_value", type number},
+						{"value_growth", type number},
+						{"first_observed", type datetime},
+						{"last_observed", type datetime}
+					}, "en-US")
+				in
+					Typed
+
+	annotation PBI_ResultType = Table

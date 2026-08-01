@@ -149,15 +149,27 @@ detail tables).
 
 ## Ready-made PBIP project (skip all of the above)
 
-`powerbi/scprs-star.pbip` is a Power BI Project with the whole star pre-wired:
-the `Token` parameter, `LoadMart`/`LoadStar` functions, all nine tables (typed
-columns, surrogate keys hidden), the twelve relationships, `dim_date` marked
-as the date table (`full_date` coerced string→date in its partition), and
-starter measures that encode the grain rules (`Total Contract Value` =
-document-grain `grand_total`; the line-amount measure is labeled
-enriched-docs-only). Open it in Power BI Desktop (a 2024+ build — the model is
-stored as TMDL), set `Token` under Transform data → Manage parameters, and
-Refresh. `powerbi/.gitignore` keeps Desktop's local `.pbi/` caches out of git.
+`powerbi/scprs-star.pbip` is a Power BI Project with the whole model
+pre-wired: the `Token` parameter, `LoadMart`/`LoadStar` functions, the nine
+star tables (typed columns, surrogate keys hidden), **all twelve flat mart
+CSVs** (typed in-partition — no manual column typing), the relationships,
+`dim_date` marked as the date table (`full_date` coerced string→date in its
+partition), and starter measures that encode the grain rules
+(`Total Contract Value` = document-grain `grand_total`; the line-amount
+measure is labeled enriched-docs-only).
+
+Supplier certification and CMAS status are modeled as a snowflake:
+`gold_supplier_certification` and `gold_supplier_cmas` are one row per
+canonical supplier, related from `dim_supplier.canonical_name` (many→one), so
+their flags cross-filter every fact through the supplier dimension. For easy
+slicers, `dim_supplier` carries calculated columns `sb_certified` /
+`dvbe_certified` / `cmas_holder` ("Yes"/"No") derived via `RELATED()`. The
+other marts are standalone tile tables (aggregates — don't relate them to the
+star; they'd double-count).
+
+Open it in Power BI Desktop (a 2024+ build — the model is stored as TMDL),
+set `Token` under Transform data → Manage parameters, and Refresh.
+`powerbi/.gitignore` keeps Desktop's local `.pbi/` caches out of git.
 
 ## Modeling notes (the usual traps)
 

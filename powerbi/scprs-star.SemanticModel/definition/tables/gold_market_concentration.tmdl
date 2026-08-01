@@ -1,0 +1,68 @@
+table gold_market_concentration
+	lineageTag: 8fe50c7c-cf5d-43f4-b074-72455d8739e6
+
+	column business_unit
+		dataType: string
+		lineageTag: 59d9842d-ec5f-4715-acf3-e1d6b846a85e
+		summarizeBy: none
+		sourceColumn: business_unit
+
+		annotation SummarizationSetBy = Automatic
+
+	column acquisition_type
+		dataType: string
+		lineageTag: 6d173d16-c540-4406-87e2-a0a097cf185c
+		summarizeBy: none
+		sourceColumn: acquisition_type
+
+		annotation SummarizationSetBy = Automatic
+
+	column supplier_count
+		dataType: int64
+		lineageTag: 636cad65-e8f5-484a-a9f9-123f20b8d0a6
+		summarizeBy: none
+		sourceColumn: supplier_count
+
+		annotation SummarizationSetBy = Automatic
+
+	column hhi
+		dataType: double
+		lineageTag: abfcb6ae-117b-4336-8176-9452d1f4d1df
+		summarizeBy: none
+		sourceColumn: hhi
+
+		annotation SummarizationSetBy = Automatic
+
+	column top_supplier_pct
+		dataType: double
+		lineageTag: 1f97fddf-e792-4765-89c1-aa154d973470
+		summarizeBy: none
+		sourceColumn: top_supplier_pct
+
+		annotation SummarizationSetBy = Automatic
+
+	column market_value
+		dataType: double
+		lineageTag: 18d40dd2-dc0e-4797-99af-b9fd096b5edf
+		summarizeBy: sum
+		sourceColumn: market_value
+
+		annotation SummarizationSetBy = Automatic
+
+	partition gold_market_concentration = m
+		mode: import
+		source =
+				let
+					Source = LoadMart("gold_market_concentration"),
+					Typed = Table.TransformColumnTypes(Source, {
+						{"business_unit", type text},
+						{"acquisition_type", type text},
+						{"supplier_count", Int64.Type},
+						{"hhi", type number},
+						{"top_supplier_pct", type number},
+						{"market_value", type number}
+					}, "en-US")
+				in
+					Typed
+
+	annotation PBI_ResultType = Table

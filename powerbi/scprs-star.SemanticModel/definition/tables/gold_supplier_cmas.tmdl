@@ -1,0 +1,122 @@
+table gold_supplier_cmas
+	lineageTag: c562c5bf-4d14-4e01-ba65-c308c8012d63
+
+	column canonical_id
+		dataType: string
+		lineageTag: 575b8b3e-0c0d-46c3-b663-4d0147ebdfb8
+		summarizeBy: none
+		sourceColumn: canonical_id
+
+		annotation SummarizationSetBy = Automatic
+
+	column canonical_name
+		dataType: string
+		lineageTag: efceecf4-b640-4637-a4e0-9f9825aea288
+		summarizeBy: none
+		sourceColumn: canonical_name
+
+		annotation SummarizationSetBy = Automatic
+
+	column registration_count
+		dataType: int64
+		lineageTag: f4bdb2b2-a837-4e13-8f86-c63186b85126
+		summarizeBy: none
+		sourceColumn: registration_count
+
+		annotation SummarizationSetBy = Automatic
+
+	column document_count
+		dataType: int64
+		lineageTag: 53e13c14-0f75-4f9c-a42b-0b42a4ab65f0
+		summarizeBy: sum
+		sourceColumn: document_count
+
+		annotation SummarizationSetBy = Automatic
+
+	column scprs_total_value
+		dataType: double
+		lineageTag: a52b5e7b-fe5e-4a77-a8fa-c36f3aa092f5
+		summarizeBy: sum
+		sourceColumn: scprs_total_value
+
+		annotation SummarizationSetBy = Automatic
+
+	column cmas_agreement_count
+		dataType: int64
+		lineageTag: e714dc8c-beb6-4b13-a414-43146afa1232
+		summarizeBy: sum
+		sourceColumn: cmas_agreement_count
+
+		annotation SummarizationSetBy = Automatic
+
+	column base_schedule_count
+		dataType: int64
+		lineageTag: 59ab46c5-1c06-4480-8520-85fe686b9843
+		summarizeBy: sum
+		sourceColumn: base_schedule_count
+
+		annotation SummarizationSetBy = Automatic
+
+	column cmas_small_business
+		dataType: int64
+		lineageTag: d4f697cd-5cc1-4f54-8a70-8fcd39013433
+		summarizeBy: none
+		sourceColumn: cmas_small_business
+
+		annotation SummarizationSetBy = Automatic
+
+	column cmas_dvbe
+		dataType: int64
+		lineageTag: 02df651b-0bc3-4b55-ab41-2a170e14874d
+		summarizeBy: none
+		sourceColumn: cmas_dvbe
+
+		annotation SummarizationSetBy = Automatic
+
+	column earliest_term_start
+		dataType: dateTime
+		lineageTag: d191927a-5ea0-4cd8-bb67-32654f8ba79e
+		summarizeBy: none
+		sourceColumn: earliest_term_start
+
+		annotation SummarizationSetBy = Automatic
+
+	column latest_term_end
+		dataType: dateTime
+		lineageTag: d80f2589-5a09-4241-9f37-89ed242d2233
+		summarizeBy: none
+		sourceColumn: latest_term_end
+
+		annotation SummarizationSetBy = Automatic
+
+	column cmas_agreement_numbers
+		dataType: string
+		lineageTag: 514b3e6e-9e19-4767-b123-6b43dcb6d146
+		summarizeBy: none
+		sourceColumn: cmas_agreement_numbers
+
+		annotation SummarizationSetBy = Automatic
+
+	partition gold_supplier_cmas = m
+		mode: import
+		source =
+				let
+					Source = LoadMart("gold_supplier_cmas"),
+					Typed = Table.TransformColumnTypes(Source, {
+						{"canonical_id", type text},
+						{"canonical_name", type text},
+						{"registration_count", Int64.Type},
+						{"document_count", Int64.Type},
+						{"scprs_total_value", type number},
+						{"cmas_agreement_count", Int64.Type},
+						{"base_schedule_count", Int64.Type},
+						{"cmas_small_business", Int64.Type},
+						{"cmas_dvbe", Int64.Type},
+						{"earliest_term_start", type date},
+						{"latest_term_end", type date},
+						{"cmas_agreement_numbers", type text}
+					}, "en-US")
+				in
+					Typed
+
+	annotation PBI_ResultType = Table

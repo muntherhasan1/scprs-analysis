@@ -1,10 +1,10 @@
 table dim_unspsc
-	lineageTag: a6655335-53f4-4c3f-bd78-0f9c13bd0fff
+	lineageTag: 0b6ed412-9957-43e6-994b-49dc8c69db7b
 
 	column unspsc_key
 		dataType: int64
 		isHidden
-		lineageTag: 42bbb202-4cd1-4bf8-85b4-e07be51a82e4
+		lineageTag: 21fa8ab1-9573-445a-98c1-a07e5a1d2266
 		summarizeBy: none
 		sourceColumn: unspsc_key
 
@@ -12,7 +12,7 @@ table dim_unspsc
 
 	column unspsc
 		dataType: string
-		lineageTag: ef1ff1d4-27e4-4d75-a46e-bf6b61cd60fe
+		lineageTag: 214b008f-9eed-475f-b36b-449bbde4bdcd
 		summarizeBy: none
 		sourceColumn: unspsc
 
@@ -20,7 +20,7 @@ table dim_unspsc
 
 	column unspsc_description
 		dataType: string
-		lineageTag: 35df06dc-9406-497e-b829-4c48339f4a94
+		lineageTag: 615713ea-f3db-4dc6-8afe-9b80c56bfc65
 		summarizeBy: none
 		sourceColumn: unspsc_description
 
@@ -29,7 +29,7 @@ table dim_unspsc
 	column dw_loaded_at
 		dataType: string
 		isHidden
-		lineageTag: 70a1b946-86e4-4ef8-b504-fd56645b8a04
+		lineageTag: bb7f3d2a-c6c7-4cbc-867d-91e4364a6b78
 		summarizeBy: none
 		sourceColumn: dw_loaded_at
 

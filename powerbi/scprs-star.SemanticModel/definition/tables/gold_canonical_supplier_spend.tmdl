@@ -1,0 +1,59 @@
+table gold_canonical_supplier_spend
+	lineageTag: 44dce260-1134-4a0f-91ef-87b65e6432a3
+
+	column canonical_id
+		dataType: string
+		lineageTag: ff858e1d-b11d-4575-a554-4b6f6168618e
+		summarizeBy: none
+		sourceColumn: canonical_id
+
+		annotation SummarizationSetBy = Automatic
+
+	column canonical_name
+		dataType: string
+		lineageTag: 1bb5efb1-43d0-459f-959f-59342e56a56f
+		summarizeBy: none
+		sourceColumn: canonical_name
+
+		annotation SummarizationSetBy = Automatic
+
+	column registration_count
+		dataType: int64
+		lineageTag: b2894d2e-407f-499e-8208-b6fa4a90cb9a
+		summarizeBy: none
+		sourceColumn: registration_count
+
+		annotation SummarizationSetBy = Automatic
+
+	column document_count
+		dataType: int64
+		lineageTag: 1af54fbd-72bc-43fb-85c0-cb95f99d66c5
+		summarizeBy: sum
+		sourceColumn: document_count
+
+		annotation SummarizationSetBy = Automatic
+
+	column total_value
+		dataType: double
+		lineageTag: f67caac5-bf81-4ac4-85b9-1ea4b8f724a8
+		summarizeBy: sum
+		sourceColumn: total_value
+
+		annotation SummarizationSetBy = Automatic
+
+	partition gold_canonical_supplier_spend = m
+		mode: import
+		source =
+				let
+					Source = LoadMart("gold_canonical_supplier_spend"),
+					Typed = Table.TransformColumnTypes(Source, {
+						{"canonical_id", type text},
+						{"canonical_name", type text},
+						{"registration_count", Int64.Type},
+						{"document_count", Int64.Type},
+						{"total_value", type number}
+					}, "en-US")
+				in
+					Typed
+
+	annotation PBI_ResultType = Table

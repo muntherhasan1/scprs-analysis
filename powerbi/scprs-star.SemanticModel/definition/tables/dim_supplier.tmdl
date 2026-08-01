@@ -1,10 +1,10 @@
 table dim_supplier
-	lineageTag: dcbcbf12-6353-4ced-9be3-a281fbeec9c5
+	lineageTag: e5269866-e84b-4016-bbca-2f7b2c21b964
 
 	column supplier_key
 		dataType: int64
 		isHidden
-		lineageTag: d92ae56e-5f3d-43c6-8655-5965ec528b30
+		lineageTag: f452ce5c-8f67-49c3-91f6-871ed8667545
 		summarizeBy: none
 		sourceColumn: supplier_key
 
@@ -12,7 +12,7 @@ table dim_supplier
 
 	column supplier_id
 		dataType: string
-		lineageTag: b0b6d1cf-c96e-4406-a780-d7f49207639c
+		lineageTag: e2511803-0c43-4fa1-a25b-8c92d35623ef
 		summarizeBy: none
 		sourceColumn: supplier_id
 
@@ -20,7 +20,7 @@ table dim_supplier
 
 	column supplier_name
 		dataType: string
-		lineageTag: 82bb758c-c255-4bc3-82af-e441ae0974fe
+		lineageTag: f2e58f0a-bee0-4865-a266-a8c45e1d1d3f
 		summarizeBy: none
 		sourceColumn: supplier_name
 
@@ -29,7 +29,7 @@ table dim_supplier
 	column dw_loaded_at
 		dataType: string
 		isHidden
-		lineageTag: 0c2dbb53-72a7-450a-b19e-250b9b0112e2
+		lineageTag: c9dfab45-bc09-4617-ae00-643e7f67e366
 		summarizeBy: none
 		sourceColumn: dw_loaded_at
 
@@ -37,7 +37,7 @@ table dim_supplier
 
 	column canonical_id
 		dataType: string
-		lineageTag: 6016af44-ab95-40f1-bba6-de5e00db0bb7
+		lineageTag: d9a659cc-709c-4c6b-ba9d-cb0fb0725538
 		summarizeBy: none
 		sourceColumn: canonical_id
 
@@ -45,7 +45,7 @@ table dim_supplier
 
 	column canonical_name
 		dataType: string
-		lineageTag: 026f3f4a-2fb3-4921-9de0-60f3a913a3a5
+		lineageTag: 5fe2e98e-b05e-48de-a242-48313a4f6c90
 		summarizeBy: none
 		sourceColumn: canonical_name
 
@@ -53,9 +53,30 @@ table dim_supplier
 
 	column parent_name
 		dataType: string
-		lineageTag: 4a68a2f2-79d5-4dd8-ae57-28796949120f
+		lineageTag: c2a51f08-d08a-44ec-8707-585368ca4c99
 		summarizeBy: none
 		sourceColumn: parent_name
+
+		annotation SummarizationSetBy = Automatic
+
+	column sb_certified = IF(RELATED(gold_supplier_certification[cert_small_business]) = 1, "Yes", "No")
+		dataType: string
+		lineageTag: 6d276f26-f96a-403b-9b95-f277849cff80
+		summarizeBy: none
+
+		annotation SummarizationSetBy = Automatic
+
+	column dvbe_certified = IF(RELATED(gold_supplier_certification[cert_dvbe]) = 1, "Yes", "No")
+		dataType: string
+		lineageTag: f4eb116c-e8f6-4232-8c37-ffd3dafe16c3
+		summarizeBy: none
+
+		annotation SummarizationSetBy = Automatic
+
+	column cmas_holder = IF(NOT ISBLANK(RELATED(gold_supplier_cmas[canonical_name])), "Yes", "No")
+		dataType: string
+		lineageTag: 0fa19b12-7399-4f4b-899d-1d36d2399409
+		summarizeBy: none
 
 		annotation SummarizationSetBy = Automatic
 

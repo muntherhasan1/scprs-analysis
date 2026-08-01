@@ -1,11 +1,11 @@
 table dim_date
-	lineageTag: 28fd9572-be76-4872-a750-ae34f29798ca
+	lineageTag: 244f03ea-ef78-4931-ab89-cd12c97287e5
 	dataCategory: Time
 
 	column date_key
 		dataType: int64
 		isHidden
-		lineageTag: d839aba5-08ee-4923-ac7f-07415609cceb
+		lineageTag: 273f76c8-8cc1-4bb7-a158-23b3f1c52b90
 		summarizeBy: none
 		sourceColumn: date_key
 
@@ -15,7 +15,7 @@ table dim_date
 		dataType: dateTime
 		isKey
 		formatString: Long Date
-		lineageTag: 188c78ad-e603-4d2b-bdb9-ae992af37ec3
+		lineageTag: a86bb92c-3db9-48e0-a58b-0b3d1646a853
 		summarizeBy: none
 		sourceColumn: full_date
 
@@ -25,7 +25,7 @@ table dim_date
 
 	column year
 		dataType: int64
-		lineageTag: 8bf90356-7636-4bf5-a2c1-9a22e2c317f0
+		lineageTag: c0bd8d5a-88a5-40e7-9720-78695b59f4ba
 		summarizeBy: none
 		sourceColumn: year
 
@@ -33,7 +33,7 @@ table dim_date
 
 	column quarter
 		dataType: int64
-		lineageTag: 14915079-92dd-46e8-8374-0c16493fed22
+		lineageTag: b3c89cd8-e89a-4fe7-aa97-3fc945a9a873
 		summarizeBy: none
 		sourceColumn: quarter
 
@@ -41,7 +41,7 @@ table dim_date
 
 	column month
 		dataType: int64
-		lineageTag: e83bec6e-35b3-4dd2-9f09-cd7793b01ada
+		lineageTag: 3d113635-de93-4538-b2f2-845ca5096b67
 		summarizeBy: none
 		sourceColumn: month
 
@@ -49,7 +49,7 @@ table dim_date
 
 	column month_name
 		dataType: string
-		lineageTag: a8e35a3e-7c39-4c46-9b41-8a457561a043
+		lineageTag: e8cd4d54-bb8c-416c-9564-caa92d49ba20
 		summarizeBy: none
 		sourceColumn: month_name
 
@@ -57,7 +57,7 @@ table dim_date
 
 	column day
 		dataType: int64
-		lineageTag: 2b445cae-669d-442c-8147-0ebba1d4ac67
+		lineageTag: 4d688758-3168-4439-b8df-15f569fc487d
 		summarizeBy: none
 		sourceColumn: day
 
@@ -65,7 +65,7 @@ table dim_date
 
 	column day_of_week
 		dataType: string
-		lineageTag: b4028e1a-6907-49d9-b362-c1b33677e5d5
+		lineageTag: 40cc07bb-a7de-41c6-a74b-6d81e1645f91
 		summarizeBy: none
 		sourceColumn: day_of_week
 
@@ -73,7 +73,7 @@ table dim_date
 
 	column fiscal_year
 		dataType: int64
-		lineageTag: e30b5d4b-f4f5-4e5d-b7fc-f493a5fc8f0e
+		lineageTag: 4fbe8b19-4756-4508-a99d-5c36b8fbbc0a
 		summarizeBy: none
 		sourceColumn: fiscal_year
 
@@ -81,7 +81,7 @@ table dim_date
 
 	column fiscal_quarter
 		dataType: int64
-		lineageTag: 94330720-0c7d-40cb-9b7d-a53692f305b8
+		lineageTag: b30b03da-3fdd-4d17-92e1-7943da9f7ced
 		summarizeBy: none
 		sourceColumn: fiscal_quarter
 

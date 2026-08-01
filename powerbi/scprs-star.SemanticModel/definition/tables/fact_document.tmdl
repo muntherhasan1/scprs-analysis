@@ -1,16 +1,16 @@
 table fact_document
-	lineageTag: f5f8f44f-03e4-4d4c-8dd7-6fd4f76c7bc9
+	lineageTag: da74064c-6c1b-40f7-a1d6-0b98393cdb51
 
 	measure 'Total Contract Value' = SUM(fact_document[grand_total])
-		lineageTag: 8940f946-7363-4fe1-a262-5aed7b59c088
+		lineageTag: 16e2b249-d89d-42be-ada5-196a6d7f971b
 
 	measure 'Document Count' = COUNTROWS(fact_document)
-		lineageTag: 48de0901-54c9-4d56-8034-419d01bc5684
+		lineageTag: 1ccc40f8-ac0c-44a6-baf5-c247b4e93aed
 
 	column document_sk
 		dataType: int64
 		isHidden
-		lineageTag: d10842b6-8656-4275-8899-a8e3bd07e900
+		lineageTag: a410d742-8740-4c6f-8dd6-255919e3f557
 		summarizeBy: none
 		sourceColumn: document_sk
 
@@ -19,7 +19,7 @@ table fact_document
 	column document_bk
 		dataType: string
 		isHidden
-		lineageTag: 6b16374d-0040-4259-9fd4-d03c4040f27f
+		lineageTag: 1560a3cd-a532-4c12-8ed6-cbdd2e3ce95a
 		summarizeBy: none
 		sourceColumn: document_bk
 
@@ -27,7 +27,7 @@ table fact_document
 
 	column purchase_document
 		dataType: string
-		lineageTag: ef5ec2c1-288a-41b5-af74-27d875566421
+		lineageTag: 200b9069-93fa-46c1-a598-c2e01029f88f
 		summarizeBy: none
 		sourceColumn: purchase_document
 
@@ -35,7 +35,7 @@ table fact_document
 
 	column bill_code
 		dataType: string
-		lineageTag: 55548ebd-c602-4730-a38c-d651950ba481
+		lineageTag: 184957a7-62a4-4995-a650-78120155477a
 		summarizeBy: none
 		sourceColumn: bill_code
 
@@ -43,7 +43,7 @@ table fact_document
 
 	column status
 		dataType: string
-		lineageTag: 7e5afba4-dd0c-4fbe-940a-6cb8fb33c057
+		lineageTag: 95615b70-3853-4d15-b7d9-fbfbe4990fac
 		summarizeBy: none
 		sourceColumn: status
 
@@ -51,7 +51,7 @@ table fact_document
 
 	column version
 		dataType: double
-		lineageTag: df19af53-181e-42b5-85d8-399a37f7f9e2
+		lineageTag: caad3129-00c7-4ac3-928c-732492f729b9
 		summarizeBy: none
 		sourceColumn: version
 
@@ -59,7 +59,7 @@ table fact_document
 
 	column is_enriched
 		dataType: int64
-		lineageTag: 7b9afb85-b067-484b-ad30-0db744051bff
+		lineageTag: 64e9b334-f170-4184-8034-d199fe2256f5
 		summarizeBy: none
 		sourceColumn: is_enriched
 
@@ -67,7 +67,7 @@ table fact_document
 
 	column has_associated_pos
 		dataType: int64
-		lineageTag: ed9fe7f1-d4f3-491f-a54e-a2ab7e1b5fc4
+		lineageTag: ec5637b6-af69-4820-a6f0-54117149f102
 		summarizeBy: none
 		sourceColumn: has_associated_pos
 
@@ -76,7 +76,7 @@ table fact_document
 	column start_date_key
 		dataType: int64
 		isHidden
-		lineageTag: 7003ab6b-18a8-477c-a85c-306e8ec8c435
+		lineageTag: e50618e4-d54b-4eaa-a762-b007b5062313
 		summarizeBy: none
 		sourceColumn: start_date_key
 
@@ -85,7 +85,7 @@ table fact_document
 	column dept_key
 		dataType: int64
 		isHidden
-		lineageTag: ebdf8667-708e-44b9-918d-66bcb6469118
+		lineageTag: c8e9e573-31dd-44f0-a27f-394cafe678fa
 		summarizeBy: none
 		sourceColumn: dept_key
 
@@ -94,7 +94,7 @@ table fact_document
 	column supplier_key
 		dataType: int64
 		isHidden
-		lineageTag: 054c8e98-9499-42d7-8a9e-657133220002
+		lineageTag: 7f0c593a-666b-45bb-8027-cf303084aa99
 		summarizeBy: none
 		sourceColumn: supplier_key
 
@@ -103,7 +103,7 @@ table fact_document
 	column buyer_key
 		dataType: int64
 		isHidden
-		lineageTag: 26ce5f36-956b-4952-a4cf-e3b6511ca02d
+		lineageTag: b4be1205-e13e-4749-b46f-749708d6e714
 		summarizeBy: none
 		sourceColumn: buyer_key
 
@@ -112,7 +112,7 @@ table fact_document
 	column acq_key
 		dataType: int64
 		isHidden
-		lineageTag: 5eeadc98-e5f9-4ecf-9721-e8993e3a7814
+		lineageTag: 1a47dafb-6c47-43c5-a945-5568dcfadf9c
 		summarizeBy: none
 		sourceColumn: acq_key
 
@@ -120,7 +120,7 @@ table fact_document
 
 	column merchandise_amount
 		dataType: double
-		lineageTag: 0b8ae5ea-7e03-4ef1-b708-97f58052cec0
+		lineageTag: 3bb8d3bb-c37b-46e9-8e78-9275d29f8029
 		summarizeBy: sum
 		sourceColumn: merchandise_amount
 
@@ -128,7 +128,7 @@ table fact_document
 
 	column freight_tax_misc
 		dataType: double
-		lineageTag: d171170f-a9ee-472d-a4d9-5967b662d4de
+		lineageTag: e0e9f92b-afd6-4be0-bea2-d4da624e764e
 		summarizeBy: sum
 		sourceColumn: freight_tax_misc
 
@@ -136,7 +136,7 @@ table fact_document
 
 	column grand_total
 		dataType: double
-		lineageTag: f214c730-23cc-4802-bcdd-b886dc272362
+		lineageTag: e8f9c3fd-ccde-4e86-908e-b8bbabfc5655
 		summarizeBy: sum
 		sourceColumn: grand_total
 
@@ -144,7 +144,7 @@ table fact_document
 
 	column line_count
 		dataType: int64
-		lineageTag: f6f8f43e-bd27-48a9-bdb2-43d4c88f13dc
+		lineageTag: 89e0a217-9b5b-40c3-b88f-882b94e66ce6
 		summarizeBy: sum
 		sourceColumn: line_count
 
@@ -152,7 +152,7 @@ table fact_document
 
 	column associated_po_count
 		dataType: int64
-		lineageTag: 9c154a9b-bc5f-4f41-8089-7825d426368f
+		lineageTag: 789c02a9-0bdb-40f9-b1e5-2638cf0e231f
 		summarizeBy: sum
 		sourceColumn: associated_po_count
 
@@ -160,7 +160,7 @@ table fact_document
 
 	column dq_line_reconciles
 		dataType: double
-		lineageTag: b6d36593-9b4b-4566-9aa7-c48e76b7518c
+		lineageTag: 4efa4ace-a60d-4a0f-8f7c-cff169db9d49
 		summarizeBy: none
 		sourceColumn: dq_line_reconciles
 
@@ -169,7 +169,7 @@ table fact_document
 	column dw_batch_id
 		dataType: string
 		isHidden
-		lineageTag: ef51dbba-b138-4fa8-80c3-9da00c55d658
+		lineageTag: 657a1a25-d23b-40b6-a559-912227e3ecdb
 		summarizeBy: none
 		sourceColumn: dw_batch_id
 
@@ -178,7 +178,7 @@ table fact_document
 	column dw_loaded_at
 		dataType: string
 		isHidden
-		lineageTag: 801cc6e4-2369-49be-9453-8319b4ec651e
+		lineageTag: 6088aa00-1efd-4e76-892e-46a04fa9a65f
 		summarizeBy: none
 		sourceColumn: dw_loaded_at
 

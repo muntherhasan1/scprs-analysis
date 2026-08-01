@@ -1,51 +1,59 @@
-relationship f2113891-1d16-43a2-b274-a365f51db28b
+relationship a3bf510d-6fec-4d5d-b1fd-b3c9c1733086
+	fromColumn: dim_supplier.canonical_name
+	toColumn: gold_supplier_certification.canonical_name
+
+relationship 7df6e37b-480d-4ba3-88b6-cbc682ad43cf
+	fromColumn: dim_supplier.canonical_name
+	toColumn: gold_supplier_cmas.canonical_name
+
+relationship f567abb9-c0df-4183-af8b-d39f18465a38
 	fromColumn: fact_document.supplier_key
 	toColumn: dim_supplier.supplier_key
 
-relationship bf6f79e2-0f0d-4b77-ab52-75fefa2d17e0
+relationship c88ce95c-aa18-4e84-a86e-974042409558
 	fromColumn: fact_document.dept_key
 	toColumn: dim_department.dept_key
 
-relationship 2ccf9230-96b9-4ea4-8fd3-619ac0eab611
+relationship d5c4a319-d802-42a0-8bd5-2b4a480ea2a6
 	fromColumn: fact_document.acq_key
 	toColumn: dim_acquisition.acq_key
 
-relationship 8066179d-c3cb-49e3-bfca-0d537cfa241b
+relationship 042307ee-4a47-4df3-b034-5f533bca0d2f
 	fromColumn: fact_document.buyer_key
 	toColumn: dim_buyer.buyer_key
 
-relationship 8b246c0f-9415-4f9b-8da4-f5f6ae9679e9
+relationship 0427a08b-99f2-4969-9f73-3ef666e20b15
 	fromColumn: fact_document.start_date_key
 	toColumn: dim_date.date_key
 
-relationship 81813791-b957-4cba-9b43-88a52aec9424
+relationship 23778233-a2f7-49ed-8b5d-8fe1afe349fc
 	fromColumn: fact_line.supplier_key
 	toColumn: dim_supplier.supplier_key
 
-relationship 0ccb8c41-46dd-4e34-96e9-fbf156152514
+relationship f8dcecb9-e141-4d26-8757-469721f4dcdd
 	fromColumn: fact_line.dept_key
 	toColumn: dim_department.dept_key
 
-relationship 2b11c622-f6c5-4f7a-89ad-b0a1fa669c61
+relationship 4e4b385c-e451-40b7-9336-d89c0e87d4a3
 	fromColumn: fact_line.acq_key
 	toColumn: dim_acquisition.acq_key
 
-relationship 519da3b5-c420-4395-8ad2-a183f2056a4a
+relationship 25823be8-164e-4ae3-9d5f-ce6972c7b75e
 	fromColumn: fact_line.buyer_key
 	toColumn: dim_buyer.buyer_key
 
-relationship d7cd3169-921e-4075-9ca3-6e1b71730475
+relationship 441abe7d-b07c-402d-9066-0556d4df210c
 	fromColumn: fact_line.unspsc_key
 	toColumn: dim_unspsc.unspsc_key
 
-relationship 25f2e01e-9f5c-47c2-9f5a-38bb0e3bc117
+relationship 032b5dac-e7c6-4148-8c69-85c700572d28
 	fromColumn: fact_line.start_date_key
 	toColumn: dim_date.date_key
 
-relationship 12d4536b-f996-498e-a513-394cc11be5ea
+relationship 373586ef-8a81-4121-9294-d638c251abcd
 	fromColumn: fact_associated_po.dept_key
 	toColumn: dim_department.dept_key
 
-relationship 8dacbf05-44c4-4c09-9bd2-6a786dda4ad6
+relationship 4e043419-838c-4764-aa2a-676eee72f6a5
 	fromColumn: fact_associated_po.start_date_key
 	toColumn: dim_date.date_key

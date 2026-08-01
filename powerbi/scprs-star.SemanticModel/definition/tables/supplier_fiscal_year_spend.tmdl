@@ -1,0 +1,50 @@
+table supplier_fiscal_year_spend
+	lineageTag: bec98a4f-b140-4321-9919-4a653baab4d5
+
+	column canonical_name
+		dataType: string
+		lineageTag: 0e250a10-a619-44e5-a68e-d9768f3fe9a6
+		summarizeBy: none
+		sourceColumn: canonical_name
+
+		annotation SummarizationSetBy = Automatic
+
+	column fiscal_year
+		dataType: int64
+		lineageTag: 104cf5ed-6147-4300-99ac-140d57015147
+		summarizeBy: none
+		sourceColumn: fiscal_year
+
+		annotation SummarizationSetBy = Automatic
+
+	column document_count
+		dataType: int64
+		lineageTag: 170dcdef-23ac-4f82-86ed-fdfc7cc57f24
+		summarizeBy: sum
+		sourceColumn: document_count
+
+		annotation SummarizationSetBy = Automatic
+
+	column total_value
+		dataType: double
+		lineageTag: afddac2b-939b-4df3-a3bb-968bfcf27f75
+		summarizeBy: sum
+		sourceColumn: total_value
+
+		annotation SummarizationSetBy = Automatic
+
+	partition supplier_fiscal_year_spend = m
+		mode: import
+		source =
+				let
+					Source = LoadMart("supplier_fiscal_year_spend"),
+					Typed = Table.TransformColumnTypes(Source, {
+						{"canonical_name", type text},
+						{"fiscal_year", Int64.Type},
+						{"document_count", Int64.Type},
+						{"total_value", type number}
+					}, "en-US")
+				in
+					Typed
+
+	annotation PBI_ResultType = Table
