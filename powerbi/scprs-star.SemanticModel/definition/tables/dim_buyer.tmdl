@@ -1,10 +1,10 @@
 table dim_buyer
-	lineageTag: 8584eddd-19fa-4f28-a448-6eebb45636b5
+	lineageTag: 2fbdb1cb-ac3f-4e2a-a838-12207937c415
 
 	column buyer_key
 		dataType: int64
 		isHidden
-		lineageTag: 1e2f9fff-c249-491e-bd99-0442d1ad5372
+		lineageTag: 5bb63aa4-dfe8-4a38-be4d-229bc5ddc01b
 		summarizeBy: none
 		sourceColumn: buyer_key
 
@@ -12,7 +12,7 @@ table dim_buyer
 
 	column buyer_name
 		dataType: string
-		lineageTag: 450c9e8f-2d02-4eb4-8a9c-c4f97ae379f6
+		lineageTag: 7769d807-08b0-4dfa-b5d0-a741d0b0e950
 		summarizeBy: none
 		sourceColumn: buyer_name
 
@@ -20,7 +20,7 @@ table dim_buyer
 
 	column buyer_email
 		dataType: string
-		lineageTag: c8436645-c078-428a-b28c-5653447be392
+		lineageTag: e5a3289c-bcbc-4068-9f25-80fe7dae6819
 		summarizeBy: none
 		sourceColumn: buyer_email
 
@@ -29,7 +29,7 @@ table dim_buyer
 	column dw_loaded_at
 		dataType: string
 		isHidden
-		lineageTag: ec564a7b-097b-4180-a4b2-a4a6bc79f846
+		lineageTag: 247282bd-980e-4951-ae6e-5dc1852ee9f9
 		summarizeBy: none
 		sourceColumn: dw_loaded_at
 

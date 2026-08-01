@@ -1,10 +1,10 @@
 table fact_associated_po
-	lineageTag: cc924002-7603-457d-8620-27be955d125e
+	lineageTag: 04c1436e-9429-458d-920c-c309e5e6a583
 
 	column po_sk
 		dataType: int64
 		isHidden
-		lineageTag: 5d9a38bd-c546-4d39-8cab-96052ed807c7
+		lineageTag: ffac30ef-8764-48d1-b3b1-f97a74c4dd15
 		summarizeBy: none
 		sourceColumn: po_sk
 
@@ -13,7 +13,7 @@ table fact_associated_po
 	column document_bk
 		dataType: string
 		isHidden
-		lineageTag: 88184ac0-710e-485f-a626-44b384ab710a
+		lineageTag: 0173bced-d930-4f1b-9187-5cdd236df6bf
 		summarizeBy: none
 		sourceColumn: document_bk
 
@@ -21,7 +21,7 @@ table fact_associated_po
 
 	column purchase_document
 		dataType: string
-		lineageTag: c21bdb38-e153-4fea-bb04-b79f56a650d7
+		lineageTag: 789e36cd-a490-4afe-9f93-ebe14840ecb1
 		summarizeBy: none
 		sourceColumn: purchase_document
 
@@ -29,7 +29,7 @@ table fact_associated_po
 
 	column po_id
 		dataType: string
-		lineageTag: e6072b3d-bacc-466e-a1d6-f1ffdd9364d8
+		lineageTag: efff944a-5b3f-4904-aa16-926b2c3d279f
 		summarizeBy: none
 		sourceColumn: po_id
 
@@ -37,7 +37,7 @@ table fact_associated_po
 
 	column po_status
 		dataType: string
-		lineageTag: 41c1f57b-4de4-4458-8b1b-6b25d0ebd007
+		lineageTag: d2f16d5c-845e-4b78-9b6f-fa2dc1a02fd4
 		summarizeBy: none
 		sourceColumn: po_status
 
@@ -46,7 +46,7 @@ table fact_associated_po
 	column start_date_key
 		dataType: int64
 		isHidden
-		lineageTag: 5cc8cfb5-04ab-4a37-bb98-f8f721973a07
+		lineageTag: 751b198a-b765-4786-94c2-450a4dadc6cc
 		summarizeBy: none
 		sourceColumn: start_date_key
 
@@ -55,7 +55,7 @@ table fact_associated_po
 	column dept_key
 		dataType: int64
 		isHidden
-		lineageTag: d84341b8-12ff-40ce-9f9b-598a6c953d25
+		lineageTag: 06665509-a26b-431b-b321-93e3bcf89906
 		summarizeBy: none
 		sourceColumn: dept_key
 
@@ -63,7 +63,7 @@ table fact_associated_po
 
 	column po_total
 		dataType: double
-		lineageTag: 21f691e0-7c07-4d80-b022-5057f989ae72
+		lineageTag: e03a0259-65f4-49f4-91be-4223aacd947c
 		summarizeBy: sum
 		sourceColumn: po_total
 
@@ -72,7 +72,7 @@ table fact_associated_po
 	column dw_batch_id
 		dataType: string
 		isHidden
-		lineageTag: 6b9f69ba-6d67-4820-bc59-6de81d561e4c
+		lineageTag: 2777b2da-1950-4fc2-9cfb-054d7930467a
 		summarizeBy: none
 		sourceColumn: dw_batch_id
 
@@ -81,7 +81,7 @@ table fact_associated_po
 	column dw_loaded_at
 		dataType: string
 		isHidden
-		lineageTag: a7dfbeae-261e-4241-9b42-ed44630de673
+		lineageTag: fb5c3602-f97b-4f33-a77e-168ae45b6612
 		summarizeBy: none
 		sourceColumn: dw_loaded_at
 

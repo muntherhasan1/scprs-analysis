@@ -6,7 +6,7 @@ model Model
 		legacyRedirects
 		returnErrorValuesAsNull
 
-	annotation PBI_QueryOrder = ["Token", "LoadMart", "LoadStar", "fact_document", "fact_line", "fact_associated_po", "dim_supplier", "dim_department", "dim_date", "dim_acquisition", "dim_buyer", "dim_unspsc"]
+	annotation PBI_QueryOrder = ["Token", "LoadMart", "LoadStar", "fact_document", "fact_line", "fact_associated_po", "dim_supplier", "dim_department", "dim_date", "dim_acquisition", "dim_buyer", "dim_unspsc", "gold_monthly_spend", "gold_canonical_supplier_spend", "gold_acquisition_spend", "gold_supplier_acquisition_profile", "gold_market_concentration", "gold_supplier_certification", "gold_supplier_cmas", "gold_eprocure_posted_opportunity", "gold_eprocure_event_demand", "gold_contract_amendments", "department_fiscal_year_spend", "supplier_fiscal_year_spend"]
 
 	annotation __PBI_TimeIntelligenceEnabled = 0
 
@@ -19,3 +19,15 @@ ref table dim_date
 ref table dim_acquisition
 ref table dim_buyer
 ref table dim_unspsc
+ref table gold_monthly_spend
+ref table gold_canonical_supplier_spend
+ref table gold_acquisition_spend
+ref table gold_supplier_acquisition_profile
+ref table gold_market_concentration
+ref table gold_supplier_certification
+ref table gold_supplier_cmas
+ref table gold_eprocure_posted_opportunity
+ref table gold_eprocure_event_demand
+ref table gold_contract_amendments
+ref table department_fiscal_year_spend
+ref table supplier_fiscal_year_spend

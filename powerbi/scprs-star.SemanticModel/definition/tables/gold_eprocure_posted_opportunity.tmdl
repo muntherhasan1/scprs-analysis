@@ -1,0 +1,77 @@
+table gold_eprocure_posted_opportunity
+	lineageTag: c29828f7-3898-4cc8-945f-d1f69060ece7
+
+	column event_id
+		dataType: string
+		lineageTag: 963ff8a3-fb7b-4cb2-b0fa-fdaa41331528
+		summarizeBy: none
+		sourceColumn: event_id
+
+		annotation SummarizationSetBy = Automatic
+
+	column event_name
+		dataType: string
+		lineageTag: 7401d9ff-635a-4e7c-a043-cb41192642f1
+		summarizeBy: none
+		sourceColumn: event_name
+
+		annotation SummarizationSetBy = Automatic
+
+	column department_name
+		dataType: string
+		lineageTag: d2714426-435e-4ae0-9c50-91dcd2e10dd8
+		summarizeBy: none
+		sourceColumn: department_name
+
+		annotation SummarizationSetBy = Automatic
+
+	column business_unit
+		dataType: string
+		lineageTag: 4463100f-efce-4fac-9beb-dbf1712b48f8
+		summarizeBy: none
+		sourceColumn: business_unit
+
+		annotation SummarizationSetBy = Automatic
+
+	column bid_close_date
+		dataType: dateTime
+		lineageTag: f878c5d7-c47d-4a01-a055-65c3ffece031
+		summarizeBy: none
+		sourceColumn: bid_close_date
+
+		annotation SummarizationSetBy = Automatic
+
+	column sb_only
+		dataType: int64
+		lineageTag: dc6f23e5-1ae2-47f3-8a08-f62c350fe3fd
+		summarizeBy: none
+		sourceColumn: sb_only
+
+		annotation SummarizationSetBy = Automatic
+
+	column dvbe_only
+		dataType: int64
+		lineageTag: 82689680-2164-4763-ab43-60371b36dd4a
+		summarizeBy: none
+		sourceColumn: dvbe_only
+
+		annotation SummarizationSetBy = Automatic
+
+	partition gold_eprocure_posted_opportunity = m
+		mode: import
+		source =
+				let
+					Source = LoadMart("gold_eprocure_posted_opportunity"),
+					Typed = Table.TransformColumnTypes(Source, {
+						{"event_id", type text},
+						{"event_name", type text},
+						{"department_name", type text},
+						{"business_unit", type text},
+						{"bid_close_date", type date},
+						{"sb_only", Int64.Type},
+						{"dvbe_only", Int64.Type}
+					}, "en-US")
+				in
+					Typed
+
+	annotation PBI_ResultType = Table
