@@ -25,11 +25,14 @@ concurrency:
 jobs:
   diff:
     runs-on: ubuntu-latest
-    # TWO full warehouse builds worst case (measured ~36m on 2026-07-28 at
-    # 1.53M docs; ONE build ~18m when the cached base snapshot hits) — 45 min
-    # holds for the cached path; revisit if the tripwire in enrich-canary
-    # shows single-build growth past ~20m.
-    timeout-minutes: 45
+    # TWO full warehouse builds worst case (measured 2026-08-04, enrich run
+    # 30894971044: ONE build+export ~37m, growing ~2.7 min/day as enrichment
+    # rows accumulate) — cache-miss path ~75m of builds + fetch/setup, cached
+    # path ~40m. 120 covers both with headroom; revisit when the 50m tripwire
+    # in enrich-canary fires (kills here conclude `cancelled` with NO triage
+    # issue — pull_request-triggered runs aren't covered — so this breaks
+    # silently if left stale).
+    timeout-minutes: 120
     env:
       PYTHONUNBUFFERED: "1" # a killed run must still show how far it got
       SCPRS_DATASET: ${{ vars.SCPRS_DATASET || 'munther-hasan/scprs-operational-db' }}

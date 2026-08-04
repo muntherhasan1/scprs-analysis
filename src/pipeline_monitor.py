@@ -21,8 +21,10 @@ import os
 from datetime import datetime, timezone
 
 # The serve dataset publishes on every successful enrich run (every 3h), so a
-# healthy pipeline commits at least 8x/day. 8h = two missed slots + runtime.
-DEFAULT_MAX_HOURS = 8.0
+# healthy pipeline commits at least 8x/day. 9h = two missed slots + ~2.5h
+# runtime headroom (enrich's 150m timeout backstop). Keep in sync with
+# MAX_AGE_HOURS in pipeline-monitor.yml.
+DEFAULT_MAX_HOURS = 9.0
 DEFAULT_DATASET = "munther-hasan/scprs-warehouse-data"
 
 
