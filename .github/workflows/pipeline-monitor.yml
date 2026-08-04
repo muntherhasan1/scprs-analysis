@@ -39,12 +39,13 @@ concurrency:
 
 env:
   ALERT_LABEL: pipeline-monitor-alert
-  # Enrich publishes every 3h; 9h = two missed slots + ~2.5h runtime headroom
-  # (a healthy full-budget run may conclude ~2.5h after its slot under the
-  # 150m backstop). Detection of a two-missed-slot outage can slip one 6h
-  # monitor cycle — accepted: the dead-man's switch (~14h grace) is the outer
-  # bound, and tightening below ~9h would false-alert on routine GitHub cron
-  # lateness (slots observed firing up to ~3h late).
+  # 9h covers both freshness checks after the #105 split. Enrich age: two
+  # missed 3h slots + ~1.5h runtime headroom (90m backstop). Serve-dataset
+  # age: one 4h serve-refresh cycle + ~1h runtime + GitHub cron lateness
+  # (slots observed firing up to ~3h late — the reason serve-refresh runs
+  # every 4h, not 6h, against this shared threshold). Detection can slip one
+  # 6h monitor cycle — accepted: the dead-man's switch (~14h grace) is the
+  # outer bound.
   MAX_AGE_HOURS: "9"
 
 jobs:

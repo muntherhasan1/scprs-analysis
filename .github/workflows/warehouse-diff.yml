@@ -29,7 +29,7 @@ jobs:
     # 30894971044: ONE build+export ~37m, growing ~2.7 min/day as enrichment
     # rows accumulate) — cache-miss path ~75m of builds + fetch/setup, cached
     # path ~40m. 120 covers both with headroom; revisit when the 50m tripwire
-    # in enrich-canary fires (kills here conclude `cancelled` with NO triage
+    # in serve-refresh fires (kills here conclude `cancelled` with NO triage
     # issue — pull_request-triggered runs aren't covered — so this breaks
     # silently if left stale).
     timeout-minutes: 120

@@ -75,8 +75,9 @@ mentioned it. Answer these five in the plan, in writing:
 - **triage.yml**: failed/cancelled main-branch runs → idempotent issue,
   auto-closes on recovery.
 - **pipeline-monitor.yml** (6h): watches from OUTSIDE — last successful enrich
-  age + serve-dataset commit age (8h thresholds; enrich runs every 3h) + cron
-  keep-alive (GitHub disables schedules after 60 idle days).
+  age + serve-dataset commit age (shared 9h threshold; enrich runs every 3h,
+  serve-refresh.yml rebuilds/publishes the serve DB every 4h since the #105
+  split) + cron keep-alive (GitHub disables schedules after 60 idle days).
 - **healthchecks.io dead-man's switch** (`HEALTHCHECK_PING_URL`): the one alarm
   outside GitHub — pinged by healthy enrich runs and clean monitor passes;
   grace ≈14h pages by email even if GitHub's schedulers are the thing that died
@@ -85,8 +86,9 @@ mentioned it. Answer these five in the plan, in writing:
 ## Tokens (least privilege, 4-token model)
 
 `HF_SCPRS_TOKEN` (operational RW — enrich/cmas only) · `HF_SCPRS_READ_TOKEN`
-(operational RO — PR-executed warehouse-diff) · `HF_WAREHOUSE_TOKEN` (serve
-dataset RW) · `HF_DEPLOY_TOKEN` (Space restarts/deploys). A missing deploy
+(operational RO — PR-executed warehouse-diff + serve-refresh) ·
+`HF_WAREHOUSE_TOKEN` (serve dataset RW) · `HF_DEPLOY_TOKEN` (Space
+restarts/deploys). A missing deploy
 token must FAIL a deploy, never green-skip. Wrong scopes are the #1 cause of
 RUNTIME_ERROR Spaces and false go-live verdicts.
 
