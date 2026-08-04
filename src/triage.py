@@ -212,10 +212,15 @@ def build_report(
         # 12 straight 90-min kills, silently untriaged). Frame it first.
         specific.append(
             "The run was **cancelled — most likely the job `timeout-minutes` killing a "
-            "hung or over-budget step** (a manual cancel looks identical). Steps that "
-            "publish on success did NOT run, so no partial data was written — but that "
-            "also means repeated timeouts make **zero progress** and will recur until "
-            "the underlying slowness is fixed. Check how far the killed step's log got."
+            "hung or over-budget step** (a manual cancel looks identical). Publishes "
+            "are upload-on-success and atomic, so nothing partial was written — but "
+            "what was LOST depends on where the kill landed. Check which publish steps "
+            "completed: if the kill hit **before** the operational-store publish, the "
+            "run banked **zero progress** and repeated timeouts will recur until the "
+            "underlying slowness is fixed; if it hit **after** (e.g. mid warehouse "
+            "rebuild / serve refresh, the issue #102 mode), enrichment progress IS "
+            "published and only the downstream serve refresh was lost. Either way, "
+            "check how far the killed step's log got."
         )
     for step in steps:
         for key, hint in hints.items():
