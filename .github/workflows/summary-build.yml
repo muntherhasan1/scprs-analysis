@@ -101,7 +101,7 @@ jobs:
       - name: Publish scprs.db back to the dataset
         run: python -m src.data_sync publish-operational
 
-      # No warehouse rebuild here: the enrich cron (every 3h) fetches this
-      # store, rebuilds, and republishes the serve DB — new units appear in
-      # the served warehouse within one cycle and enter the enrichment picker
-      # as never-enriched (first in line) automatically.
+      # No warehouse rebuild here: serve-refresh.yml (every 4h, #105) fetches
+      # this store, rebuilds, and republishes the serve DB — new units appear
+      # in the served warehouse within one serve cycle and enter the enrich
+      # cron's picker as never-enriched (first in line) automatically.

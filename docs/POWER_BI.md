@@ -1,8 +1,8 @@
 # Power BI over the SCPRS warehouse
 
 The pipeline publishes a curated set of **BI-shaped mart CSVs** to the private
-serve dataset alongside `warehouse-serve.db`, refreshed by the same CI cycle
-(every successful enrich run, i.e. up to 8×/day). Power BI consumes them with
+serve dataset alongside `warehouse-serve.db`, refreshed by the serve-refresh
+CI workflow (every 4 hours, up to 6×/day). Power BI consumes them with
 the built-in Web connector — no gateway, no ODBC, no server.
 
 ```

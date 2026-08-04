@@ -183,7 +183,7 @@ jobs:
           if [ "$K" -eq 2 ]; then echo "::warning::canary UNAVAILABLE (site unreachable) — not gating on this"; fi
           # NOT_FOUND (#47): the fixture document vanished, not the parser — the
           # run's banked enrichment must still publish. Recorded here; a final
-          # step fails the run AFTER the publish/serve chain so triage alerts.
+          # step fails the run AFTER the scprs.db publish so triage alerts.
           if [ "$K" -eq 3 ]; then
             echo "::warning::canary fixture document NOT FOUND — publishing anyway; run will end failed for triage"
             echo "canary_notfound=1" >> "$GITHUB_OUTPUT"
