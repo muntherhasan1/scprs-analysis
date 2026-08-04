@@ -13,8 +13,8 @@ name: Enrich (Wave 2)
 on:
   schedule:
     # Every 3 hours, offset from the top of the hour. 8 runs/day x limit 50
-    # ≈ 400 day-slices/day. Safe at this density: the 90-min timeout-minutes
-    # backstop is well under the 180-min slot gap, and the
+    # ≈ 400 day-slices/day. Safe at this density: the 120-min timeout-minutes
+    # backstop is under the 180-min slot gap, and the
     # scprs-operational-writer concurrency group QUEUES (never cancels) any
     # overlap, so back-to-back slots serialize rather than collide.
     - cron: "17 */3 * * *"
@@ -50,13 +50,18 @@ jobs:
   enrich:
     runs-on: ubuntu-latest
     # Backstop only — enrich self-budgets (--budget-minutes 70) and exits
-    # cleanly with whatever it completed, leaving ~20 min for the warehouse
-    # rebuild + publish steps. This timeout should never fire unless the
+    # cleanly with whatever it completed. Measured basis (2026-08-04, run
+    # 30894971044, ~1.53M summary rows / 23 BUs): setup+fetch ~2m + enrich
+    # budget 70m + checks/publish ~2m + warehouse rebuild + serve export ~37m
+    # + publish/verify ~3m ≈ 114m worst case; 120 leaves margin. (At 90 the
+    # backstop fired on ~1/3 of runs whenever the slice used its full budget —
+    # issue #102.) Re-measure when data volume grows: rebuild duration is in
+    # each run's step summary. This timeout should never fire unless the
     # browser truly wedges; when it does, the run concludes `cancelled`, which
     # the triage workflow treats like a failure (the 2026-07-20..23 livelock —
     # 12 straight timeout kills on BU 3540 with zero alert — must stay loud).
     # HF dataset commits are atomic, so a kill can't half-publish scprs.db.
-    timeout-minutes: 90
+    timeout-minutes: 120
     env:
       # Unbuffered stdout: a killed run must still show how far it got — the
       # livelock above was invisible partly because Python's block-buffered
@@ -207,12 +212,13 @@ jobs:
             echo "rebuild step took $(( (SECONDS - start) / 60 ))m $(( (SECONDS - start) % 60 ))s"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
-          # Duration-erosion tripwire (report-only). Basis: 2026-07-28, 1.53M
-          # docs => build+export ~15-18 min; 25 min = data growth or a slow
-          # mart is eating the 90-min job backstop — investigate before it
-          # starts killing runs (the enrich-livelock lesson, build edition).
-          if [ $(( SECONDS - start )) -gt 1500 ]; then
-            echo "::warning::warehouse rebuild took $(( (SECONDS - start) / 60 ))m (>25m tripwire) — check the build-timings trend in recent step summaries"
+          # Duration-erosion tripwire (report-only). Basis: 2026-08-04 (run
+          # 30894971044), 1.53M summary rows / 23 BUs => build+export ~37 min;
+          # 50 min = data growth or a slow mart is eating the 120-min job
+          # backstop — investigate before it starts killing runs (the
+          # enrich-livelock lesson, build edition).
+          if [ $(( SECONDS - start )) -gt 3000 ]; then
+            echo "::warning::warehouse rebuild took $(( (SECONDS - start) / 60 ))m (>50m tripwire) — check the build-timings trend in recent step summaries"
           fi
 
       - name: Publish serve DB
