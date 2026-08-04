@@ -83,7 +83,7 @@ jobs:
       - name: Restore cached base snapshot
         if: steps.fetch.outputs.skip != '1'
         id: cache-base
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: base.json
           key: warehouse-diff-base-${{ github.event.pull_request.base.sha }}-${{ hashFiles('data/scprs.db', 'data/supplier_enrichment.db', 'data/cmas.db', 'data/eprocure.db') }}
