@@ -1,4 +1,5 @@
 table gold_supplier_acquisition_profile
+	isHidden
 	lineageTag: a9d67d9f-1759-4742-bb67-f9f7941f4f54
 
 	column supplier_id

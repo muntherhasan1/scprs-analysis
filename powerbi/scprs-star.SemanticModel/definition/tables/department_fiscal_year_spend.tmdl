@@ -1,4 +1,5 @@
 table department_fiscal_year_spend
+	isHidden
 	lineageTag: c0433132-0238-4683-b524-76df5fbfc4a2
 
 	column department_name

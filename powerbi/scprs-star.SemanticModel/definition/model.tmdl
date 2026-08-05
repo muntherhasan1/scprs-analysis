@@ -6,7 +6,7 @@ model Model
 		legacyRedirects
 		returnErrorValuesAsNull
 
-	annotation PBI_QueryOrder = ["Token", "LoadMart", "LoadStar", "fact_document", "fact_line", "fact_associated_po", "dim_supplier", "dim_department", "dim_date", "dim_acquisition", "dim_buyer", "dim_unspsc", "gold_monthly_spend", "gold_canonical_supplier_spend", "gold_acquisition_spend", "gold_supplier_acquisition_profile", "gold_market_concentration", "gold_supplier_certification", "gold_supplier_cmas", "gold_eprocure_posted_opportunity", "gold_eprocure_event_demand", "gold_contract_amendments", "department_fiscal_year_spend", "supplier_fiscal_year_spend"]
+	annotation PBI_QueryOrder = ["Token", "LoadMart", "LoadStar", "fact_document", "fact_line", "fact_associated_po", "dim_supplier", "dim_department", "dim_date", "dim_acquisition", "dim_buyer", "dim_unspsc", "gold_monthly_spend", "gold_canonical_supplier_spend", "gold_acquisition_spend", "gold_supplier_acquisition_profile", "gold_market_concentration", "gold_supplier_certification", "gold_supplier_cmas", "gold_eprocure_posted_opportunity", "gold_eprocure_event_demand", "gold_contract_amendments", "department_fiscal_year_spend", "supplier_fiscal_year_spend", "_Measures"]
 
 	annotation __PBI_TimeIntelligenceEnabled = 0
 
@@ -31,3 +31,4 @@ ref table gold_eprocure_event_demand
 ref table gold_contract_amendments
 ref table department_fiscal_year_spend
 ref table supplier_fiscal_year_spend
+ref table _Measures

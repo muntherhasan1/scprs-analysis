@@ -1,4 +1,5 @@
 table supplier_fiscal_year_spend
+	isHidden
 	lineageTag: bec98a4f-b140-4321-9919-4a653baab4d5
 
 	column canonical_name

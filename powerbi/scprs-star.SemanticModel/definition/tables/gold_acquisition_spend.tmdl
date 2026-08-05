@@ -1,4 +1,5 @@
 table gold_acquisition_spend
+	isHidden
 	lineageTag: 85ca7067-9316-4c8b-bae9-fde4853afc6f
 
 	column acquisition_type

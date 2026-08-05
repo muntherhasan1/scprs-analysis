@@ -1,4 +1,5 @@
 table gold_canonical_supplier_spend
+	isHidden
 	lineageTag: 44dce260-1134-4a0f-91ef-87b65e6432a3
 
 	column canonical_id

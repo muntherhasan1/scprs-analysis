@@ -171,6 +171,43 @@ Open it in Power BI Desktop (a 2024+ build — the model is stored as TMDL),
 set `Token` under Transform data → Manage parameters, and Refresh.
 `powerbi/.gitignore` keeps Desktop's local `.pbi/` caches out of git.
 
+## Report layer (the SCPRS dashboard)
+
+The report side of the PBIP implements the *SCPRS Power BI Build Spec* (v4, in
+the claude.ai/design project alongside the dashboard mockup): a 1600×900
+canvas, ten pages plus a hidden Notes page, and a `_Measures` table with the
+full measure set (competitive/leveraged share, SB/DVBE goals, HHI, CMAS
+expiry, amendment growth, eProcure event counts). Three facts that came from
+profiling, not the spec draft: `competitive_flag` values are
+`Competitive`/`Non-Competitive`/`Other` (title case);
+`gold_market_concentration.top_supplier_pct` is 0–100 (the `[Top Supplier %]`
+measure divides by 100 so it formats as a percentage); and neither
+`purchase_document` nor `department_name` is unique in the star, so the four
+mart relationships key on `business_unit` and on a calculated
+`business_unit|purchase_document` composite (matching the hidden
+`fact_document.document_bk`) rather than the spec's draft columns.
+
+`python powerbi/build_report.py` generates the whole report file: the
+**chrome** (sidebar — its 1px dividers and 3px active-page bar are below the
+12px minimum Desktop's UI allows on shapes, hence the script — nav buttons,
+header, the three synced slicers, the Filter State scope card, the registered
+`industry-theme.json`) **and every page's content visuals** — KPI cards,
+charts, tables and the fiscal-year matrix, bound to the model at the spec's §6
+coordinates, including the Top-N filters on the ranking bars and the Pareto.
+Visual names mark ownership: `chrome_*` is always regenerated; `gen_*` content
+and anything hand-built survive `--merge` (a visual you edited in Desktop wins
+over its regenerated twin by name); `--force` discards edits and rebuilds
+everything. Install **Barlow** and **Barlow Condensed** on every author and
+viewer machine or the theme silently falls back to Segoe UI.
+
+Still manual in Desktop, per the spec's own "cannot do natively" list plus
+format-pane-only settings: page 10's drill-through field list
+(`canonical_name`, `department_name`, `acquisition_type`, `fiscal_year`), the
+"Clear all" bookmark button, constant lines (SB 25% / DVBE 3% goals, portfolio
+average), the fiscal-year matrix heat shading (Cell elements → Background
+gradient `#F2F2F3 → #94BCE3`), conditional formats on expiry/close dates, and
+the report-page tooltip.
+
 ## Modeling notes (the usual traps)
 
 - Vendor rollups: use `gold_canonical_supplier_spend` /
