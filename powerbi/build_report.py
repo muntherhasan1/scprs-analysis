@@ -982,7 +982,6 @@ def _content_08(c):
                 "Values": [
                     ("col", GCA, "purchase_document"),
                     ("col", GCA, "business_unit"),
-                    ("col", SUP, "canonical_name"),
                     ("col", GCA, "amendment_count"),
                     ("col", GCA, "snapshots_captured"),
                     ("col", GCA, "current_value"),
