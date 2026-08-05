@@ -306,14 +306,16 @@ def button(name, x, y, w, h, text, target, active=False, font_size=10, outlined=
         {
             "visualType": "actionButton",
             "drillFilterOtherVisuals": True,
+            # "show" must sit in a selector-LESS entry — Desktop treats a
+            # state-scoped show as off and renders an empty button.
             "objects": {
                 "icon": [
                     {"properties": {"shapeType": lit("'blank'")}, "selector": {"id": "default"}}
                 ],
                 "text": [
+                    {"properties": {"show": lit("true")}},
                     {
                         "properties": {
-                            "show": lit("true"),
                             "text": lit(f"'{text}'"),
                             "fontFamily": lit("'Barlow'"),
                             "fontSize": lit(f"{font_size}D"),
@@ -327,9 +329,9 @@ def button(name, x, y, w, h, text, target, active=False, font_size=10, outlined=
                     {"properties": {"fontColor": color(hover_color)}, "selector": {"id": "hover"}},
                 ],
                 "fill": [
+                    {"properties": {"show": lit("true")}},
                     {
                         "properties": {
-                            "show": lit("true"),
                             "fillColor": color(default_fill),
                             "transparency": lit(default_alpha),
                         },
@@ -344,14 +346,14 @@ def button(name, x, y, w, h, text, target, active=False, font_size=10, outlined=
                     },
                 ],
                 "outline": [
+                    {"properties": {"show": lit("true" if outlined else "false")}},
                     {
                         "properties": {
-                            "show": lit("true" if outlined else "false"),
                             "lineColor": color(HAIRLINE),
                             "weight": lit("1D"),
                         },
                         "selector": {"id": "default"},
-                    }
+                    },
                 ],
                 "visualLink": [{"properties": link}],
             },
