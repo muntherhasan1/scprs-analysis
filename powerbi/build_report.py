@@ -365,7 +365,26 @@ def button(name, x, y, w, h, text, target, active=False, font_size=10, outlined=
 def slicer(name, x, y, w, h, entity, column, header, mode, sync_name, z=20, orientation=None):
     objects = {
         "data": [{"properties": {"mode": lit(f"'{mode}'")}}],
-        "header": [{"properties": {"show": lit("true"), "text": lit(f"'{header}'")}}],
+        "header": [
+            {
+                "properties": {
+                    "show": lit("true"),
+                    "text": lit(f"'{header}'"),
+                    "fontFamily": lit("'Barlow Condensed'"),
+                    "textSize": lit("10D"),
+                    "fontColor": color(MUTED),
+                }
+            }
+        ],
+        "items": [
+            {
+                "properties": {
+                    "fontFamily": lit("'Barlow'"),
+                    "textSize": lit("10D"),
+                    "fontColor": color(INK),
+                }
+            }
+        ],
         "selection": [{"properties": {"singleSelect": lit("false")}}],
     }
     if orientation is not None:
@@ -533,12 +552,32 @@ def data_visual(
         ]
     if objects:
         visual["objects"] = objects
+    # Styled explicitly rather than via the theme: Desktop ignores the
+    # registered-theme reference, so the look must ride on each visual.
     vc_objects = {}
     if title:
-        vc_objects["title"] = [{"properties": {"show": lit("true"), "text": lit(f"'{title}'")}}]
+        vc_objects["title"] = [
+            {
+                "properties": {
+                    "show": lit("true"),
+                    "text": lit(f"'{title}'"),
+                    "fontFamily": lit("'Barlow Condensed'"),
+                    "fontSize": lit("13D"),
+                    "fontColor": color(INK),
+                }
+            }
+        ]
     if subtitle:
         vc_objects["subTitle"] = [
-            {"properties": {"show": lit("true"), "text": lit(f"'{subtitle}'")}}
+            {
+                "properties": {
+                    "show": lit("true"),
+                    "text": lit(f"'{subtitle}'"),
+                    "fontFamily": lit("'Barlow'"),
+                    "fontSize": lit("9D"),
+                    "fontColor": color(MUTED),
+                }
+            }
         ]
     if vc_objects:
         visual["vcObjects"] = vc_objects
@@ -617,6 +656,29 @@ def topn(uid, entity, prop, count, by_entity, by_measure):
 TCV = ("meas", FD, "Total Contract Value")
 DOCS = ("meas", FD, "Document Count")
 
+STEEL = "#5980A6"
+STEEL_DARK = "#1D2D3D"
+STEEL_LIGHT = "#94BCE3"
+
+
+def chart_objects(*series, axis=False):
+    """Data colors baked per visual (theme registration is ignored by Desktop).
+
+    series: one hex string (defaultColor for every series) or (queryRef, hex)
+    pairs for per-series fills. axis=True widens the category-label area so
+    department/supplier names stop truncating.
+    """
+    obj = {}
+    if len(series) == 1 and isinstance(series[0], str):
+        obj["dataPoint"] = [{"properties": {"defaultColor": color(series[0])}}]
+    elif series:
+        obj["dataPoint"] = [
+            {"properties": {"fill": color(c)}, "selector": {"metadata": q}} for q, c in series
+        ]
+    if axis:
+        obj["categoryAxis"] = [{"properties": {"maxMarginFactor": lit("40D")}}]
+    return obj
+
 
 def _content_01(c):
     cards = [
@@ -640,6 +702,7 @@ def _content_01(c):
             "areaChart",
             {"Category": [("col", DD, "full_date")], "Y": [TCV]},
             title="Monthly contract value booked",
+            objects=chart_objects(STEEL),
             subtitle=VALUE_CAVEAT,
         )
     )
@@ -653,6 +716,7 @@ def _content_01(c):
             "barChart",
             {"Category": [("col", DEP, "department_name")], "Y": [TCV]},
             title="Top departments",
+            objects=chart_objects(STEEL, axis=True),
             filters=topn("p01depts", DEP, "department_name", 8, FD, "Total Contract Value"),
             sort=TCV,
         )
@@ -667,6 +731,7 @@ def _content_01(c):
             "barChart",
             {"Category": [("col", SUP, "canonical_name")], "Y": [TCV]},
             title="Top suppliers (canonical)",
+            objects=chart_objects(STEEL, axis=True),
             filters=topn("p01sups", SUP, "canonical_name", 8, FD, "Total Contract Value"),
             sort=TCV,
         )
@@ -681,6 +746,7 @@ def _content_01(c):
             "barChart",
             {"Category": [("col", ACQ, "acquisition_type")], "Y": [TCV]},
             title="Acquisition mix",
+            objects=chart_objects(STEEL, axis=True),
             sort=TCV,
         )
     )
@@ -698,6 +764,7 @@ def _content_02(c):
             "barChart",
             {"Category": [("col", DEP, "department_name")], "Y": [TCV]},
             title="Department spend",
+            objects=chart_objects(STEEL, axis=True),
             sort=TCV,
             subtitle=VALUE_CAVEAT,
         ),
@@ -754,6 +821,7 @@ def _content_03(c):
                 "Size": [DOCS],
             },
             title="Breadth vs depth",
+            objects=chart_objects("#416180"),
         ),
         textbox(
             f"{c}_drill_hint",
@@ -782,6 +850,7 @@ def _content_04(c):
                 "Y": [TCV],
             },
             title="Value share by acquisition type",
+            objects=chart_objects(axis=True),
         ),
         data_visual(
             f"{c}_comp_vs_not",
@@ -792,6 +861,7 @@ def _content_04(c):
             "barChart",
             {"Category": [("col", ACQ, "acquisition_method")], "Y": [TCV]},
             title="Competitive vs non-competitive",
+            objects=chart_objects(STEEL, axis=True),
             sort=TCV,
             subtitle=VALUE_CAVEAT,
         ),
@@ -804,6 +874,7 @@ def _content_04(c):
             "barChart",
             {"Category": [("col", DEP, "department_name")], "Y": [("meas", MS, "Competitive %")]},
             title="Competitive share by department",
+            objects=chart_objects(STEEL, axis=True),
             sort=("meas", MS, "Competitive %"),
         ),
     ]
@@ -845,6 +916,7 @@ def _content_05(c):
                 "Size": [("agg", GMC, "supplier_count", "Sum")],
             },
             title="Value vs concentration",
+            objects=chart_objects("#416180"),
         ),
         data_visual(
             f"{c}_pareto",
@@ -859,6 +931,10 @@ def _content_05(c):
                 "Y2": [("meas", MS, "Cumulative Supplier Share")],
             },
             title="Share held by top suppliers",
+            objects=chart_objects(
+                ("_Measures.Supplier Share", STEEL),
+                ("_Measures.Cumulative Supplier Share", STEEL_DARK),
+            ),
             filters=topn("p05pareto", SUP, "canonical_name", 20, FD, "Total Contract Value"),
             sort=("meas", MS, "Supplier Share"),
         ),
@@ -893,6 +969,12 @@ def _content_06(c):
                 ],
             },
             title="SB + DVBE share of value by department",
+            objects=chart_objects(
+                ("_Measures.SB % of Value", STEEL),
+                ("_Measures.Micro Business % of Value", STEEL_LIGHT),
+                ("_Measures.DVBE % of Value", STEEL_DARK),
+                axis=True,
+            ),
             sort=("meas", MS, "SB % of Value"),
         )
     )
@@ -946,6 +1028,11 @@ def _content_07(c):
                 ]
             },
             title="Leveraged vs open-market value",
+            objects=chart_objects(
+                ("_Measures.Leveraged Value", STEEL),
+                ("_Measures.Open Market Value", STEEL_LIGHT),
+                ("_Measures.Non-Competitive Value", STEEL_DARK),
+            ),
             subtitle=VALUE_CAVEAT,
         )
     )
@@ -1038,6 +1125,7 @@ def _content_08(c):
             "columnChart",
             {"Category": [("col", FD, "version")], "Y": [DOCS]},
             title="Version distribution (all documents)",
+            objects=chart_objects(STEEL),
             sort=("col", FD, "version"),
             sort_dir=1,
         )
@@ -1094,6 +1182,10 @@ def _content_09(c):
                 "Y2": [("agg", GED, "set_aside_pct", "Avg")],
             },
             title="Repeat demand by department",
+            objects=chart_objects(
+                ("Sum(gold_eprocure_event_demand.event_count)", STEEL),
+                ("Avg(gold_eprocure_event_demand.set_aside_pct)", STEEL_DARK),
+            ),
             sort=("agg", GED, "event_count", "Sum"),
             subtitle="by buyer, not commodity — the mart has no category column",
         )
@@ -1168,22 +1260,22 @@ def chrome(section, index):
     vis = [
         rectangle(f"{p}_sidebar_divider", 231, 0, 1, CANVAS_H, HAIRLINE),
         textbox(
-            f"{p}_kicker", 24, 24, 184, 16, [("POWER BI · REPORT", "Barlow Condensed", 9, ACCENT)]
+            f"{p}_kicker", 24, 24, 200, 22, [("POWER BI · REPORT", "Barlow Condensed", 9, ACCENT)]
         ),
         textbox(
             f"{p}_product",
             24,
-            44,
-            184,
-            52,
+            46,
+            200,
+            62,
             [("SCPRS Procurement Warehouse", "Barlow Condensed", 20, INK)],
         ),
         textbox(
             f"{p}_scope",
             24,
-            100,
-            184,
-            34,
+            112,
+            200,
+            38,
             [
                 ("21 departments · FY22–FY27", "Barlow", 8, MUTED),
                 ("Supplier opportunity view", "Barlow", 8, MUTED),
@@ -1203,9 +1295,9 @@ def chrome(section, index):
         textbox(
             f"{p}_footer",
             24,
-            856,
-            184,
-            36,
+            852,
+            200,
+            40,
             [
                 ("Warehouse serve dataset", "Barlow", 7, FAINT),
                 ("marts refresh up to 8×/day", "Barlow", 7, FAINT),
@@ -1233,10 +1325,10 @@ def chrome(section, index):
         title, subtitle = PAGES[index][2], PAGES[index][3]
         title_x = 300 if index == DETAIL_INDEX else 256
         vis.append(
-            textbox(f"{p}_title", title_x, 24, 700, 40, [(title, "Barlow Condensed", 22, INK)], z=3)
+            textbox(f"{p}_title", title_x, 24, 700, 46, [(title, "Barlow Condensed", 22, INK)], z=3)
         )
         vis.append(
-            textbox(f"{p}_subtitle", title_x, 66, 700, 22, [(subtitle, "Barlow", 9, MUTED)], z=3)
+            textbox(f"{p}_subtitle", title_x, 70, 700, 26, [(subtitle, "Barlow", 9, MUTED)], z=3)
         )
         if index == DETAIL_INDEX:
             vis.append(button(f"{p}_back", 256, 24, 32, 32, "←", "Back", outlined=True))
@@ -1244,10 +1336,10 @@ def chrome(section, index):
             vis.append(
                 slicer(
                     f"{p}_slicer_dept",
-                    1000,
-                    28,
-                    180,
-                    60,
+                    988,
+                    22,
+                    192,
+                    70,
                     "dim_department",
                     "department_name",
                     "DEPARTMENT",
@@ -1259,9 +1351,9 @@ def chrome(section, index):
                 slicer(
                     f"{p}_slicer_acq",
                     1192,
-                    28,
+                    22,
                     160,
-                    60,
+                    70,
                     "dim_acquisition",
                     "acquisition_type",
                     "ACQUISITION TYPE",
@@ -1273,9 +1365,9 @@ def chrome(section, index):
                 slicer(
                     f"{p}_slicer_fy",
                     1364,
-                    28,
-                    212,
-                    60,
+                    22,
+                    224,
+                    70,
                     "dim_date",
                     "fiscal_year",
                     "FISCAL YEAR",
