@@ -1,4 +1,5 @@
 table gold_monthly_spend
+	isHidden
 	lineageTag: f812bf73-501d-4b17-89fe-485d5d990987
 
 	column year

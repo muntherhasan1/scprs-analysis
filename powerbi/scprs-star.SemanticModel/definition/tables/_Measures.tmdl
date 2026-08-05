@@ -1,0 +1,322 @@
+table _Measures
+	lineageTag: 75691570-83e7-4d30-bfe1-964163acbbf3
+
+	/// Distinct canonical vendors. Never DISTINCTCOUNT supplier_id - re-registrations double-count.
+	measure 'Canonical Suppliers' = DISTINCTCOUNT ( dim_supplier[canonical_name] )
+		lineageTag: 2b257381-4972-4af3-bffb-02a68785b442
+		formatString: #,0
+
+	/// Honest centre for a long-tailed distribution of award sizes.
+	measure 'Median Document Value' = MEDIAN ( fact_document[grand_total] )
+		lineageTag: e6acbfcd-44a7-4a97-8c9a-423defeb63ea
+		formatString: \$#,0
+
+	/// competitive_flag vocabulary verified in warehouse.py: Competitive / Non-Competitive / Other.
+	measure 'Competitive Value' =
+			CALCULATE (
+			    [Total Contract Value],
+			    KEEPFILTERS ( dim_acquisition[competitive_flag] = "Competitive" )
+			)
+		lineageTag: 5575c7e5-1f85-4e38-ba5d-48e948be3a2b
+		formatString: \$#,0
+
+	/// Share of value in scope awarded through a competitive method.
+	measure 'Competitive %' = DIVIDE ( [Competitive Value], [Total Contract Value] )
+		lineageTag: a8cbb3ec-4d51-4a58-aa1c-3674749d3ca8
+		formatString: 0.0%;-0.0%;0.0%
+
+	/// Value routed through leveraged agreements (CMAS / statewide contracts).
+	measure 'Leveraged Value' =
+			CALCULATE (
+			    [Total Contract Value],
+			    CONTAINSSTRING ( dim_acquisition[acquisition_method], "Leveraged" )
+			        || CONTAINSSTRING ( dim_acquisition[acquisition_method], "CMAS" )
+			)
+		lineageTag: e5ea6dc2-b17f-45f0-8ec0-753b27a57c66
+		formatString: \$#,0
+
+	/// Prior fiscal year by offset, not DATEADD - CA fiscal year runs Jul-Jun.
+	measure 'Value PY' =
+			CALCULATE (
+			    [Total Contract Value],
+			    FILTER (
+			        ALL ( dim_date[fiscal_year] ),
+			        dim_date[fiscal_year] = MAX ( dim_date[fiscal_year] ) - 1
+			    )
+			)
+		lineageTag: 640eec5d-923a-4a6b-a837-e26c2758bcfa
+		formatString: \$#,0
+
+	/// Blank on the first fiscal year in scope.
+	measure 'Value YoY %' = DIVIDE ( [Total Contract Value] - [Value PY], [Value PY] )
+		lineageTag: 92ce2531-758d-4677-9fc2-e7a7af84a086
+		formatString: 0.0%;-0.0%;0.0%
+
+	/// Supplier's share of value within the current filter context.
+	measure 'Supplier Share' =
+			DIVIDE (
+			    [Total Contract Value],
+			    CALCULATE ( [Total Contract Value], ALL ( dim_supplier ) )
+			)
+		lineageTag: 06d7b8bf-6f76-47d7-8a07-78e96612bc2d
+		formatString: 0.0%;-0.0%;0.0%
+
+	/// Star-side top-5 share; distinct from the concentration mart's top_supplier_pct (single largest).
+	measure 'Top 5 Supplier Share' =
+			VAR AllValue = CALCULATE ( [Total Contract Value], ALL ( dim_supplier ) )
+			VAR Top5 =
+			    CALCULATE (
+			        [Total Contract Value],
+			        TOPN ( 5, ALL ( dim_supplier[canonical_name] ), [Total Contract Value] )
+			    )
+			RETURN
+			    DIVIDE ( Top5, AllValue )
+		lineageTag: f5edf4d5-ba2b-4dbc-b11a-e4b3ecbf318c
+		formatString: 0.0%;-0.0%;0.0%
+
+	/// One mart row per business_unit x acquisition_type, so AVERAGE is correct above a single cell. Under 1,500 open; over 2,500 concentrated.
+	measure 'Market HHI' = AVERAGE ( gold_market_concentration[hhi] )
+		lineageTag: 0dacf68e-eec4-4dc2-b067-d7cbe0e6d909
+		formatString: #,0
+
+	/// Single largest supplier's share - not top-5. Mart stores 0-100; divided by 100 here so it formats as a percentage.
+	measure 'Top Supplier %' = AVERAGE ( gold_market_concentration[top_supplier_pct] ) / 100
+		lineageTag: 0aaed6b5-3d75-4a00-9df9-7b0151290c64
+		formatString: 0.0%;-0.0%;0.0%
+
+	/// Certification mart sits on the one side of dim_supplier, so its flags filter the facts directly.
+	measure 'SB Supplier Value' =
+			CALCULATE (
+			    [Total Contract Value],
+			    gold_supplier_certification[cert_small_business] = 1
+			)
+		lineageTag: 11dead15-5453-4933-bd28-3298f9df0c75
+		formatString: \$#,0
+
+	/// Statutory goal 25%. cert_record_count = 0 means unmatched, not uncertified - exclude those rows.
+	measure 'SB % of Value' = DIVIDE ( [SB Supplier Value], [Total Contract Value] )
+		lineageTag: 2258b50b-f673-43d5-8535-843c74393055
+		formatString: 0.0%;-0.0%;0.0%
+
+	/// Statutory goal 3%.
+	measure 'DVBE % of Value' =
+			DIVIDE (
+			    CALCULATE (
+			        [Total Contract Value],
+			        gold_supplier_certification[cert_dvbe] = 1
+			    ),
+			    [Total Contract Value]
+			)
+		lineageTag: 55675e55-5573-461b-b585-3d1d3736fd07
+		formatString: 0.0%;-0.0%;0.0%
+
+	/// Micro-business flag reported separately from SB.
+	measure 'Micro Business % of Value' =
+			DIVIDE (
+			    CALCULATE (
+			        [Total Contract Value],
+			        gold_supplier_certification[cert_micro_business] = 1
+			    ),
+			    [Total Contract Value]
+			)
+		lineageTag: 16c50c24-d751-4a2d-9f74-25392f7620cc
+		formatString: 0.0%;-0.0%;0.0%
+
+	/// A lapse costs the supplier set-aside eligibility.
+	measure 'Certifications Expiring 180d' =
+			CALCULATE (
+			    DISTINCTCOUNT ( gold_supplier_certification[canonical_name] ),
+			    gold_supplier_certification[latest_cert_end] <= TODAY () + 180,
+			    gold_supplier_certification[latest_cert_end] >= TODAY ()
+			)
+		lineageTag: 6a4a5c25-099d-4589-817d-df8204052a9c
+		formatString: #,0
+
+	/// Value flowing to suppliers holding at least one CMAS agreement.
+	measure 'CMAS Holder Value' =
+			CALCULATE (
+			    [Total Contract Value],
+			    gold_supplier_cmas[cmas_agreement_count] >= 1
+			)
+		lineageTag: 988036cf-d443-4dee-b9ad-517619cfc509
+		formatString: \$#,0
+
+	/// Share of value in scope flowing to CMAS holders.
+	measure 'CMAS Holder Share' = DIVIDE ( [CMAS Holder Value], [Total Contract Value] )
+		lineageTag: c64a16c7-57a9-485f-8bb8-91dc0b2b93f3
+		formatString: 0.0%;-0.0%;0.0%
+
+	/// Renewal watch - and a competitive opening.
+	measure 'CMAS Expiring 12m' =
+			CALCULATE (
+			    DISTINCTCOUNT ( gold_supplier_cmas[canonical_name] ),
+			    gold_supplier_cmas[latest_term_end] <= TODAY () + 365
+			)
+		lineageTag: b73c2a2f-85f0-4061-9250-590110c3ca6a
+		formatString: #,0
+
+	/// Complete, from the star - version counts every revision.
+	measure 'Amended Documents' = CALCULATE ( [Document Count], fact_document[version] > 0 )
+		lineageTag: 2b4496f1-a2aa-4bbb-888e-f8c983022e7e
+		formatString: #,0
+
+	/// Typical number of revisions per document.
+	measure 'Mean Amendment Depth' = AVERAGE ( fact_document[version] )
+		lineageTag: d40f6788-4219-4ecb-805e-aeb0998cdcb0
+		formatString: 0.0
+
+	/// Sparse - only documents captured at 2+ snapshots; snapshots_captured tells you how sparse.
+	measure 'Amendment Value Growth' = SUM ( gold_contract_amendments[value_growth] )
+		lineageTag: 504de1f4-6f65-4cbc-b425-b43b8a2f8fbb
+		formatString: \$#,0
+
+	/// Growth against the implied original value.
+	measure 'Amendment Growth %' =
+			DIVIDE (
+			    [Amendment Value Growth],
+			    SUM ( gold_contract_amendments[current_value] ) - [Amendment Value Growth]
+			)
+		lineageTag: 78a7343f-1b2e-4912-ab19-4a06905771de
+		formatString: 0.0%;-0.0%;0.0%
+
+	/// Makes the coverage caveat live rather than a hardcoded footnote.
+	measure 'Amendment Coverage Note' =
+			VAR Docs = DISTINCTCOUNT ( gold_contract_amendments[purchase_document] )
+			RETURN
+			    "Coverage: " & Docs & " documents captured at 2+ snapshots"
+		lineageTag: 05e2854d-08a9-48a6-b05d-2c6fcb7fb408
+
+	/// No value column exists on the mart - count events, never sum money.
+	measure 'Open Events' =
+			CALCULATE (
+			    DISTINCTCOUNT ( gold_eprocure_posted_opportunity[event_id] ),
+			    gold_eprocure_posted_opportunity[bid_close_date] >= TODAY ()
+			)
+		lineageTag: 8ef1c1a2-33ae-4baf-b09b-de1637b88e7d
+		formatString: #,0
+
+	/// The act-now number.
+	measure 'Events Closing 14d' =
+			CALCULATE (
+			    [Open Events],
+			    gold_eprocure_posted_opportunity[bid_close_date] <= TODAY () + 14
+			)
+		lineageTag: cec8edf4-6c79-4d4f-a985-38c05ee7651b
+		formatString: #,0
+
+	/// Where certification is worth holding.
+	measure 'Set-Aside Events %' =
+			DIVIDE (
+			    CALCULATE (
+			        [Open Events],
+			        gold_eprocure_posted_opportunity[sb_only] = 1
+			            || gold_eprocure_posted_opportunity[dvbe_only] = 1
+			    ),
+			    [Open Events]
+			)
+		lineageTag: 472bce3a-b6cf-4d8d-9e9e-3c8cb4242a33
+		formatString: 0.0%;-0.0%;0.0%
+
+	/// How far line-level analysis can be trusted.
+	measure 'Enriched Document %' =
+			DIVIDE (
+			    CALCULATE ( [Document Count], fact_document[is_enriched] = 1 ),
+			    [Document Count]
+			)
+		lineageTag: caca9c7f-5db2-4fbc-ad41-1ca51e0be137
+		formatString: 0.0%;-0.0%;0.0%
+
+	/// Per-document flag that line amounts sum to grand_total; NULL when nothing to reconcile.
+	measure 'Line Reconciliation Rate' = AVERAGE ( fact_document[dq_line_reconciles] )
+		lineageTag: 142dd1dd-f476-46b4-a819-0bd7ee165365
+		formatString: 0.0%;-0.0%;0.0%
+
+	/// Flags master agreements with child orders.
+	measure 'Associated PO Coverage' =
+			DIVIDE (
+			    CALCULATE ( [Document Count], fact_document[has_associated_pos] = 1 ),
+			    [Document Count]
+			)
+		lineageTag: b3355e5d-c141-43e0-95d7-396cef704889
+		formatString: 0.0%;-0.0%;0.0%
+
+	/// Read-only substitute for the mockup's filter-chip bar; users clear filters from the slicers.
+	measure 'Filter State' =
+			VAR Dept = SELECTEDVALUE ( dim_department[department_name], "All departments" )
+			VAR Acq = SELECTEDVALUE ( dim_acquisition[acquisition_type], "All types" )
+			VAR FY = SELECTEDVALUE ( dim_date[fiscal_year], "All years" )
+			VAR Sup = SELECTEDVALUE ( dim_supplier[canonical_name], BLANK () )
+			RETURN
+			    "Scope: " & Dept & " | " & Acq & " | " & FY
+			        & IF ( ISBLANK ( Sup ), "", " | " & Sup )
+		lineageTag: 9cfe56c9-287a-4169-8f13-6c45e0751044
+
+	/// Departments a supplier sells into. Counts fact keys - dim_department would need a bidirectional filter.
+	measure 'Departments Served' = DISTINCTCOUNT ( fact_document[dept_key] )
+		lineageTag: 7d3e91b2-4a08-4c5e-9f16-83b2d7e04a11
+		formatString: #,0
+
+	/// Distinct canonical suppliers holding at least one CMAS agreement (every mart row is a holder).
+	measure 'CMAS Holders' = DISTINCTCOUNT ( gold_supplier_cmas[canonical_name] )
+		lineageTag: 1f68c2d9-5b34-4e07-a2c8-940d1e57b322
+		formatString: #,0
+
+	/// Booked value awarded through a non-competitive method.
+	measure 'Non-Competitive Value' =
+			CALCULATE (
+			    [Total Contract Value],
+			    KEEPFILTERS ( dim_acquisition[competitive_flag] = "Non-Competitive" )
+			)
+		lineageTag: 8a92f4e1-6c50-4d18-b3d9-a51e2f68c433
+		formatString: \$#,0
+
+	/// Booked value not routed through leveraged vehicles (CMAS / statewide contracts).
+	measure 'Open Market Value' = [Total Contract Value] - [Leveraged Value]
+		lineageTag: 9ba3e5f2-7d61-4e29-c4ea-b62f3a79d544
+		formatString: \$#,0
+
+	/// Pareto cumulative share over suppliers ranked by value within the current selection.
+	measure 'Cumulative Supplier Share' =
+			VAR Cur = [Total Contract Value]
+			RETURN
+			    DIVIDE (
+			        SUMX (
+			            FILTER (
+			                ALLSELECTED ( dim_supplier[canonical_name] ),
+			                CALCULATE ( [Total Contract Value] ) >= Cur
+			            ),
+			            CALCULATE ( [Total Contract Value] )
+			        ),
+			        CALCULATE ( [Total Contract Value], ALLSELECTED ( dim_supplier ) )
+			    )
+		lineageTag: ac04f6a3-8e72-4f3a-d5fb-c73a4b8ae655
+		formatString: 0.0%;-0.0%;0.0%
+
+	/// Distinct departments with a live posted solicitation.
+	measure 'Departments Posting' = DISTINCTCOUNT ( gold_eprocure_posted_opportunity[department_name] )
+		lineageTag: bd15a7b4-9f83-403b-e60c-d84b5c9bf766
+		formatString: #,0
+
+	/// Days until bid close for the single event in row context; blank above one row.
+	measure 'Days To Close' =
+			VAR CloseDate = SELECTEDVALUE ( gold_eprocure_posted_opportunity[bid_close_date] )
+			RETURN
+			    IF ( ISBLANK ( CloseDate ), BLANK (), INT ( CloseDate - TODAY () ) )
+		lineageTag: ce26b8c5-a094-414c-f71d-e95c6dac0877
+		formatString: #,0
+
+	column Col
+		dataType: string
+		isHidden
+		lineageTag: 3eb9692e-2e90-400c-8804-7c7ae72e264c
+		summarizeBy: none
+		sourceColumn: Col
+
+		annotation SummarizationSetBy = Automatic
+
+	partition _Measures = m
+		mode: import
+		source =
+				#table(type table [Col = text], {})
+
+	annotation PBI_ResultType = Table

@@ -1,6 +1,14 @@
 table gold_contract_amendments
 	lineageTag: 953414f7-4a74-48bf-9993-36a04bfd1813
 
+	/// Composite key matching fact_document.document_bk - purchase_document alone collides across BUs.
+	column doc_bk = gold_contract_amendments[business_unit] & "|" & gold_contract_amendments[purchase_document]
+		dataType: string
+		isHidden
+		isDataTypeInferred
+		lineageTag: 4c1f0a4e-9b2d-4f6e-8a37-5d20c8b1f9ab
+		summarizeBy: none
+
 	column business_unit
 		dataType: string
 		lineageTag: efc8070d-dad8-4f6d-9bb5-b600e4e3cc31
