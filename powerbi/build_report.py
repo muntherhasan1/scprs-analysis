@@ -464,6 +464,16 @@ def qref(sel):
     return f"{sel[3]}({entity}.{prop})" if kind == "agg" else f"{entity}.{prop}"
 
 
+def _sel_expr(sel, aliases):
+    kind, entity, prop = sel[0], sel[1], sel[2]
+    src = {"Expression": {"SourceRef": {"Source": aliases[entity]}}, "Property": prop}
+    if kind == "col":
+        return {"Column": src}
+    if kind == "meas":
+        return {"Measure": src}
+    return {"Aggregation": {"Expression": {"Column": src}, "Function": AGG_FUNC[sel[3]]}}
+
+
 def _query(selects):
     """Build prototypeQuery From/Select from (kind, entity, prop[, func]) tuples.
 
@@ -476,29 +486,39 @@ def _query(selects):
             aliases[entity] = f"t{len(aliases)}"
             from_list.append({"Name": aliases[entity], "Entity": entity, "Type": 0})
     for sel in selects:
-        kind, entity, prop = sel[0], sel[1], sel[2]
-        src = {"Expression": {"SourceRef": {"Source": aliases[entity]}}, "Property": prop}
-        if kind == "col":
-            expr = {"Column": src}
-        elif kind == "meas":
-            expr = {"Measure": src}
-        else:
-            expr = {"Aggregation": {"Expression": {"Column": src}, "Function": AGG_FUNC[sel[3]]}}
-        select_list.append({**expr, "Name": qref(sel), "NativeReferenceName": prop})
-    return from_list, select_list
+        select_list.append(
+            {**_sel_expr(sel, aliases), "Name": qref(sel), "NativeReferenceName": sel[2]}
+        )
+    return from_list, select_list, aliases
 
 
 def data_visual(
-    name, x, y, w, h, vtype, roles, title=None, subtitle=None, objects=None, filters=None, z=100
+    name,
+    x,
+    y,
+    w,
+    h,
+    vtype,
+    roles,
+    title=None,
+    subtitle=None,
+    objects=None,
+    filters=None,
+    sort=None,
+    sort_dir=2,
+    z=100,
 ):
-    """roles: dict of projection role -> list of select tuples (see _query)."""
+    """roles: dict of projection role -> list of select tuples (see _query).
+
+    sort: a select tuple to order by; sort_dir 2 = descending, 1 = ascending.
+    """
     selects, seen = [], set()
     for sels in roles.values():
         for s in sels:
             if qref(s) not in seen:
                 seen.add(qref(s))
                 selects.append(s)
-    from_list, select_list = _query(selects)
+    from_list, select_list, aliases = _query(selects)
     visual = {
         "visualType": vtype,
         "projections": {
@@ -507,6 +527,10 @@ def data_visual(
         "prototypeQuery": {"Version": 2, "From": from_list, "Select": select_list},
         "drillFilterOtherVisuals": True,
     }
+    if sort:
+        visual["prototypeQuery"]["OrderBy"] = [
+            {"Direction": sort_dir, "Expression": _sel_expr(sort, aliases)}
+        ]
     if objects:
         visual["objects"] = objects
     vc_objects = {}
@@ -540,7 +564,7 @@ def kpi(name, x, y, w, title, entity, measure, subtitle=None):
     )
 
 
-def topn(entity, prop, count, by_entity, by_measure):
+def topn(uid, entity, prop, count, by_entity, by_measure):
     """Visual-level Top N filter: top `count` of entity.prop by by_entity.[by_measure]."""
     from_list = [{"Name": "a", "Entity": entity, "Type": 0}]
     by_alias = "a"
@@ -549,7 +573,7 @@ def topn(entity, prop, count, by_entity, by_measure):
         from_list.append({"Name": "b", "Entity": by_entity, "Type": 0})
     return [
         {
-            "name": f"TopN_{prop}",
+            "name": f"TopN_{uid}",
             "expression": {
                 "Column": {"Expression": {"SourceRef": {"Entity": entity}}, "Property": prop}
             },
@@ -597,7 +621,7 @@ DOCS = ("meas", FD, "Document Count")
 def _content_01(c):
     cards = [
         ("TOTAL CONTRACT VALUE", FD, "Total Contract Value", "documents in scope"),
-        ("YEAR OVER YEAR", MS, "Value YoY %", "booked value, start-date basis"),
+        ("YEAR OVER YEAR", MS, "Value YoY %", "latest complete FY vs prior"),
         ("SUPPLIERS", MS, "Canonical Suppliers", "canonical names"),
         ("MEDIAN DOCUMENT", MS, "Median Document Value", "half of awards are smaller"),
         ("COMPETITIVELY BID", MS, "Competitive %", "of value in scope"),
@@ -629,7 +653,8 @@ def _content_01(c):
             "barChart",
             {"Category": [("col", DEP, "department_name")], "Y": [TCV]},
             title="Top departments",
-            filters=topn(DEP, "department_name", 8, FD, "Total Contract Value"),
+            filters=topn("p01depts", DEP, "department_name", 8, FD, "Total Contract Value"),
+            sort=TCV,
         )
     )
     vis.append(
@@ -642,7 +667,8 @@ def _content_01(c):
             "barChart",
             {"Category": [("col", SUP, "canonical_name")], "Y": [TCV]},
             title="Top suppliers (canonical)",
-            filters=topn(SUP, "canonical_name", 8, FD, "Total Contract Value"),
+            filters=topn("p01sups", SUP, "canonical_name", 8, FD, "Total Contract Value"),
+            sort=TCV,
         )
     )
     vis.append(
@@ -655,6 +681,7 @@ def _content_01(c):
             "barChart",
             {"Category": [("col", ACQ, "acquisition_type")], "Y": [TCV]},
             title="Acquisition mix",
+            sort=TCV,
         )
     )
     return vis
@@ -671,6 +698,7 @@ def _content_02(c):
             "barChart",
             {"Category": [("col", DEP, "department_name")], "Y": [TCV]},
             title="Department spend",
+            sort=TCV,
             subtitle=VALUE_CAVEAT,
         ),
         data_visual(
@@ -710,6 +738,7 @@ def _content_03(c):
                 ]
             },
             title="Supplier leaderboard",
+            sort=TCV,
         ),
         data_visual(
             f"{c}_breadth_depth",
@@ -763,6 +792,7 @@ def _content_04(c):
             "barChart",
             {"Category": [("col", ACQ, "acquisition_method")], "Y": [TCV]},
             title="Competitive vs non-competitive",
+            sort=TCV,
             subtitle=VALUE_CAVEAT,
         ),
         data_visual(
@@ -774,6 +804,7 @@ def _content_04(c):
             "barChart",
             {"Category": [("col", DEP, "department_name")], "Y": [("meas", MS, "Competitive %")]},
             title="Competitive share by department",
+            sort=("meas", MS, "Competitive %"),
         ),
     ]
 
@@ -798,6 +829,7 @@ def _content_05(c):
                 ]
             },
             title="Market concentration",
+            sort=("agg", GMC, "market_value", "Sum"),
         ),
         data_visual(
             f"{c}_value_vs_hhi",
@@ -827,7 +859,8 @@ def _content_05(c):
                 "Y2": [("meas", MS, "Cumulative Supplier Share")],
             },
             title="Share held by top suppliers",
-            filters=topn(SUP, "canonical_name", 20, FD, "Total Contract Value"),
+            filters=topn("p05pareto", SUP, "canonical_name", 20, FD, "Total Contract Value"),
+            sort=("meas", MS, "Supplier Share"),
         ),
     ]
 
@@ -860,6 +893,7 @@ def _content_06(c):
                 ],
             },
             title="SB + DVBE share of value by department",
+            sort=("meas", MS, "SB % of Value"),
         )
     )
     vis.append(
@@ -880,6 +914,7 @@ def _content_06(c):
                 ]
             },
             title="Certified supplier leaders",
+            sort=TCV,
         )
     )
     return vis
@@ -933,6 +968,7 @@ def _content_07(c):
                 ]
             },
             title="CMAS holders",
+            sort=TCV,
         )
     )
     return vis
@@ -989,6 +1025,7 @@ def _content_08(c):
                 ]
             },
             title="Contracts that grew the most after award",
+            sort=("col", GCA, "value_growth"),
         )
     )
     vis.append(
@@ -1001,6 +1038,8 @@ def _content_08(c):
             "columnChart",
             {"Category": [("col", FD, "version")], "Y": [DOCS]},
             title="Version distribution (all documents)",
+            sort=("col", FD, "version"),
+            sort_dir=1,
         )
     )
     return vis
@@ -1037,6 +1076,8 @@ def _content_09(c):
                 ]
             },
             title="Open solicitations",
+            sort=("col", GEP, "bid_close_date"),
+            sort_dir=1,
         )
     )
     vis.append(
@@ -1053,6 +1094,7 @@ def _content_09(c):
                 "Y2": [("agg", GED, "set_aside_pct", "Avg")],
             },
             title="Repeat demand by department",
+            sort=("agg", GED, "event_count", "Sum"),
             subtitle="by buyer, not commodity — the mart has no category column",
         )
     )
@@ -1093,6 +1135,7 @@ def _content_10(c):
                 ]
             },
             title="Document detail",
+            sort=("col", FD, "grand_total"),
         )
     )
     return vis
@@ -1368,6 +1411,38 @@ def build(merge: bool, force: bool) -> None:
             # keep pages this script does not own (tooltip pages, experiments)
             sections.extend(s for s in existing.get("sections", []) if s["name"] not in known)
 
+    # Report-level scope: the design covers FY22 onward; the warehouse holds 2016+.
+    fy_filter = [
+        {
+            "name": "ReportScopeFY22",
+            "expression": {
+                "Column": {"Expression": {"SourceRef": {"Entity": DD}}, "Property": "fiscal_year"}
+            },
+            "filter": {
+                "Version": 2,
+                "From": [{"Name": "d", "Entity": DD, "Type": 0}],
+                "Where": [
+                    {
+                        "Condition": {
+                            "Comparison": {
+                                "ComparisonKind": 2,
+                                "Left": {
+                                    "Column": {
+                                        "Expression": {"SourceRef": {"Source": "d"}},
+                                        "Property": "fiscal_year",
+                                    }
+                                },
+                                "Right": {"Literal": {"Value": "2022L"}},
+                            }
+                        }
+                    }
+                ],
+            },
+            "type": "Advanced",
+            "howCreated": 1,
+        }
+    ]
+
     report = {
         "config": json.dumps(
             {
@@ -1375,11 +1450,16 @@ def build(merge: bool, force: bool) -> None:
                 "activeSectionIndex": 0,
                 "defaultDrillFilterOtherVisuals": True,
                 "themeCollection": {
-                    "customTheme": {"name": "industry-theme.json", "type": "RegisteredResources"}
+                    "baseTheme": {"name": "CY24SU10", "version": "5.55", "type": "SharedResources"},
+                    "customTheme": {
+                        "name": "industry-theme.json",
+                        "version": "5.55",
+                        "type": "RegisteredResources",
+                    },
                 },
             }
         ),
-        "filters": "[]",
+        "filters": json.dumps(fy_filter),
         "layoutOptimization": 0,
         "resourcePackages": [
             {

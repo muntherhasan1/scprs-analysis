@@ -47,8 +47,14 @@ table _Measures
 		lineageTag: 640eec5d-923a-4a6b-a837-e26c2758bcfa
 		formatString: \$#,0
 
-	/// Blank on the first fiscal year in scope.
-	measure 'Value YoY %' = DIVIDE ( [Total Contract Value] - [Value PY], [Value PY] )
+	/// Latest complete fiscal year vs the one before, regardless of slicer year.
+	/// Anchored to TODAY() - an unanchored PY compare inflates wildly in an all-years context.
+	measure 'Value YoY %' =
+			VAR CurFY = YEAR ( TODAY () ) + IF ( MONTH ( TODAY () ) >= 7, 1, 0 ) - 1
+			VAR Cur = CALCULATE ( [Total Contract Value], dim_date[fiscal_year] = CurFY )
+			VAR Prev = CALCULATE ( [Total Contract Value], dim_date[fiscal_year] = CurFY - 1 )
+			RETURN
+			    DIVIDE ( Cur - Prev, Prev )
 		lineageTag: 92ce2531-758d-4677-9fc2-e7a7af84a086
 		formatString: 0.0%;-0.0%;0.0%
 
