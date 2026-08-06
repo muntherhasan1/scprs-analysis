@@ -400,7 +400,20 @@ def has_docs_filter(uid):
 
 
 def slicer(
-    name, x, y, w, h, entity, column, header, mode, sync_name, z=20, orientation=None, filters=None
+    name,
+    x,
+    y,
+    w,
+    h,
+    entity,
+    column,
+    header,
+    mode,
+    sync_name,
+    z=20,
+    orientation=None,
+    filters=None,
+    hidden=False,
 ):
     objects = {
         "data": [{"properties": {"mode": lit(f"'{mode}'")}}],
@@ -445,6 +458,9 @@ def slicer(
         "drillFilterOtherVisuals": False,
         "objects": objects,
     }
+    if hidden:
+        # synced to the page but not shown - one control panel on page 01
+        visual["display"] = {"mode": "hidden"}
     sync = {"groupName": sync_name, "fieldChanges": True, "filterChanges": True}
     vc = container(name, x, y, w, h, z, visual, sync_group=sync)
     if filters:
@@ -1388,6 +1404,7 @@ def chrome(section, index):
                     "Dropdown",
                     "sync-department",
                     filters=has_docs_filter("dept"),
+                    hidden=index != 0,
                 )
             )
             vis.append(
@@ -1403,6 +1420,7 @@ def chrome(section, index):
                     "Dropdown",
                     "sync-acquisition",
                     filters=has_docs_filter("acq"),
+                    hidden=index != 0,
                 )
             )
             vis.append(
@@ -1417,6 +1435,7 @@ def chrome(section, index):
                     "DOCUMENT VALUE",
                     "Dropdown",
                     "sync-value-band",
+                    hidden=index != 0,
                 )
             )
             vis.append(
@@ -1431,6 +1450,7 @@ def chrome(section, index):
                     "FISCAL YEAR",
                     "Basic",
                     "sync-fiscal-year",
+                    hidden=index != 0,
                     orientation=1,
                 )
             )
