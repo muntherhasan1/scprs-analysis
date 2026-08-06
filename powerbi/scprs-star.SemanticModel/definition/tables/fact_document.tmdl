@@ -7,6 +7,43 @@ table fact_document
 	measure 'Document Count' = COUNTROWS(fact_document)
 		lineageTag: 1ccc40f8-ac0c-44a6-baf5-c247b4e93aed
 
+	/// Document size band for the header slicer; ordered by value_band_sort.
+	column value_band =
+			VAR v = fact_document[grand_total]
+			RETURN
+			    SWITCH (
+			        TRUE (),
+			        v < 0, "< $0",
+			        v < 100000, "$0–100K",
+			        v < 500000, "$100K–500K",
+			        v < 1000000, "$500K–1M",
+			        v < 5000000, "$1M–5M",
+			        v < 10000000, "$5M–10M",
+			        "$10M+"
+			    )
+		dataType: string
+		lineageTag: 6f2a8c1d-4b7e-49a3-9d05-c81e2f6b7a54
+		sortByColumn: value_band_sort
+		summarizeBy: none
+
+	column value_band_sort =
+			VAR v = fact_document[grand_total]
+			RETURN
+			    SWITCH (
+			        TRUE (),
+			        v < 0, 0,
+			        v < 100000, 1,
+			        v < 500000, 2,
+			        v < 1000000, 3,
+			        v < 5000000, 4,
+			        v < 10000000, 5,
+			        6
+			    )
+		dataType: int64
+		isHidden
+		lineageTag: 7e3b9d2e-5c8f-40b4-ae16-d92f3a7c8b65
+		summarizeBy: none
+
 	column document_sk
 		dataType: int64
 		isHidden

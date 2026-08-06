@@ -362,7 +362,46 @@ def button(name, x, y, w, h, text, target, active=False, font_size=10, outlined=
     )
 
 
-def slicer(name, x, y, w, h, entity, column, header, mode, sync_name, z=20, orientation=None):
+def has_docs_filter(uid):
+    """Visual-level filter: only show slicer values holding documents in scope."""
+    return [
+        {
+            "name": f"HasDocs_{uid}",
+            "expression": {
+                "Measure": {
+                    "Expression": {"SourceRef": {"Entity": FD}},
+                    "Property": "Document Count",
+                }
+            },
+            "filter": {
+                "Version": 2,
+                "From": [{"Name": "f", "Entity": FD, "Type": 0}],
+                "Where": [
+                    {
+                        "Condition": {
+                            "Comparison": {
+                                "ComparisonKind": 1,
+                                "Left": {
+                                    "Measure": {
+                                        "Expression": {"SourceRef": {"Source": "f"}},
+                                        "Property": "Document Count",
+                                    }
+                                },
+                                "Right": {"Literal": {"Value": "0D"}},
+                            }
+                        }
+                    }
+                ],
+            },
+            "type": "Advanced",
+            "howCreated": 1,
+        }
+    ]
+
+
+def slicer(
+    name, x, y, w, h, entity, column, header, mode, sync_name, z=20, orientation=None, filters=None
+):
     objects = {
         "data": [{"properties": {"mode": lit(f"'{mode}'")}}],
         "header": [
@@ -407,7 +446,10 @@ def slicer(name, x, y, w, h, entity, column, header, mode, sync_name, z=20, orie
         "objects": objects,
     }
     sync = {"groupName": sync_name, "fieldChanges": True, "filterChanges": True}
-    return container(name, x, y, w, h, z, visual, sync_group=sync)
+    vc = container(name, x, y, w, h, z, visual, sync_group=sync)
+    if filters:
+        vc["filters"] = json.dumps(filters)
+    return vc
 
 
 def filter_state_card(name, z=21):
@@ -1325,10 +1367,10 @@ def chrome(section, index):
         title, subtitle = PAGES[index][2], PAGES[index][3]
         title_x = 300 if index == DETAIL_INDEX else 256
         vis.append(
-            textbox(f"{p}_title", title_x, 24, 700, 46, [(title, "Barlow Condensed", 22, INK)], z=3)
+            textbox(f"{p}_title", title_x, 20, 560, 42, [(title, "Barlow Condensed", 22, INK)], z=3)
         )
         vis.append(
-            textbox(f"{p}_subtitle", title_x, 70, 700, 26, [(subtitle, "Barlow", 9, MUTED)], z=3)
+            textbox(f"{p}_subtitle", title_x, 62, 560, 40, [(subtitle, "Barlow", 9, MUTED)], z=3)
         )
         if index == DETAIL_INDEX:
             vis.append(button(f"{p}_back", 256, 24, 32, 32, "←", "Back", outlined=True))
@@ -1336,35 +1378,51 @@ def chrome(section, index):
             vis.append(
                 slicer(
                     f"{p}_slicer_dept",
-                    988,
+                    830,
                     22,
-                    192,
+                    170,
                     70,
                     "dim_department",
                     "department_name",
                     "DEPARTMENT",
                     "Dropdown",
                     "sync-department",
+                    filters=has_docs_filter("dept"),
                 )
             )
             vis.append(
                 slicer(
                     f"{p}_slicer_acq",
-                    1192,
+                    1012,
                     22,
-                    160,
+                    158,
                     70,
                     "dim_acquisition",
                     "acquisition_type",
                     "ACQUISITION TYPE",
                     "Dropdown",
                     "sync-acquisition",
+                    filters=has_docs_filter("acq"),
+                )
+            )
+            vis.append(
+                slicer(
+                    f"{p}_slicer_band",
+                    1182,
+                    22,
+                    158,
+                    70,
+                    "fact_document",
+                    "value_band",
+                    "DOCUMENT VALUE",
+                    "Dropdown",
+                    "sync-value-band",
                 )
             )
             vis.append(
                 slicer(
                     f"{p}_slicer_fy",
-                    1364,
+                    1352,
                     22,
                     224,
                     70,

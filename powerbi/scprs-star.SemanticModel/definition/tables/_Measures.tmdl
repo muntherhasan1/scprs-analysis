@@ -1,8 +1,9 @@
 table _Measures
 	lineageTag: 75691570-83e7-4d30-bfe1-964163acbbf3
 
-	/// Distinct canonical vendors. Never DISTINCTCOUNT supplier_id - re-registrations double-count.
-	measure 'Canonical Suppliers' = DISTINCTCOUNT ( dim_supplier[canonical_name] )
+	/// Canonical vendors holding documents in the current filter context (so the card
+	/// responds to the fiscal-year slicer). Never DISTINCTCOUNT supplier_id.
+	measure 'Canonical Suppliers' = COUNTROWS ( SUMMARIZE ( fact_document, dim_supplier[canonical_name] ) )
 		lineageTag: 2b257381-4972-4af3-bffb-02a68785b442
 		formatString: #,0
 
@@ -47,12 +48,18 @@ table _Measures
 		lineageTag: 640eec5d-923a-4a6b-a837-e26c2758bcfa
 		formatString: \$#,0
 
-	/// Latest complete fiscal year vs the one before, regardless of slicer year.
-	/// Anchored to TODAY() - an unanchored PY compare inflates wildly in an all-years context.
+	/// Selected fiscal year vs the one before; latest complete FY (TODAY()-anchored,
+	/// Jul-Jun) when no single year is selected.
 	measure 'Value YoY %' =
-			VAR CurFY = YEAR ( TODAY () ) + IF ( MONTH ( TODAY () ) >= 7, 1, 0 ) - 1
-			VAR Cur = CALCULATE ( [Total Contract Value], dim_date[fiscal_year] = CurFY )
-			VAR Prev = CALCULATE ( [Total Contract Value], dim_date[fiscal_year] = CurFY - 1 )
+			VAR SelFY = SELECTEDVALUE ( dim_date[fiscal_year] )
+			VAR AnchorFY =
+			    IF (
+			        ISBLANK ( SelFY ),
+			        YEAR ( TODAY () ) + IF ( MONTH ( TODAY () ) >= 7, 1, 0 ) - 1,
+			        SelFY
+			    )
+			VAR Cur = CALCULATE ( [Total Contract Value], dim_date[fiscal_year] = AnchorFY )
+			VAR Prev = CALCULATE ( [Total Contract Value], dim_date[fiscal_year] = AnchorFY - 1 )
 			RETURN
 			    DIVIDE ( Cur - Prev, Prev )
 		lineageTag: 92ce2531-758d-4677-9fc2-e7a7af84a086
