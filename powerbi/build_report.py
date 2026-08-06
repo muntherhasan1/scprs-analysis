@@ -1312,6 +1312,96 @@ def content(section, index):
 NAV_Y0, NAV_STEP = 156, 32
 
 
+# Header slicer slots, left to right; the rightmost is widest for the FY tiles.
+# Pages carry only the slicers relevant to their content, right-aligned into
+# the free header slots. Shared sync groups keep dept/FY/band selections
+# following the reader across the pages where those slicers appear.
+SLICER_SLOTS = [(830, 170), (1012, 158), (1182, 158), (1352, 224)]
+
+_DEPT = {
+    "key": "dept",
+    "entity": DEP,
+    "column": "department_name",
+    "header": "DEPARTMENT",
+    "sync": "sync-department",
+    "filters": has_docs_filter("dept"),
+}
+_ACQ_TYPE = {
+    "key": "acqtype",
+    "entity": ACQ,
+    "column": "acquisition_type",
+    "header": "ACQUISITION TYPE",
+    "sync": "sync-acquisition",
+    "filters": has_docs_filter("acq"),
+}
+_ACQ_METHOD = {
+    "key": "acqmethod",
+    "entity": ACQ,
+    "column": "acquisition_method",
+    "header": "ACQUISITION METHOD",
+    "sync": "sync-acq-method",
+    "filters": has_docs_filter("acqm"),
+}
+_BAND = {
+    "key": "band",
+    "entity": FD,
+    "column": "value_band",
+    "header": "DOCUMENT VALUE",
+    "sync": "sync-value-band",
+}
+_FY = {
+    "key": "fy",
+    "entity": DD,
+    "column": "fiscal_year",
+    "header": "FISCAL YEAR",
+    "sync": "sync-fiscal-year",
+    "mode": "Basic",
+    "orientation": 1,
+}
+_SUPPLIER = {
+    "key": "supplier",
+    "entity": SUP,
+    "column": "canonical_name",
+    "header": "SUPPLIER",
+    "sync": "sync-supplier",
+    "filters": has_docs_filter("sup"),
+}
+_CERT = {
+    "key": "cert",
+    "entity": GSC,
+    "column": "certification_types",
+    "header": "CERTIFICATION",
+    "sync": "sync-cert",
+    "filters": has_docs_filter("cert"),
+}
+_BID_CLOSE = {
+    "key": "close",
+    "entity": GEP,
+    "column": "bid_close_date",
+    "header": "BID CLOSE",
+    "sync": "sync-bid-close",
+    "mode": "Between",
+}
+
+SLICERS_BY_PAGE = {
+    0: [_DEPT, _ACQ_TYPE, _BAND, _FY],  # Spend overview: the general panel
+    1: [_ACQ_TYPE, _BAND, _FY],  # Departments: the page enumerates depts
+    2: [_DEPT, _SUPPLIER, _BAND, _FY],  # Suppliers: find-a-vendor
+    3: [_DEPT, _ACQ_METHOD, _FY],  # Acquisition mix: method grain
+    4: [_DEPT, _ACQ_TYPE, _FY],  # Competition: the mart grain
+    5: [_DEPT, _CERT, _FY],  # SB/DVBE: certification types
+    6: [_DEPT, _FY],  # CMAS
+    7: [_DEPT, _FY],  # Amendments
+    8: [_DEPT, _BID_CLOSE],  # Open solicitations: future dates, no FY
+}
+
+
+def page_slicers(index):
+    specs = SLICERS_BY_PAGE.get(index, [])
+    start = len(SLICER_SLOTS) - len(specs)
+    return [(start + i, spec) for i, spec in enumerate(specs)]
+
+
 def chrome(section, index):
     """Sidebar + header chrome for one page. index None = Notes page."""
     p = f"chrome_{section}"
@@ -1391,69 +1481,24 @@ def chrome(section, index):
         if index == DETAIL_INDEX:
             vis.append(button(f"{p}_back", 256, 24, 32, 32, "←", "Back", outlined=True))
         else:
-            vis.append(
-                slicer(
-                    f"{p}_slicer_dept",
-                    830,
-                    22,
-                    170,
-                    70,
-                    "dim_department",
-                    "department_name",
-                    "DEPARTMENT",
-                    "Dropdown",
-                    "sync-department",
-                    filters=has_docs_filter("dept"),
-                    hidden=index != 0,
+            for slot, spec in page_slicers(index):
+                sx, sw = SLICER_SLOTS[slot]
+                vis.append(
+                    slicer(
+                        f"{p}_slicer_{spec['key']}",
+                        sx,
+                        22,
+                        sw,
+                        70,
+                        spec["entity"],
+                        spec["column"],
+                        spec["header"],
+                        spec.get("mode", "Dropdown"),
+                        spec["sync"],
+                        orientation=spec.get("orientation"),
+                        filters=spec.get("filters"),
+                    )
                 )
-            )
-            vis.append(
-                slicer(
-                    f"{p}_slicer_acq",
-                    1012,
-                    22,
-                    158,
-                    70,
-                    "dim_acquisition",
-                    "acquisition_type",
-                    "ACQUISITION TYPE",
-                    "Dropdown",
-                    "sync-acquisition",
-                    filters=has_docs_filter("acq"),
-                    hidden=index != 0,
-                )
-            )
-            vis.append(
-                slicer(
-                    f"{p}_slicer_band",
-                    1182,
-                    22,
-                    158,
-                    70,
-                    "fact_document",
-                    "value_band",
-                    "DOCUMENT VALUE",
-                    "Dropdown",
-                    "sync-value-band",
-                    hidden=index != 0,
-                )
-            )
-            vis.append(
-                slicer(
-                    f"{p}_slicer_fy",
-                    1352,
-                    22,
-                    224,
-                    70,
-                    "dim_date",
-                    "fiscal_year",
-                    "FISCAL YEAR",
-                    "Basic",
-                    "sync-fiscal-year",
-                    hidden=index != 0,
-                    orientation=1,
-                )
-            )
             vis.append(filter_state_card(f"{p}_filter_state"))
     return vis
 
