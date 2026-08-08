@@ -111,7 +111,7 @@ def test_cli_report_emits_json(capsys, monkeypatch):
             "triage",
             "report",
             "--workflow",
-            "Enrich (Wave 2)",
+            "Serve refresh",
             "--run-url",
             "https://run/7",
             "--steps",
@@ -122,3 +122,23 @@ def test_cli_report_emits_json(capsys, monkeypatch):
     out = json.loads(capsys.readouterr().out)
     assert out["title"].startswith("⚠️ Pipeline failure")
     assert "evidence-graded" in out["body"]  # the go-live hint
+
+
+def test_serve_refresh_hints_moved_with_the_split():
+    """#105 split: the serve-chain hints live under the Serve refresh workflow,
+    and its build hint must NOT claim scprs.db was published (this workflow
+    never writes the operational store)."""
+    r = triage.build_report(
+        "Serve refresh", ["Rebuild warehouse + export serve DB"], "https://run/9"
+    )
+    assert "dw_dq_results" in r["body"]
+    assert "never writes the operational store" in r["body"]
+    assert r["marker"] == "<!-- pipeline-failure:Serve refresh -->"
+
+
+def test_enrich_no_longer_carries_serve_chain_hints():
+    """After #105 a failed enrich run can't hit serve steps; a stray match must
+    fall through to the enrich default, not a moved hint."""
+    r = triage.build_report("Enrich (Wave 2)", ["Publish serve DB"], "https://run/10")
+    assert "HF_WAREHOUSE_TOKEN" not in r["body"]
+    assert "upload-on-success" in r["body"]  # the enrich _default

@@ -42,10 +42,30 @@ _HINTS: dict[str, dict[str, str]] = {
             "correctly blocked — this is a real data-quality signal. Inspect the "
             "enriched data / `dw_dq_results` before the next run."
         ),
+        "canary target-not-found": (
+            "The canary's fixture document is no longer findable on the site (archive "
+            "purge or availability change) — the parser is unproven, not indicted, and "
+            "the run's enrichment WAS published. Recapture the fixture from an "
+            "already-drilled document: `python -m src.canary --capture --document <id>`."
+        ),
+    },
+    "Serve refresh": {
+        "_default": (
+            "The serve refresh failed. It only READS the operational stores, so no "
+            "enrichment data is at risk — the Spaces keep serving the previous "
+            "snapshot, and staleness alerts via pipeline-monitor's serve-age check "
+            "if the next cycles don't recover."
+        ),
+        "Fetch operational": (
+            "Fetching the operational stores failed — check `HF_SCPRS_READ_TOKEN` "
+            "(fine-grained read-only on the operational dataset) and the dataset's "
+            "availability. Nothing was published or changed."
+        ),
         "Rebuild warehouse": (
             "The warehouse build failed its error-tier DQ gate — check "
-            "`dw_dq_results`. `scprs.db` is already published, so enrichment "
-            "progress is safe; only the serve refresh was blocked."
+            "`dw_dq_results`. Enrichment data is unaffected (this workflow never "
+            "writes the operational store); the Spaces keep serving the previous "
+            "snapshot."
         ),
         "Publish serve DB": (
             "The serve-DB publish failed — check the `HF_WAREHOUSE_TOKEN` scope and "
@@ -63,12 +83,6 @@ _HINTS: dict[str, dict[str, str]] = {
             "mis-scoped `HF_DEPLOY_TOKEN`. The data IS published and nothing was "
             "rolled back; fix the token (write scope on the Space repo) or reboot the "
             "Space manually to serve the new snapshot."
-        ),
-        "canary target-not-found": (
-            "The canary's fixture document is no longer findable on the site (archive "
-            "purge or availability change) — the parser is unproven, not indicted, and "
-            "the run's enrichment WAS published. Recapture the fixture from an "
-            "already-drilled document: `python -m src.canary --capture --document <id>`."
         ),
     },
     "CMAS refresh (Wave 2)": {
