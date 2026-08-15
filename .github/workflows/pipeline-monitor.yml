@@ -39,13 +39,19 @@ concurrency:
 
 env:
   ALERT_LABEL: pipeline-monitor-alert
-  # Enrich publishes every 3h; 9h = two missed slots + ~2.5h runtime headroom
-  # (a healthy full-budget run may conclude ~2.5h after its slot under the
-  # 150m backstop). Detection of a two-missed-slot outage can slip one 6h
+  # Enrich publishes every 3h; 9h = two missed slots + runtime headroom (a
+  # healthy full-budget run concludes ~1.5h after its slot under the 95m
+  # backstop). Detection of a two-missed-slot outage can slip one 6h
   # monitor cycle — accepted: the dead-man's switch (~14h grace) is the outer
   # bound, and tightening below ~9h would false-alert on routine GitHub cron
   # lateness (slots observed firing up to ~3h late).
   MAX_AGE_HOURS: "9"
+  # Serve commits come from warehouse-refresh.yml, every 6h with a 61–120m+
+  # build: healthy worst case ≈ 6h gap + ~1h duration spread + ~3h cron
+  # lateness ≈ 10h; a fully missed slot pushes the age past ~12h. 12 alerts
+  # on the first monitor tick after two consecutive slots produce no commit —
+  # the same two-missed-slots semantics as the enrich threshold above.
+  SERVE_MAX_AGE_HOURS: "12"
 
 jobs:
   monitor:
@@ -103,7 +109,7 @@ jobs:
           WAREHOUSE_DATASET: ${{ vars.WAREHOUSE_DATASET }}
         run: |
           set +e
-          out=$(python -m src.pipeline_monitor serve-age --max-hours "$MAX_AGE_HOURS")
+          out=$(python -m src.pipeline_monitor serve-age --max-hours "$SERVE_MAX_AGE_HOURS")
           rc=$?
           echo "$out"
           if [ "$rc" -ne 0 ]; then
@@ -128,7 +134,7 @@ jobs:
           body="Out-of-band monitor findings:"$'\n'
           [ -n "$F1" ] && body="$body"$'\n'"- $F1"
           [ -n "$F2" ] && body="$body"$'\n'"- $F2"
-          body="$body"$'\n\n'"This fires when the pipeline stops running or stops reaching the Spaces — the failure class workflow_run triage cannot see. Check the Enrich workflow's recent runs first."$'\n\n'"Run: $RUN_URL"
+          body="$body"$'\n\n'"This fires when the pipeline stops running or stops reaching the Spaces — the failure class workflow_run triage cannot see. A stale enrich age points at the Enrich workflow; a stale serve commit points at Warehouse refresh."$'\n\n'"Run: $RUN_URL"
           existing=$(gh issue list --label "$ALERT_LABEL" --state open \
             --json number --jq '.[0].number')
           if [ -n "$existing" ]; then

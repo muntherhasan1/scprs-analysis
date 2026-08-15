@@ -50,6 +50,22 @@ def test_report_covers_query_review():
     assert "Read-only job" in r["body"]  # the _default frames it
 
 
+def test_report_covers_warehouse_refresh():
+    r = triage.build_report(
+        "Warehouse refresh (Wave 2c)",
+        ["Rebuild warehouse + export serve DB"],
+        "https://run/16",
+        conclusion="cancelled",
+    )
+    # the growth diagnosis path is the load-bearing hint (the 2026-08 kills).
+    assert "build-timings trend" in r["body"] and "dw_dq_results" in r["body"]
+    assert "was cancelled (timeout?)" in r["body"]
+    assert r["marker"] == "<!-- pipeline-failure:Warehouse refresh (Wave 2c) -->"
+    # read-only over scprs.db — a failed refresh must never implicate enrichment.
+    r = triage.build_report("Warehouse refresh (Wave 2c)", ["Set up job"], "https://run/17")
+    assert "no enrichment progress is at risk" in r["body"]
+
+
 def test_report_falls_back_to_default_when_no_step_matches():
     r = triage.build_report("CMAS refresh (Wave 2)", ["Set up job"], "https://run/3")
     # no specific hint for "Set up job" -> the workflow's _default frames it.
@@ -111,7 +127,7 @@ def test_cli_report_emits_json(capsys, monkeypatch):
             "triage",
             "report",
             "--workflow",
-            "Enrich (Wave 2)",
+            "Warehouse refresh (Wave 2c)",
             "--run-url",
             "https://run/7",
             "--steps",
