@@ -1,0 +1,173 @@
+name: Warehouse refresh (Wave 2c)
+
+# The serve-refresh half of the device-free loop, decoupled from the enrich
+# cron on 2026-08-14 (the "plan the rebuild decoupling" tripwire in the old
+# combined job fired for real: silver-layer build time reached 61–120 min —
+# runs 31632191505 → 31748323993 — and the combined 150-min backstop killed
+# every full-budget run at the rebuild step, 6 straight kills 08-14..15).
+# Each run: fetch the published scprs.db snapshot (+ side inputs) -> rebuild
+# warehouse.db bronze→silver→gold with the DQ gate -> serve-export -> publish
+# the serve DB -> restart the Spaces -> verify go-live over the real MCP
+# channel. Reads a committed dataset revision (HF commits are atomic), so it
+# never races the enrich writer and needs only the read-only dataset token.
+#
+# Dead-man's switch: this workflow does NOT ping it — the enrich cron and the
+# pipeline monitor keep it fed. A broken refresh surfaces as a red run +
+# triage issue + the monitor's serve-dataset commit-age finding.
+on:
+  schedule:
+    # Every 6 hours, 90 min behind every other enrich slot ("17 */3"): a
+    # full-budget enrich publishes scprs.db by ~75 min after its slot, so
+    # each refresh usually picks up that slot's data. No hard dependency —
+    # if enrich ran late (slots fire up to ~3h late), this simply rebuilds
+    # from the previous published snapshot and self-cures next cycle.
+    - cron: "47 1,7,13,19 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# One refresh at a time; queue (never cancel) so back-to-back slots serialize.
+# NOT the scprs-operational-writer group: this job never mutates scprs.db —
+# it reads an already-committed dataset revision.
+concurrency:
+  group: warehouse-serve-publisher
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    # Measured basis (2026-08-12..14 combined-job step summaries): setup+fetch
+    # ~3m + build+export 61–120m (silver dominates; the spread is runner
+    # variance on identical data) + publish/restart/verify ~5m ≈ 130m worst
+    # observed. Build time still GROWS with enrichment volume (~2.7 min/day
+    # measured 07/24→08/04), so 240 buys ~2 months at trend past the worst
+    # case while staying under the 360-min slot gap. The >150m tripwire in
+    # the rebuild step warns well before this kills anything.
+    timeout-minutes: 240
+    env:
+      # Unbuffered stdout: a killed run must still show how far it got.
+      PYTHONUNBUFFERED: "1"
+      SCPRS_DATASET: ${{ vars.SCPRS_DATASET || 'munther-hasan/scprs-operational-db' }}
+      # Least privilege (#54 pattern): this job only READS the operational
+      # dataset, so it holds the fine-grained read-only token, never the
+      # single-writer HF_SCPRS_TOKEN.
+      HF_SCPRS_TOKEN: ${{ secrets.HF_SCPRS_READ_TOKEN }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      # No `playwright install`: the build/publish/verify path never launches
+      # a browser (the playwright *package* still installs via requirements).
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt "huggingface_hub>=0.25"
+
+      - name: Fetch scprs.db + side inputs from the dataset
+        run: python -m src.data_sync fetch-operational
+
+      # `warehouse build` has its own error-severity DQ gate (non-zero exit on
+      # failure), so a bad build never reaches the publish step.
+      - name: Rebuild warehouse + export serve DB
+        run: |
+          set -o pipefail
+          start=$SECONDS
+          python -m src.warehouse build 2>&1 | tee build.log
+          python -m src.warehouse serve-export 2>&1 | tee -a build.log
+          {
+            echo "### Warehouse rebuild"
+            echo '```'
+            grep -F "build timings:" build.log | tail -1
+            grep -F "serve-export:" build.log | tail -1
+            echo "rebuild step took $(( (SECONDS - start) / 60 ))m $(( (SECONDS - start) % 60 ))s"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          # Duration-erosion tripwire (report-only). Basis: 61–120m observed
+          # 2026-08-12..14, growing with enrichment volume. The 240-min job
+          # backstop kills this step at ~230m, so 150m warns ~1 month ahead
+          # at the ~2.7 min/day trend. Caveat: only runs when the step
+          # COMPLETES. When it fires, speed up the build (the silver layer is
+          # ~97% of the time) or slow the refresh cadence — don't just raise
+          # the backstop (the enrich-livelock lesson, build edition).
+          if [ $(( SECONDS - start )) -gt 9000 ]; then
+            echo "::warning::warehouse rebuild took $(( (SECONDS - start) / 60 ))m (>150m tripwire) — check the build-timings trend in recent step summaries"
+          fi
+
+      - name: Publish serve DB
+        env:
+          HF_WAREHOUSE_TOKEN: ${{ secrets.HF_WAREHOUSE_TOKEN }}
+        run: >
+          python -m src.data_sync publish
+          --dataset "${{ vars.WAREHOUSE_DATASET || 'munther-hasan/scprs-warehouse-data' }}"
+
+      # Restart the Spaces so they re-fetch the serve DB at boot. Best-effort
+      # for the (frozen) chat Space, but the MCP Space's restart outcome is
+      # load-bearing (#45): if it never rebooted, go-live would inevitably see
+      # old markers and the old logic ROLLED BACK GOOD DATA on every cycle.
+      # A failed MCP restart skips go-live/rollback and fails the run with
+      # the real cause (a token problem) at the end.
+      - name: Restart Spaces (best-effort)
+        id: restart
+        env:
+          HF_DEPLOY_TOKEN: ${{ secrets.HF_DEPLOY_TOKEN }}
+          MCP_SPACE: ${{ vars.MCP_SPACE || 'munther-hasan/scprs-warehouse-mcp' }}
+        run: |
+          set +e
+          python -m src.data_sync restart-spaces --require "$MCP_SPACE"
+          rc=$?
+          set -e
+          if [ "$rc" -ne 0 ]; then
+            echo "restart_failed=1" >> "$GITHUB_OUTPUT"
+            echo "::warning::MCP Space restart did not happen — data IS published; skipping go-live (nothing to verify) and NOT rolling back"
+          fi
+
+      # Observability extended to deploys (retrospective action #4): verify over
+      # the real MCP channel that the rebooted Space serves the snapshot THIS run
+      # published. A failure here means the data is safe but NOT live — the
+      # silent-staleness failure mode of 2026-07-20, made loud. Skips (exit 0)
+      # when the MCP_VERIFY_TOKEN secret is unset. Exit codes are evidence-graded
+      # (#45): 1 = Space up but serving a DIFFERENT snapshot (roll back);
+      # 2 = could not observe (boot timeout / unreachable — fail, don't touch).
+      - name: Verify go-live (Space serves this build)
+        id: golive
+        if: steps.restart.outputs.restart_failed != '1'
+        env:
+          MCP_VERIFY_TOKEN: ${{ secrets.MCP_VERIFY_TOKEN }}
+        run: |
+          set +e
+          python -m src.golive_check
+          rc=$?
+          set -e
+          echo "rc=$rc" >> "$GITHUB_OUTPUT"
+          exit $rc
+
+      # Wave 3 auto-rollback, evidence-graded (#45): revert the serve dataset to
+      # its prior (last-good) revision ONLY on rc=1 — the Space is up and
+      # verifiably serving a different snapshot (positive evidence). rc=2
+      # (timeout / unreachable) proves nothing about the data: the run fails
+      # loudly but leaves the publish alone — the old on-any-failure trigger
+      # would have rolled back good data on a mere token rotation.
+      - name: Roll back serve DB on verified mismatch
+        if: ${{ always() && steps.golive.outputs.rc == '1' }}
+        env:
+          HF_WAREHOUSE_TOKEN: ${{ secrets.HF_WAREHOUSE_TOKEN }}
+          HF_DEPLOY_TOKEN: ${{ secrets.HF_DEPLOY_TOKEN }}
+        run: >
+          python -m src.data_sync rollback-serve
+          --dataset "${{ vars.WAREHOUSE_DATASET || 'munther-hasan/scprs-warehouse-data' }}"
+
+      # Deferred failure for a skipped go-live: the publish chain completed (no
+      # rollback needed, nothing lost) but the refresh is NOT live — fail with
+      # the actual cause so triage names the token, not a phantom deploy issue.
+      - name: Fail on restart-token problem
+        if: ${{ always() && steps.restart.outputs.restart_failed == '1' }}
+        run: |
+          echo "::error::MCP Space restart failed — check HF_DEPLOY_TOKEN (write scope on the Space repo). Data is published; reboot the Space manually or fix the token for the next cron."
+          exit 1
