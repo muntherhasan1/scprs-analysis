@@ -2,7 +2,7 @@
 # The server (src/mcp_server.py) needs `mcp` (uvicorn/starlette come transitively)
 # plus matplotlib for the generate_chart / generate_report tools. None of the
 # pipeline's heavy deps (pandas, playwright, …) are required.
-mcp>=1.28.1,<2  # 2.0.0 removed mcp.server.fastmcp -> Space RUNTIME_ERROR; see requirements.txt
-matplotlib>=3.11.0  # chart rendering (Agg backend) for generate_chart/generate_report
-huggingface_hub>=1.23.0  # CommitScheduler for the optional tool-call audit log (query_log.py)
-sentry-sdk>=2.66.0  # optional error tracking (src/observability.py); no-op unless SENTRY_DSN set
+mcp>=2.0.0,<3  # 2.0.0 removed mcp.server.fastmcp -> Space RUNTIME_ERROR; see requirements.txt
+matplotlib>=3.11.1  # chart rendering (Agg backend) for generate_chart/generate_report
+huggingface_hub>=1.27.0  # CommitScheduler for the optional tool-call audit log (query_log.py)
+sentry-sdk>=2.68.0  # optional error tracking (src/observability.py); no-op unless SENTRY_DSN set
