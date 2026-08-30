@@ -37,14 +37,17 @@ concurrency:
 jobs:
   refresh:
     runs-on: ubuntu-latest
-    # Measured basis (2026-08-12..14 combined-job step summaries): setup+fetch
-    # ~3m + build+export 61–120m (silver dominates; the spread is runner
-    # variance on identical data) + publish/restart/verify ~5m ≈ 130m worst
-    # observed. Build time still GROWS with enrichment volume (~2.7 min/day
-    # measured 07/24→08/04), so 240 buys ~2 months at trend past the worst
-    # case while staying under the 360-min slot gap. The >150m tripwire in
-    # the rebuild step warns well before this kills anything.
-    timeout-minutes: 240
+    # Measured basis (2026-08-23..28 run durations): the 240-min backstop is
+    # now BELOW the build's own spread — successes took 164–238m while 13 of
+    # 16 runs hit 240m and were killed (silver alone: 9,577–13,601s per the
+    # build-timings summaries), leaving the serve dataset stale for up to
+    # 40h. 330 covers the worst observed rebuild while staying 30m under the
+    # 360-min slot gap; the queue-only concurrency group serializes any
+    # overrun into the next slot rather than cancelling it. This is a
+    # MITIGATION alongside the silver-layer speedup (the tripwire's "don't
+    # just raise the backstop" rule) — once silver is fast the 150m tripwire
+    # is the early warning again.
+    timeout-minutes: 330
     env:
       # Unbuffered stdout: a killed run must still show how far it got.
       PYTHONUNBUFFERED: "1"
