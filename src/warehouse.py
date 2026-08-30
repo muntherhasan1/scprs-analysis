@@ -604,15 +604,33 @@ def build_silver(con: sqlite3.Connection, batch: str, ts: str) -> dict:
     # Only checked when the header reports a non-zero merchandise amount -- some
     # older contracts carry $0 header totals with the value in the line items, so
     # there is nothing to reconcile against (flag stays NULL, not a failure).
+    # Checked only for enriched documents with a non-zero merchandise amount
+    # (others keep the column's NULL default -- nothing to reconcile). Two
+    # linear passes (aggregate-once + UPDATE ... FROM, same shape as the
+    # line_count update above): the old per-row correlated subquery got no
+    # automatic index, so SQLite re-scanned silver_line for every enriched
+    # document -- O(enriched docs x lines), both of which grow with every
+    # enrich run. That term alone pushed the silver build past the refresh
+    # backstop in 2026-08. Pass 1 also covers docs with NO silver_line rows
+    # (old COALESCE(subquery, 0) semantics: reconcile against 0).
     con.execute("ALTER TABLE silver_document ADD COLUMN dq_line_reconciles INTEGER")
     con.execute(
-        """UPDATE silver_document SET dq_line_reconciles = CASE
-             WHEN is_enriched = 0 OR COALESCE(merchandise_amount, 0) = 0 THEN NULL
-             WHEN ABS(COALESCE((SELECT SUM(line_amount) FROM silver_line l
-                     WHERE l.business_unit = silver_document.business_unit
-                       AND l.purchase_document = silver_document.purchase_document), 0)
-                  - merchandise_amount) < 1 THEN 1
-             ELSE 0 END"""
+        """UPDATE silver_document SET dq_line_reconciles =
+             CASE WHEN ABS(merchandise_amount) < 1 THEN 1 ELSE 0 END
+           WHERE is_enriched = 1 AND COALESCE(merchandise_amount, 0) <> 0"""
+    )
+    con.execute(
+        """UPDATE silver_document SET dq_line_reconciles =
+             CASE WHEN ABS(COALESCE(s.line_total, 0) - merchandise_amount) < 1
+                  THEN 1 ELSE 0 END
+           FROM (SELECT business_unit, purchase_document,
+                        SUM(line_amount) AS line_total
+                 FROM silver_line
+                 GROUP BY business_unit, purchase_document) s
+           WHERE silver_document.business_unit = s.business_unit
+             AND silver_document.purchase_document = s.purchase_document
+             AND silver_document.is_enriched = 1
+             AND COALESCE(silver_document.merchandise_amount, 0) <> 0"""
     )
     # surrogate key + audit columns (+ CLOB on the long free-text line columns)
     _finalize(con, "silver_document", "document_sk", batch, ts)
