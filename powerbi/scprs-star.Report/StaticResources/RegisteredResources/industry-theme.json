@@ -3,7 +3,7 @@
   "background": "#F2F2F3",
   "foreground": "#1D1F20",
   "tableAccent": "#5980A6",
-  "dataColors": ["#1D2D3D", "#2C455D", "#416180", "#5980A6", "#749DC4", "#94BCE3", "#B5D9FD", "#D6EBFF"],
+  "dataColors": ["#5980A6", "#1D2D3D", "#94BCE3", "#416180", "#B5D9FD", "#2C455D", "#749DC4", "#D6EBFF"],
   "good": "#416180",
   "neutral": "#7A7A7D",
   "bad": "#2B2B2D",

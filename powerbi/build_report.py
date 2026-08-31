@@ -306,14 +306,16 @@ def button(name, x, y, w, h, text, target, active=False, font_size=10, outlined=
         {
             "visualType": "actionButton",
             "drillFilterOtherVisuals": True,
+            # "show" must sit in a selector-LESS entry — Desktop treats a
+            # state-scoped show as off and renders an empty button.
             "objects": {
                 "icon": [
                     {"properties": {"shapeType": lit("'blank'")}, "selector": {"id": "default"}}
                 ],
                 "text": [
+                    {"properties": {"show": lit("true")}},
                     {
                         "properties": {
-                            "show": lit("true"),
                             "text": lit(f"'{text}'"),
                             "fontFamily": lit("'Barlow'"),
                             "fontSize": lit(f"{font_size}D"),
@@ -327,9 +329,9 @@ def button(name, x, y, w, h, text, target, active=False, font_size=10, outlined=
                     {"properties": {"fontColor": color(hover_color)}, "selector": {"id": "hover"}},
                 ],
                 "fill": [
+                    {"properties": {"show": lit("true")}},
                     {
                         "properties": {
-                            "show": lit("true"),
                             "fillColor": color(default_fill),
                             "transparency": lit(default_alpha),
                         },
@@ -344,14 +346,14 @@ def button(name, x, y, w, h, text, target, active=False, font_size=10, outlined=
                     },
                 ],
                 "outline": [
+                    {"properties": {"show": lit("true" if outlined else "false")}},
                     {
                         "properties": {
-                            "show": lit("true" if outlined else "false"),
                             "lineColor": color(HAIRLINE),
                             "weight": lit("1D"),
                         },
                         "selector": {"id": "default"},
-                    }
+                    },
                 ],
                 "visualLink": [{"properties": link}],
             },
@@ -360,10 +362,81 @@ def button(name, x, y, w, h, text, target, active=False, font_size=10, outlined=
     )
 
 
-def slicer(name, x, y, w, h, entity, column, header, mode, sync_name, z=20, orientation=None):
+def has_docs_filter(uid):
+    """Visual-level filter: only show slicer values holding documents in scope."""
+    return [
+        {
+            "name": f"HasDocs_{uid}",
+            "expression": {
+                "Measure": {
+                    "Expression": {"SourceRef": {"Entity": FD}},
+                    "Property": "Document Count",
+                }
+            },
+            "filter": {
+                "Version": 2,
+                "From": [{"Name": "f", "Entity": FD, "Type": 0}],
+                "Where": [
+                    {
+                        "Condition": {
+                            "Comparison": {
+                                "ComparisonKind": 1,
+                                "Left": {
+                                    "Measure": {
+                                        "Expression": {"SourceRef": {"Source": "f"}},
+                                        "Property": "Document Count",
+                                    }
+                                },
+                                "Right": {"Literal": {"Value": "0D"}},
+                            }
+                        }
+                    }
+                ],
+            },
+            "type": "Advanced",
+            "howCreated": 1,
+        }
+    ]
+
+
+def slicer(
+    name,
+    x,
+    y,
+    w,
+    h,
+    entity,
+    column,
+    header,
+    mode,
+    sync_name,
+    z=20,
+    orientation=None,
+    filters=None,
+    hidden=False,
+):
     objects = {
         "data": [{"properties": {"mode": lit(f"'{mode}'")}}],
-        "header": [{"properties": {"show": lit("true"), "text": lit(f"'{header}'")}}],
+        "header": [
+            {
+                "properties": {
+                    "show": lit("true"),
+                    "text": lit(f"'{header}'"),
+                    "fontFamily": lit("'Barlow Condensed'"),
+                    "textSize": lit("10D"),
+                    "fontColor": color(MUTED),
+                }
+            }
+        ],
+        "items": [
+            {
+                "properties": {
+                    "fontFamily": lit("'Barlow'"),
+                    "textSize": lit("10D"),
+                    "fontColor": color(INK),
+                }
+            }
+        ],
         "selection": [{"properties": {"singleSelect": lit("false")}}],
     }
     if orientation is not None:
@@ -385,8 +458,14 @@ def slicer(name, x, y, w, h, entity, column, header, mode, sync_name, z=20, orie
         "drillFilterOtherVisuals": False,
         "objects": objects,
     }
+    if hidden:
+        # synced to the page but not shown - one control panel on page 01
+        visual["display"] = {"mode": "hidden"}
     sync = {"groupName": sync_name, "fieldChanges": True, "filterChanges": True}
-    return container(name, x, y, w, h, z, visual, sync_group=sync)
+    vc = container(name, x, y, w, h, z, visual, sync_group=sync)
+    if filters:
+        vc["filters"] = json.dumps(filters)
+    return vc
 
 
 def filter_state_card(name, z=21):
@@ -462,6 +541,16 @@ def qref(sel):
     return f"{sel[3]}({entity}.{prop})" if kind == "agg" else f"{entity}.{prop}"
 
 
+def _sel_expr(sel, aliases):
+    kind, entity, prop = sel[0], sel[1], sel[2]
+    src = {"Expression": {"SourceRef": {"Source": aliases[entity]}}, "Property": prop}
+    if kind == "col":
+        return {"Column": src}
+    if kind == "meas":
+        return {"Measure": src}
+    return {"Aggregation": {"Expression": {"Column": src}, "Function": AGG_FUNC[sel[3]]}}
+
+
 def _query(selects):
     """Build prototypeQuery From/Select from (kind, entity, prop[, func]) tuples.
 
@@ -474,29 +563,39 @@ def _query(selects):
             aliases[entity] = f"t{len(aliases)}"
             from_list.append({"Name": aliases[entity], "Entity": entity, "Type": 0})
     for sel in selects:
-        kind, entity, prop = sel[0], sel[1], sel[2]
-        src = {"Expression": {"SourceRef": {"Source": aliases[entity]}}, "Property": prop}
-        if kind == "col":
-            expr = {"Column": src}
-        elif kind == "meas":
-            expr = {"Measure": src}
-        else:
-            expr = {"Aggregation": {"Expression": {"Column": src}, "Function": AGG_FUNC[sel[3]]}}
-        select_list.append({**expr, "Name": qref(sel), "NativeReferenceName": prop})
-    return from_list, select_list
+        select_list.append(
+            {**_sel_expr(sel, aliases), "Name": qref(sel), "NativeReferenceName": sel[2]}
+        )
+    return from_list, select_list, aliases
 
 
 def data_visual(
-    name, x, y, w, h, vtype, roles, title=None, subtitle=None, objects=None, filters=None, z=100
+    name,
+    x,
+    y,
+    w,
+    h,
+    vtype,
+    roles,
+    title=None,
+    subtitle=None,
+    objects=None,
+    filters=None,
+    sort=None,
+    sort_dir=2,
+    z=100,
 ):
-    """roles: dict of projection role -> list of select tuples (see _query)."""
+    """roles: dict of projection role -> list of select tuples (see _query).
+
+    sort: a select tuple to order by; sort_dir 2 = descending, 1 = ascending.
+    """
     selects, seen = [], set()
     for sels in roles.values():
         for s in sels:
             if qref(s) not in seen:
                 seen.add(qref(s))
                 selects.append(s)
-    from_list, select_list = _query(selects)
+    from_list, select_list, aliases = _query(selects)
     visual = {
         "visualType": vtype,
         "projections": {
@@ -505,14 +604,38 @@ def data_visual(
         "prototypeQuery": {"Version": 2, "From": from_list, "Select": select_list},
         "drillFilterOtherVisuals": True,
     }
+    if sort:
+        visual["prototypeQuery"]["OrderBy"] = [
+            {"Direction": sort_dir, "Expression": _sel_expr(sort, aliases)}
+        ]
     if objects:
         visual["objects"] = objects
+    # Styled explicitly rather than via the theme: Desktop ignores the
+    # registered-theme reference, so the look must ride on each visual.
     vc_objects = {}
     if title:
-        vc_objects["title"] = [{"properties": {"show": lit("true"), "text": lit(f"'{title}'")}}]
+        vc_objects["title"] = [
+            {
+                "properties": {
+                    "show": lit("true"),
+                    "text": lit(f"'{title}'"),
+                    "fontFamily": lit("'Barlow Condensed'"),
+                    "fontSize": lit("13D"),
+                    "fontColor": color(INK),
+                }
+            }
+        ]
     if subtitle:
         vc_objects["subTitle"] = [
-            {"properties": {"show": lit("true"), "text": lit(f"'{subtitle}'")}}
+            {
+                "properties": {
+                    "show": lit("true"),
+                    "text": lit(f"'{subtitle}'"),
+                    "fontFamily": lit("'Barlow'"),
+                    "fontSize": lit("9D"),
+                    "fontColor": color(MUTED),
+                }
+            }
         ]
     if vc_objects:
         visual["vcObjects"] = vc_objects
@@ -538,7 +661,7 @@ def kpi(name, x, y, w, title, entity, measure, subtitle=None):
     )
 
 
-def topn(entity, prop, count, by_entity, by_measure):
+def topn(uid, entity, prop, count, by_entity, by_measure):
     """Visual-level Top N filter: top `count` of entity.prop by by_entity.[by_measure]."""
     from_list = [{"Name": "a", "Entity": entity, "Type": 0}]
     by_alias = "a"
@@ -547,7 +670,7 @@ def topn(entity, prop, count, by_entity, by_measure):
         from_list.append({"Name": "b", "Entity": by_entity, "Type": 0})
     return [
         {
-            "name": f"TopN_{prop}",
+            "name": f"TopN_{uid}",
             "expression": {
                 "Column": {"Expression": {"SourceRef": {"Entity": entity}}, "Property": prop}
             },
@@ -591,11 +714,34 @@ def topn(entity, prop, count, by_entity, by_measure):
 TCV = ("meas", FD, "Total Contract Value")
 DOCS = ("meas", FD, "Document Count")
 
+STEEL = "#5980A6"
+STEEL_DARK = "#1D2D3D"
+STEEL_LIGHT = "#94BCE3"
+
+
+def chart_objects(*series, axis=False):
+    """Data colors baked per visual (theme registration is ignored by Desktop).
+
+    series: one hex string (defaultColor for every series) or (queryRef, hex)
+    pairs for per-series fills. axis=True widens the category-label area so
+    department/supplier names stop truncating.
+    """
+    obj = {}
+    if len(series) == 1 and isinstance(series[0], str):
+        obj["dataPoint"] = [{"properties": {"defaultColor": color(series[0])}}]
+    elif series:
+        obj["dataPoint"] = [
+            {"properties": {"fill": color(c)}, "selector": {"metadata": q}} for q, c in series
+        ]
+    if axis:
+        obj["categoryAxis"] = [{"properties": {"maxMarginFactor": lit("40D")}}]
+    return obj
+
 
 def _content_01(c):
     cards = [
         ("TOTAL CONTRACT VALUE", FD, "Total Contract Value", "documents in scope"),
-        ("YEAR OVER YEAR", MS, "Value YoY %", "booked value, start-date basis"),
+        ("YEAR OVER YEAR", MS, "Value YoY %", "latest complete FY vs prior"),
         ("SUPPLIERS", MS, "Canonical Suppliers", "canonical names"),
         ("MEDIAN DOCUMENT", MS, "Median Document Value", "half of awards are smaller"),
         ("COMPETITIVELY BID", MS, "Competitive %", "of value in scope"),
@@ -614,6 +760,7 @@ def _content_01(c):
             "areaChart",
             {"Category": [("col", DD, "full_date")], "Y": [TCV]},
             title="Monthly contract value booked",
+            objects=chart_objects(STEEL),
             subtitle=VALUE_CAVEAT,
         )
     )
@@ -627,7 +774,9 @@ def _content_01(c):
             "barChart",
             {"Category": [("col", DEP, "department_name")], "Y": [TCV]},
             title="Top departments",
-            filters=topn(DEP, "department_name", 8, FD, "Total Contract Value"),
+            objects=chart_objects(STEEL, axis=True),
+            filters=topn("p01depts", DEP, "department_name", 8, FD, "Total Contract Value"),
+            sort=TCV,
         )
     )
     vis.append(
@@ -640,7 +789,9 @@ def _content_01(c):
             "barChart",
             {"Category": [("col", SUP, "canonical_name")], "Y": [TCV]},
             title="Top suppliers (canonical)",
-            filters=topn(SUP, "canonical_name", 8, FD, "Total Contract Value"),
+            objects=chart_objects(STEEL, axis=True),
+            filters=topn("p01sups", SUP, "canonical_name", 8, FD, "Total Contract Value"),
+            sort=TCV,
         )
     )
     vis.append(
@@ -653,6 +804,8 @@ def _content_01(c):
             "barChart",
             {"Category": [("col", ACQ, "acquisition_type")], "Y": [TCV]},
             title="Acquisition mix",
+            objects=chart_objects(STEEL, axis=True),
+            sort=TCV,
         )
     )
     return vis
@@ -669,6 +822,8 @@ def _content_02(c):
             "barChart",
             {"Category": [("col", DEP, "department_name")], "Y": [TCV]},
             title="Department spend",
+            objects=chart_objects(STEEL, axis=True),
+            sort=TCV,
             subtitle=VALUE_CAVEAT,
         ),
         data_visual(
@@ -708,6 +863,7 @@ def _content_03(c):
                 ]
             },
             title="Supplier leaderboard",
+            sort=TCV,
         ),
         data_visual(
             f"{c}_breadth_depth",
@@ -723,6 +879,7 @@ def _content_03(c):
                 "Size": [DOCS],
             },
             title="Breadth vs depth",
+            objects=chart_objects("#416180"),
         ),
         textbox(
             f"{c}_drill_hint",
@@ -751,6 +908,7 @@ def _content_04(c):
                 "Y": [TCV],
             },
             title="Value share by acquisition type",
+            objects=chart_objects(axis=True),
         ),
         data_visual(
             f"{c}_comp_vs_not",
@@ -761,6 +919,8 @@ def _content_04(c):
             "barChart",
             {"Category": [("col", ACQ, "acquisition_method")], "Y": [TCV]},
             title="Competitive vs non-competitive",
+            objects=chart_objects(STEEL, axis=True),
+            sort=TCV,
             subtitle=VALUE_CAVEAT,
         ),
         data_visual(
@@ -772,6 +932,8 @@ def _content_04(c):
             "barChart",
             {"Category": [("col", DEP, "department_name")], "Y": [("meas", MS, "Competitive %")]},
             title="Competitive share by department",
+            objects=chart_objects(STEEL, axis=True),
+            sort=("meas", MS, "Competitive %"),
         ),
     ]
 
@@ -796,6 +958,7 @@ def _content_05(c):
                 ]
             },
             title="Market concentration",
+            sort=("agg", GMC, "market_value", "Sum"),
         ),
         data_visual(
             f"{c}_value_vs_hhi",
@@ -811,6 +974,7 @@ def _content_05(c):
                 "Size": [("agg", GMC, "supplier_count", "Sum")],
             },
             title="Value vs concentration",
+            objects=chart_objects("#416180"),
         ),
         data_visual(
             f"{c}_pareto",
@@ -825,7 +989,12 @@ def _content_05(c):
                 "Y2": [("meas", MS, "Cumulative Supplier Share")],
             },
             title="Share held by top suppliers",
-            filters=topn(SUP, "canonical_name", 20, FD, "Total Contract Value"),
+            objects=chart_objects(
+                ("_Measures.Supplier Share", STEEL),
+                ("_Measures.Cumulative Supplier Share", STEEL_DARK),
+            ),
+            filters=topn("p05pareto", SUP, "canonical_name", 20, FD, "Total Contract Value"),
+            sort=("meas", MS, "Supplier Share"),
         ),
     ]
 
@@ -858,6 +1027,13 @@ def _content_06(c):
                 ],
             },
             title="SB + DVBE share of value by department",
+            objects=chart_objects(
+                ("_Measures.SB % of Value", STEEL),
+                ("_Measures.Micro Business % of Value", STEEL_LIGHT),
+                ("_Measures.DVBE % of Value", STEEL_DARK),
+                axis=True,
+            ),
+            sort=("meas", MS, "SB % of Value"),
         )
     )
     vis.append(
@@ -878,6 +1054,7 @@ def _content_06(c):
                 ]
             },
             title="Certified supplier leaders",
+            sort=TCV,
         )
     )
     return vis
@@ -909,6 +1086,11 @@ def _content_07(c):
                 ]
             },
             title="Leveraged vs open-market value",
+            objects=chart_objects(
+                ("_Measures.Leveraged Value", STEEL),
+                ("_Measures.Open Market Value", STEEL_LIGHT),
+                ("_Measures.Non-Competitive Value", STEEL_DARK),
+            ),
             subtitle=VALUE_CAVEAT,
         )
     )
@@ -931,6 +1113,7 @@ def _content_07(c):
                 ]
             },
             title="CMAS holders",
+            sort=TCV,
         )
     )
     return vis
@@ -980,7 +1163,6 @@ def _content_08(c):
                 "Values": [
                     ("col", GCA, "purchase_document"),
                     ("col", GCA, "business_unit"),
-                    ("col", SUP, "canonical_name"),
                     ("col", GCA, "amendment_count"),
                     ("col", GCA, "snapshots_captured"),
                     ("col", GCA, "current_value"),
@@ -988,6 +1170,7 @@ def _content_08(c):
                 ]
             },
             title="Contracts that grew the most after award",
+            sort=("col", GCA, "value_growth"),
         )
     )
     vis.append(
@@ -1000,6 +1183,9 @@ def _content_08(c):
             "columnChart",
             {"Category": [("col", FD, "version")], "Y": [DOCS]},
             title="Version distribution (all documents)",
+            objects=chart_objects(STEEL),
+            sort=("col", FD, "version"),
+            sort_dir=1,
         )
     )
     return vis
@@ -1036,6 +1222,8 @@ def _content_09(c):
                 ]
             },
             title="Open solicitations",
+            sort=("col", GEP, "bid_close_date"),
+            sort_dir=1,
         )
     )
     vis.append(
@@ -1052,6 +1240,11 @@ def _content_09(c):
                 "Y2": [("agg", GED, "set_aside_pct", "Avg")],
             },
             title="Repeat demand by department",
+            objects=chart_objects(
+                ("Sum(gold_eprocure_event_demand.event_count)", STEEL),
+                ("Avg(gold_eprocure_event_demand.set_aside_pct)", STEEL_DARK),
+            ),
+            sort=("agg", GED, "event_count", "Sum"),
             subtitle="by buyer, not commodity — the mart has no category column",
         )
     )
@@ -1092,6 +1285,7 @@ def _content_10(c):
                 ]
             },
             title="Document detail",
+            sort=("col", FD, "grand_total"),
         )
     )
     return vis
@@ -1118,28 +1312,118 @@ def content(section, index):
 NAV_Y0, NAV_STEP = 156, 32
 
 
+# Header slicer slots, left to right; the rightmost is widest for the FY tiles.
+# Pages carry only the slicers relevant to their content, right-aligned into
+# the free header slots. Shared sync groups keep dept/FY/band selections
+# following the reader across the pages where those slicers appear.
+SLICER_SLOTS = [(830, 170), (1012, 158), (1182, 158), (1352, 224)]
+
+_DEPT = {
+    "key": "dept",
+    "entity": DEP,
+    "column": "department_name",
+    "header": "DEPARTMENT",
+    "sync": "sync-department",
+    "filters": has_docs_filter("dept"),
+}
+_ACQ_TYPE = {
+    "key": "acqtype",
+    "entity": ACQ,
+    "column": "acquisition_type",
+    "header": "ACQUISITION TYPE",
+    "sync": "sync-acquisition",
+    "filters": has_docs_filter("acq"),
+}
+_ACQ_METHOD = {
+    "key": "acqmethod",
+    "entity": ACQ,
+    "column": "acquisition_method",
+    "header": "ACQUISITION METHOD",
+    "sync": "sync-acq-method",
+    "filters": has_docs_filter("acqm"),
+}
+_BAND = {
+    "key": "band",
+    "entity": FD,
+    "column": "value_band",
+    "header": "DOCUMENT VALUE",
+    "sync": "sync-value-band",
+}
+_FY = {
+    "key": "fy",
+    "entity": DD,
+    "column": "fiscal_year",
+    "header": "FISCAL YEAR",
+    "sync": "sync-fiscal-year",
+    "mode": "Basic",
+    "orientation": 1,
+}
+_SUPPLIER = {
+    "key": "supplier",
+    "entity": SUP,
+    "column": "canonical_name",
+    "header": "SUPPLIER",
+    "sync": "sync-supplier",
+    "filters": has_docs_filter("sup"),
+}
+_CERT = {
+    "key": "cert",
+    "entity": GSC,
+    "column": "certification_types",
+    "header": "CERTIFICATION",
+    "sync": "sync-cert",
+    "filters": has_docs_filter("cert"),
+}
+_BID_CLOSE = {
+    "key": "close",
+    "entity": GEP,
+    "column": "bid_close_date",
+    "header": "BID CLOSE",
+    "sync": "sync-bid-close",
+    "mode": "Between",
+}
+
+SLICERS_BY_PAGE = {
+    0: [_DEPT, _ACQ_TYPE, _BAND, _FY],  # Spend overview: the general panel
+    1: [_ACQ_TYPE, _BAND, _FY],  # Departments: the page enumerates depts
+    2: [_DEPT, _SUPPLIER, _BAND, _FY],  # Suppliers: find-a-vendor
+    3: [_DEPT, _ACQ_METHOD, _FY],  # Acquisition mix: method grain
+    4: [_DEPT, _ACQ_TYPE, _FY],  # Competition: the mart grain
+    5: [_DEPT, _CERT, _FY],  # SB/DVBE: certification types
+    6: [_DEPT, _FY],  # CMAS
+    7: [_DEPT, _FY],  # Amendments
+    8: [_DEPT, _BID_CLOSE],  # Open solicitations: future dates, no FY
+}
+
+
+def page_slicers(index):
+    specs = SLICERS_BY_PAGE.get(index, [])
+    start = len(SLICER_SLOTS) - len(specs)
+    return [(start + i, spec) for i, spec in enumerate(specs)]
+
+
 def chrome(section, index):
     """Sidebar + header chrome for one page. index None = Notes page."""
     p = f"chrome_{section}"
     vis = [
         rectangle(f"{p}_sidebar_divider", 231, 0, 1, CANVAS_H, HAIRLINE),
         textbox(
-            f"{p}_kicker", 24, 24, 184, 16, [("POWER BI · REPORT", "Barlow Condensed", 9, ACCENT)]
+            f"{p}_kicker", 24, 24, 200, 22, [("POWER BI · REPORT", "Barlow Condensed", 9, ACCENT)]
         ),
         textbox(
             f"{p}_product",
             24,
-            44,
-            184,
-            52,
+            46,
+            200,
+            62,
             [("SCPRS Procurement Warehouse", "Barlow Condensed", 20, INK)],
         ),
         textbox(
             f"{p}_scope",
             24,
-            100,
-            184,
-            34,
+            112,
+            200,
+            38,
             [
                 ("21 departments · FY22–FY27", "Barlow", 8, MUTED),
                 ("Supplier opportunity view", "Barlow", 8, MUTED),
@@ -1159,9 +1443,9 @@ def chrome(section, index):
         textbox(
             f"{p}_footer",
             24,
-            856,
-            184,
-            36,
+            852,
+            200,
+            40,
             [
                 ("Warehouse serve dataset", "Barlow", 7, FAINT),
                 ("marts refresh up to 8×/day", "Barlow", 7, FAINT),
@@ -1189,57 +1473,32 @@ def chrome(section, index):
         title, subtitle = PAGES[index][2], PAGES[index][3]
         title_x = 300 if index == DETAIL_INDEX else 256
         vis.append(
-            textbox(f"{p}_title", title_x, 24, 700, 40, [(title, "Barlow Condensed", 22, INK)], z=3)
+            textbox(f"{p}_title", title_x, 20, 560, 42, [(title, "Barlow Condensed", 22, INK)], z=3)
         )
         vis.append(
-            textbox(f"{p}_subtitle", title_x, 66, 700, 22, [(subtitle, "Barlow", 9, MUTED)], z=3)
+            textbox(f"{p}_subtitle", title_x, 62, 560, 40, [(subtitle, "Barlow", 9, MUTED)], z=3)
         )
         if index == DETAIL_INDEX:
             vis.append(button(f"{p}_back", 256, 24, 32, 32, "←", "Back", outlined=True))
         else:
-            vis.append(
-                slicer(
-                    f"{p}_slicer_dept",
-                    1000,
-                    28,
-                    180,
-                    60,
-                    "dim_department",
-                    "department_name",
-                    "DEPARTMENT",
-                    "Dropdown",
-                    "sync-department",
+            for slot, spec in page_slicers(index):
+                sx, sw = SLICER_SLOTS[slot]
+                vis.append(
+                    slicer(
+                        f"{p}_slicer_{spec['key']}",
+                        sx,
+                        22,
+                        sw,
+                        70,
+                        spec["entity"],
+                        spec["column"],
+                        spec["header"],
+                        spec.get("mode", "Dropdown"),
+                        spec["sync"],
+                        orientation=spec.get("orientation"),
+                        filters=spec.get("filters"),
+                    )
                 )
-            )
-            vis.append(
-                slicer(
-                    f"{p}_slicer_acq",
-                    1192,
-                    28,
-                    160,
-                    60,
-                    "dim_acquisition",
-                    "acquisition_type",
-                    "ACQUISITION TYPE",
-                    "Dropdown",
-                    "sync-acquisition",
-                )
-            )
-            vis.append(
-                slicer(
-                    f"{p}_slicer_fy",
-                    1364,
-                    28,
-                    212,
-                    60,
-                    "dim_date",
-                    "fiscal_year",
-                    "FISCAL YEAR",
-                    "Basic",
-                    "sync-fiscal-year",
-                    orientation=1,
-                )
-            )
             vis.append(filter_state_card(f"{p}_filter_state"))
     return vis
 
@@ -1367,6 +1626,38 @@ def build(merge: bool, force: bool) -> None:
             # keep pages this script does not own (tooltip pages, experiments)
             sections.extend(s for s in existing.get("sections", []) if s["name"] not in known)
 
+    # Report-level scope: the design covers FY22 onward; the warehouse holds 2016+.
+    fy_filter = [
+        {
+            "name": "ReportScopeFY22",
+            "expression": {
+                "Column": {"Expression": {"SourceRef": {"Entity": DD}}, "Property": "fiscal_year"}
+            },
+            "filter": {
+                "Version": 2,
+                "From": [{"Name": "d", "Entity": DD, "Type": 0}],
+                "Where": [
+                    {
+                        "Condition": {
+                            "Comparison": {
+                                "ComparisonKind": 2,
+                                "Left": {
+                                    "Column": {
+                                        "Expression": {"SourceRef": {"Source": "d"}},
+                                        "Property": "fiscal_year",
+                                    }
+                                },
+                                "Right": {"Literal": {"Value": "2022L"}},
+                            }
+                        }
+                    }
+                ],
+            },
+            "type": "Advanced",
+            "howCreated": 1,
+        }
+    ]
+
     report = {
         "config": json.dumps(
             {
@@ -1374,11 +1665,16 @@ def build(merge: bool, force: bool) -> None:
                 "activeSectionIndex": 0,
                 "defaultDrillFilterOtherVisuals": True,
                 "themeCollection": {
-                    "customTheme": {"name": "industry-theme.json", "type": "RegisteredResources"}
+                    "baseTheme": {"name": "CY24SU10", "version": "5.55", "type": "SharedResources"},
+                    "customTheme": {
+                        "name": "industry-theme.json",
+                        "version": "5.55",
+                        "type": "RegisteredResources",
+                    },
                 },
             }
         ),
-        "filters": "[]",
+        "filters": json.dumps(fy_filter),
         "layoutOptimization": 0,
         "resourcePackages": [
             {
