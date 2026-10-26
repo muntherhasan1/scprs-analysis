@@ -9,4 +9,5 @@ pre-commit>=4.6.0    # runs local hooks before each commit
 pre-commit-hooks>=4.6.0  # standard hygiene hooks via python -m (WDAC-safe, like detect-secrets)
 pytest>=9.1.1
 matplotlib>=3.11.0      # exercised by tests for src/charting.py (chart/report tools)
+pillow>=13.0.0          # matplotlib dep; 13.0 fixes the 2026-10 pillow CVE batch (pip-audit gated)
 huggingface_hub>=1.23.0  # exercised by tests for src/data_sync.py (serve-DB fetch/publish)
