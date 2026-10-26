@@ -61,3 +61,146 @@ def test_build_query_and_refresh(tmp_path, monkeypatch):
     # re-running a business unit refreshes (no duplicate rows)
     model.build_db("8660", "01/01/2025", "12/31/2025", db_path=db, log=lambda *a: None)
     assert model.query("SELECT COUNT(*) c FROM purchases", db_path=db)["c"][0] == 2
+
+
+def _seed_purchases(db, rows):
+    """rows: (business_unit, purchase_document, start_date, version)."""
+    con = model._connect(db)
+    model._ensure_schema(con)
+    con.executemany(
+        "INSERT INTO purchases (business_unit, purchase_document, start_date, version) "
+        "VALUES (?, ?, ?, ?)",
+        rows,
+    )
+    con.commit()
+    con.close()
+
+
+def _scraped(n, start="2025-01-05", version=1):
+    df = _fixture_df().iloc[[0] * n].reset_index(drop=True)
+    df["Purchase Document #"] = [f"N{i}" for i in range(n)]
+    df["Start Date"] = pd.to_datetime([start] * n)
+    df["Version"] = version
+    return df
+
+
+def test_refresh_derives_full_window_and_never_narrows(tmp_path, monkeypatch):
+    db = tmp_path / "r.db"
+    _seed_purchases(db, [("8660", "OLD", "2016-01-01", 1), ("5180", "X", "2023-03-01", 1)])
+    calls = []
+
+    def fake_range(bu, f, t, **k):
+        calls.append((bu, f, t))
+        return _scraped(2), []
+
+    monkeypatch.setattr(model.scprs, "download_range", fake_range)
+    model.refresh_db("8660", db_path=db, log=lambda *a: None)
+    model.refresh_db("5180", db_path=db, log=lambda *a: None)
+    # 8660's stored history starts before the policy -> kept; 5180's starts
+    # after it -> widened to the policy start, never narrowed to 2023.
+    assert calls == [
+        ("8660", "01/01/2016", model.POLICY_END),
+        ("5180", "07/01/2021", model.POLICY_END),
+    ]
+    stamped = model.query("SELECT * FROM summary_refresh ORDER BY business_unit", db_path=db)
+    assert stamped["window_from"].tolist() == ["2021-07-01", "2016-01-01"]
+    assert stamped["rows"].tolist() == [2, 2]
+
+
+def test_refresh_gate_refuses_without_writing(tmp_path, monkeypatch):
+    import pytest
+
+    db = tmp_path / "g.db"
+    _seed_purchases(db, [("5180", f"D{i}", "2024-03-05", 1) for i in range(100)])
+
+    def count():
+        return model.query("SELECT COUNT(*) c FROM purchases", db_path=db)["c"][0]
+
+    for scraped, warnings in [
+        (_scraped(90), []),  # shrink of 10 > max(5, 0.5%)
+        (_scraped(0), []),  # empty result for a populated unit
+        (_scraped(120), ["01/01/2024..01/31/2024 hit 65,000-row cap; partial"]),
+    ]:
+        monkeypatch.setattr(
+            model.scprs, "download_range", lambda *a, s=scraped, w=warnings, **k: (s, w)
+        )
+        with pytest.raises(model.RefreshRefused):
+            model.refresh_db("5180", db_path=db, log=lambda *a: None)
+        assert count() == 100  # untouched
+
+    # A small shrink (site pruned a few documents) is within tolerance.
+    monkeypatch.setattr(model.scprs, "download_range", lambda *a, **k: (_scraped(96), []))
+    r = model.refresh_db("5180", db_path=db, log=lambda *a: None)
+    assert (r["before"], r["after"]) == (100, 96) and count() == 96
+
+
+def test_reload_reopens_days_with_undrilled_documents(tmp_path, monkeypatch):
+    """A late-entered document on an enriched day reopens it; enrich drills it,
+    clears the reopen, and details_progress never shrinks (contracts metric)."""
+    db = tmp_path / "o.db"
+    _seed_purchases(db, [("5180", "N0", "2025-01-05", 1)])
+    con = model._connect(db)
+    model._ensure_progress_schema(con)
+    model._ensure_details_schema(con)
+    con.execute(
+        "INSERT INTO document_details (business_unit, purchase_document, version) "
+        "VALUES ('5180', 'N0', '1')"
+    )
+    con.execute("INSERT INTO details_progress VALUES ('5180', '2025-01-05', 1, 0, 0, 'x')")
+    con.commit()
+    con.close()
+
+    # Same doc at the same version only -> nothing to reopen.
+    monkeypatch.setattr(model.scprs, "download_range", lambda *a, **k: (_scraped(1), []))
+    assert model.refresh_db("5180", db_path=db, log=lambda *a: None)["reopened_days"] == 0
+
+    # A second (late-entered) document appears on that day -> reopened.
+    monkeypatch.setattr(model.scprs, "download_range", lambda *a, **k: (_scraped(2), []))
+    assert model.refresh_db("5180", db_path=db, log=lambda *a: None)["reopened_days"] == 1
+
+    visited = []
+    monkeypatch.setattr(
+        model,
+        "build_details_db",
+        lambda bu, f, t, *, db_path, skip_docs=None, **k: (
+            visited.append((t, skip_docs)) or {"documents": 1, "lines": 0, "pos": 0}
+        ),
+    )
+    model.enrich_details("5180", "01/01/2025", "12/31/2025", db_path=db, log=lambda *a: None)
+    assert visited == [("01/05/2025", {"N0"})]  # only the new document is drilled
+    q = "SELECT (SELECT COUNT(*) FROM details_reopen) r, (SELECT COUNT(*) FROM details_progress) p"
+    assert model.query(q, db_path=db).iloc[0].tolist() == [0, 1]
+
+    # An amendment (summary version newer than every drilled version) also reopens.
+    monkeypatch.setattr(model.scprs, "download_range", lambda *a, **k: (_scraped(1, version=2), []))
+    assert model.refresh_db("5180", db_path=db, log=lambda *a: None)["reopened_days"] == 1
+
+
+def test_refresh_units_rotation_budget_and_failures(tmp_path, monkeypatch):
+    db = tmp_path / "u.db"
+    _seed_purchases(db, [(bu, "D", "2024-01-01", 1) for bu in ("0820", "2720", "3540", "8660")])
+    con = model._connect(db)
+    con.executemany(
+        "INSERT INTO summary_refresh VALUES (?, '2021-07-01', 1, ?)",
+        [("0820", "2026-10-20T00:00:00"), ("3540", "2026-10-10T00:00:00")],
+    )
+    con.commit()
+    con.close()
+    order = []
+
+    def fake_refresh(bu, **k):
+        order.append(bu)
+        if bu == "2720":
+            raise model.RefreshRefused("would shrink")
+        return {"business_unit": bu, "before": 1, "after": 1, "reopened_days": 0}
+
+    monkeypatch.setattr(model, "refresh_db", fake_refresh)
+    r = model.refresh_units(db_path=db, log=lambda *a: None)
+    # never-refreshed first (by code), then oldest refresh first
+    assert order == ["2720", "8660", "3540", "0820"]
+    assert [f["business_unit"] for f in r["failed"]] == ["2720"]  # others still ran
+    assert len(r["refreshed"]) == 3 and r["remaining"] == []
+
+    order.clear()
+    r = model.refresh_units(db_path=db, budget_minutes=0, log=lambda *a: None)
+    assert order == [] and len(r["remaining"]) == 4

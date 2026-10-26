@@ -16,13 +16,18 @@ CLI:
 
     # Show schema + a data summary:
     python -m src.model info
+
+    # Re-scrape loaded units' full windows, least-recently-refreshed first:
+    python -m src.model refresh --budget-minutes 45
 """
 
 from __future__ import annotations
 
 import argparse
+import datetime as dt
 import re
 import sqlite3
+import sys
 import time
 from datetime import datetime
 from pathlib import Path
@@ -30,6 +35,19 @@ from pathlib import Path
 from . import scprs
 
 DB_PATH = scprs.DATA_DIR / "scprs.db"
+
+# The coverage policy: every loaded unit holds at least this window (the
+# last-5 + next-2 fiscal-year priority range). `refresh` widens it to a unit's
+# stored history when that starts earlier (8660 holds 2016+), so a refresh can
+# never narrow what a unit already has. recon samples from the same window.
+POLICY_START = dt.date(2021, 7, 1)
+POLICY_END = "06/30/2028"
+
+# Refresh shrink gate: a re-scrape may legitimately lose a few documents the
+# site pruned (recon has seen 1-row `store_ahead`), but losing more than this
+# means the scrape came back short — refuse to write it.
+REFRESH_SHRINK_MIN_ROWS = 5
+REFRESH_SHRINK_PCT = 0.5
 
 # Column order for the purchases table (snake_case of the summary extract).
 _PURCHASE_COLUMNS = [
@@ -97,6 +115,11 @@ def _ensure_schema(con: sqlite3.Connection) -> None:
         "supplier_id",
     ):
         con.execute(f"CREATE INDEX IF NOT EXISTS ix_purchases_{col} ON purchases({col})")
+    # When each unit's summary was last (re)loaded — the refresh rotation order.
+    con.execute(
+        "CREATE TABLE IF NOT EXISTS summary_refresh ("
+        "business_unit TEXT PRIMARY KEY, window_from TEXT, rows INTEGER, refreshed_at TEXT)"
+    )
     for name, sql in _VIEWS.items():
         con.execute(f"DROP VIEW IF EXISTS {name}")
         con.execute(f"CREATE VIEW {name} AS {sql}")
@@ -117,24 +140,186 @@ def build_db(
         log("No records for that business unit + date range.")
         return 0, warnings
 
+    df = _prepare_summary(df, business_unit)
+    con = _connect(db_path)
+    try:
+        reopened = _replace_unit(con, business_unit, df, from_date)
+    finally:
+        con.close()
+    log(f"Loaded {len(df)} rows into {db_path} ({reopened} enriched day(s) reopened)")
+    return len(df), warnings
+
+
+def _prepare_summary(df, business_unit: str):
+    """Summary extract -> `purchases`-shaped frame (snake_case, ISO dates)."""
     df = df.rename(columns={c: _snake(c) for c in df.columns})
     df["business_unit"] = business_unit
     # Dates -> ISO strings so SQLite sorts/filters them lexically.
     for dcol in ("start_date", "end_date"):
         if dcol in df.columns:
             df[dcol] = df[dcol].dt.strftime("%Y-%m-%d")
-    df = df.reindex(columns=_PURCHASE_COLUMNS)
+    return df.reindex(columns=_PURCHASE_COLUMNS)
 
+
+def _replace_unit(con: sqlite3.Connection, business_unit: str, df, from_date: str) -> int:
+    """Replace one unit's summary rows; return the enriched days reopened.
+
+    Also stamps `summary_refresh` (the refresh rotation order) and reopens
+    every enriched day that now holds a document not drilled at its summary
+    version — a late-entered document or an amendment. Without the reopen,
+    enrich would skip those days forever: `details_progress` says done."""
+    _ensure_schema(con)
+    _ensure_progress_schema(con)
+    con.execute("DELETE FROM purchases WHERE business_unit = ?", (business_unit,))
+    df.to_sql("purchases", con, if_exists="append", index=False)
+    now = datetime.now().isoformat(timespec="seconds")
+    con.execute(
+        "INSERT OR REPLACE INTO summary_refresh VALUES (?, ?, ?, ?)",
+        (business_unit, _iso(from_date), len(df), now),
+    )
+    has_details = con.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'document_details'"
+    ).fetchone()
+    if not has_details:  # never enriched: nothing to reopen
+        con.commit()
+        return 0
+    # A document counts as drilled when some drilled version is >= its summary
+    # version — the same rule `_drilled_docs` uses to build the resume skip set.
+    cur = con.execute(
+        "INSERT OR IGNORE INTO details_reopen (business_unit, day, reopened_at) "
+        "SELECT dp.business_unit, dp.day, ? FROM details_progress dp "
+        "WHERE dp.business_unit = ? AND EXISTS ("
+        "  SELECT 1 FROM purchases p "
+        "  WHERE p.business_unit = dp.business_unit AND p.start_date = dp.day "
+        "    AND COALESCE(p.version, 0) > COALESCE(("
+        "      SELECT MAX(CAST(d.version AS INTEGER)) FROM document_details d "
+        "      WHERE d.business_unit = p.business_unit "
+        "        AND d.purchase_document = p.purchase_document), -1))",
+        (now, business_unit),
+    )
+    con.commit()
+    return cur.rowcount
+
+
+class RefreshRefused(Exception):
+    """A refresh scrape failed its gate; the unit's stored rows are untouched."""
+
+
+def refresh_db(
+    business_unit: str,
+    *,
+    to_date: str = POLICY_END,
+    db_path: Path = DB_PATH,
+    log=print,
+) -> dict:
+    """Re-scrape one loaded unit's FULL window and replace its summary.
+
+    `build` needs the caller to pass the full history (a narrower window
+    deletes the rest). `refresh` derives it instead: from the earlier of the
+    policy start and the unit's stored first day, so it can only re-cover or
+    widen. The scrape is gated BEFORE anything is written — a capped export,
+    an empty result for a populated unit, or a shrink past the tolerance raises
+    `RefreshRefused` and leaves the stored rows as they were."""
     con = _connect(db_path)
     try:
         _ensure_schema(con)
-        con.execute("DELETE FROM purchases WHERE business_unit = ?", (business_unit,))
-        df.to_sql("purchases", con, if_exists="append", index=False)
-        con.commit()
+        before, first = con.execute(
+            "SELECT COUNT(*), MIN(start_date) FROM purchases WHERE business_unit = ?",
+            (business_unit,),
+        ).fetchone()
     finally:
         con.close()
-    log(f"Loaded {len(df)} rows into {db_path}")
-    return len(df), warnings
+    start = POLICY_START
+    if first:
+        start = min(start, dt.date.fromisoformat(first))
+    from_date = start.strftime("%m/%d/%Y")
+
+    log(f"Refreshing BU {business_unit} {from_date}..{to_date} ({before} rows stored)")
+    df, warnings = scprs.download_range(business_unit, from_date, to_date, log=log)
+    capped = [w for w in warnings if "cap" in w]
+    if capped:
+        raise RefreshRefused(f"export hit the row cap ({capped[0]}); refusing a partial load")
+    after = len(df)
+    if after == 0 and before > 0:
+        raise RefreshRefused(f"site returned no records for a unit holding {before} rows")
+    allowed = max(REFRESH_SHRINK_MIN_ROWS, before * REFRESH_SHRINK_PCT / 100)
+    if before - after > allowed:
+        raise RefreshRefused(
+            f"would shrink {before} -> {after} rows (more than {allowed:g} allowed)"
+        )
+
+    con = _connect(db_path)
+    try:
+        reopened = _replace_unit(con, business_unit, _prepare_summary(df, business_unit), from_date)
+    finally:
+        con.close()
+    return {
+        "business_unit": business_unit,
+        "from_date": from_date,
+        "before": before,
+        "after": after,
+        "reopened_days": reopened,
+    }
+
+
+def refresh_units(
+    *,
+    business_units: list[str] | None = None,
+    budget_minutes: float | None = None,
+    db_path: Path = DB_PATH,
+    log=print,
+) -> dict:
+    """Refresh loaded units, least-recently-refreshed first, within a budget.
+
+    The budget is checked before each unit starts (a unit is never cut
+    mid-scrape), so worst-case wall clock = budget + the slowest unit. Units
+    left over are simply oldest next run — the rotation is self-curing. One
+    unit failing doesn't stop the others; it's reported and retried next run."""
+    con = _connect(db_path)
+    try:
+        _ensure_schema(con)
+        order = [
+            r[0]
+            for r in con.execute(
+                "SELECT p.business_unit FROM (SELECT DISTINCT business_unit FROM purchases) p "
+                "LEFT JOIN summary_refresh s ON s.business_unit = p.business_unit "
+                "ORDER BY s.refreshed_at IS NOT NULL, s.refreshed_at, p.business_unit"
+            )
+        ]
+    finally:
+        con.close()
+    if business_units:
+        order = [bu for bu in order if bu in business_units]
+
+    deadline = time.monotonic() + budget_minutes * 60 if budget_minutes is not None else None
+    refreshed, failed = [], []
+    for idx, bu in enumerate(order):
+        if deadline is not None and time.monotonic() >= deadline:
+            log(f"time budget ({budget_minutes:g} min) spent; {len(order) - idx} unit(s) left")
+            break
+        t0 = time.monotonic()
+        try:
+            r = refresh_db(bu, db_path=db_path, log=log)
+        except RefreshRefused as e:
+            log(f"  REFUSED {bu}: {e}")
+            failed.append({"business_unit": bu, "error": f"refused: {e}"})
+            continue
+        except Exception as e:  # noqa: BLE001 - one unit's scrape error must not stop the rest
+            log(f"  ERROR {bu}: {repr(e)[:160]} (retries next run)")
+            failed.append({"business_unit": bu, "error": repr(e)[:160]})
+            continue
+        r["minutes"] = round((time.monotonic() - t0) / 60, 1)
+        log(
+            f"  {bu}: {r['before']} -> {r['after']} rows, "
+            f"{r['reopened_days']} day(s) reopened, {r['minutes']}m"
+        )
+        refreshed.append(r)
+    done = {r["business_unit"] for r in refreshed} | {f["business_unit"] for f in failed}
+    return {
+        "refreshed": refreshed,
+        "failed": failed,
+        "remaining": [bu for bu in order if bu not in done],
+    }
 
 
 # --- PO Details drill-down tables (richer than the CSV exports) ---
@@ -354,6 +539,13 @@ def _ensure_progress_schema(con: sqlite3.Connection) -> None:
         "business_unit TEXT, day TEXT, documents INTEGER, lines INTEGER, pos INTEGER, "
         "completed_at TEXT, PRIMARY KEY (business_unit, day))"
     )
+    # Done days a summary reload found new/amended documents on. Kept apart
+    # from `details_progress` on purpose: that table's row count is a
+    # monotonic `contracts` metric, so reopening must never delete from it.
+    con.execute(
+        "CREATE TABLE IF NOT EXISTS details_reopen ("
+        "business_unit TEXT, day TEXT, reopened_at TEXT, PRIMARY KEY (business_unit, day))"
+    )
 
 
 def _drilled_docs(db_path: Path, business_unit: str, iso_day: str) -> set[str]:
@@ -456,6 +648,12 @@ def enrich_details(
                 "SELECT day FROM details_progress WHERE business_unit = ?", (business_unit,)
             ).fetchall()
         }
+        reopened = {
+            r[0]
+            for r in con.execute(
+                "SELECT day FROM details_reopen WHERE business_unit = ?", (business_unit,)
+            ).fetchall()
+        }
     finally:
         con.close()
 
@@ -464,8 +662,13 @@ def enrich_details(
         log(f"  python -m src.model build {business_unit} {from_date} {to_date}")
         return {"days_total": 0, "days_processed": 0, "days_partial": 0, "days_remaining": 0}
 
-    pending = active if force else [d for d in active if d not in done]
-    log(f"{len(active)} active day(s); {len(active) - len(pending)} done; {len(pending)} pending")
+    # A reopened day is pending again; the resume skip set means only its
+    # new/amended documents get drilled.
+    pending = active if force else [d for d in active if d not in done or d in reopened]
+    log(
+        f"{len(active)} active day(s); {len(active) - len(pending)} done; {len(pending)} pending"
+        f" ({len(reopened & set(pending))} reopened)"
+    )
     todo = pending[:limit] if limit is not None else pending
 
     deadline = time.monotonic() + budget_minutes * 60 if budget_minutes is not None else None
@@ -514,6 +717,12 @@ def enrich_details(
                     counts["pos"],
                     datetime.now().isoformat(timespec="seconds"),
                 ),
+            )
+            # One complete revisit clears a reopen even if a document still
+            # failed to drill — no re-pick loop; the next refresh reopens it.
+            con.execute(
+                "DELETE FROM details_reopen WHERE business_unit = ? AND day = ?",
+                (business_unit, iso_day),
             )
             con.commit()
         finally:
@@ -670,6 +879,16 @@ def _cli() -> None:
         help="Stop cleanly (exit 0) after this many minutes; a day cut mid-drill keeps "
         "its drilled documents and resumes next run. Set below any outer job timeout.",
     )
+    rf = sub.add_parser(
+        "refresh", help="Re-scrape loaded units' full windows, least-recently-refreshed first"
+    )
+    rf.add_argument("--bu", action="append", help="Limit to this unit (repeatable)")
+    rf.add_argument(
+        "--budget-minutes",
+        type=float,
+        default=None,
+        help="Start no new unit after this many minutes (a running unit finishes)",
+    )
     dc = sub.add_parser("document", help="Show a document like the PO Details page")
     dc.add_argument("document", help="Purchase document id or suffix, e.g. 63626")
     dc.add_argument("--fetch", action="store_true", help="Drill it now if not yet enriched")
@@ -697,6 +916,16 @@ def _cli() -> None:
                 budget_minutes=args.budget_minutes,
             )
         )
+    elif args.cmd == "refresh":
+        r = refresh_units(business_units=args.bu, budget_minutes=args.budget_minutes)
+        print(
+            f"RESULT refreshed={len(r['refreshed'])} failed={len(r['failed'])} "
+            f"remaining={len(r['remaining'])}"
+        )
+        # Exit 1 on any failed unit AFTER the others ran, so the caller can
+        # still publish the units that succeeded and then fail loudly.
+        if r["failed"]:
+            sys.exit(1)
     elif args.cmd == "document":
         try:
             result = document(args.document)

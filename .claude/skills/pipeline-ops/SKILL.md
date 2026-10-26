@@ -66,7 +66,13 @@ mentioned it. Answer these five in the plan, in writing:
 
 - **recon.yml** (weekly, Wed): ground truth — samples (BU, month) windows and
   compares the store against the LIVE site; the only check that catches
-  silently-lost data (all others are internal-consistency).
+  silently-lost data (all others are internal-consistency). `stale_summary`
+  (error) = an ended month >50% missing → the summary refresh has stopped.
+- **summary-refresh.yml** (daily 10:37): the ONLY scheduled writer of
+  `purchases` — full-window re-scrape of the least-recently-refreshed units
+  under a 45m budget (~3-day cycle); reopens enriched days that gained
+  late/amended docs (`details_reopen`). Without it the summary freezes at its
+  last manual build (the 2026-10 three-month gap).
 - **backup.yml** (weekly, Sun): cold-copies scprs.db to the backup dataset;
   fails loudly until `HF_BACKUP_TOKEN` exists.
 - **query-review.yml** (weekly, Mon): replays logged user questions; content
@@ -77,7 +83,8 @@ mentioned it. Answer these five in the plan, in writing:
 - **pipeline-monitor.yml** (6h): watches from OUTSIDE — last successful enrich
   age (9h; enrich runs every 3h) + serve-dataset commit age (12h;
   warehouse-refresh.yml rebuilds/publishes every 6h since the 2026-08-14
-  decoupling) + cron keep-alive (GitHub disables schedules after 60 idle days).
+  decoupling) + last successful summary refresh age (53h; daily) + cron
+  keep-alive (GitHub disables schedules after 60 idle days).
 - **healthchecks.io dead-man's switch** (`HEALTHCHECK_PING_URL`): the one alarm
   outside GitHub — pinged by healthy enrich runs and clean monitor passes;
   grace ≈14h pages by email even if GitHub's schedulers are the thing that died
