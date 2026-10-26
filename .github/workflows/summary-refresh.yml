@@ -41,10 +41,12 @@ jobs:
   refresh:
     runs-on: ubuntu-latest
     # Backstop only — `refresh --budget-minutes` starts no unit after the
-    # budget, so worst case = setup ~5m + budget 45m + the slowest unit
-    # finishing (3540 solo: 50m on 2026-07-28, run 30325120879) + publish ~3m
-    # ≈ 103m. 120 gives headroom; if 3540 grows past it, split it out first.
-    timeout-minutes: 120
+    # budget, so worst case = setup (usually ~2m, but 13m observed on
+    # 2026-10-26 run 40353722312: slow apt for playwright --with-deps) +
+    # budget 45m + the slowest unit finishing (3540 solo: 50m on 2026-07-28,
+    # run 30325120879) + publish ~3m ≈ 111m. 135 keeps headroom over that;
+    # if 3540 grows past it, split it into its own dispatch first.
+    timeout-minutes: 135
     env:
       PYTHONUNBUFFERED: "1" # a killed run must still show how far it got
       SCPRS_DATASET: ${{ vars.SCPRS_DATASET || 'munther-hasan/scprs-operational-db' }}
