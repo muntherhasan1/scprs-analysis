@@ -106,3 +106,18 @@ def test_main_exit_codes(tmp_path, monkeypatch):
     assert recon.main(["--db", str(db), "--bu", "5180", "--month", "2024-03"]) == 1
     # Probe crash (missing store) -> 2, never 1.
     assert recon.main(["--db", str(tmp_path / "missing.db"), "--samples", "1"]) == 2
+
+
+def test_mostly_missing_ended_month_is_stale_summary_error(tmp_path):
+    """The 2026-10 shape: a month ended weeks ago, still ~all missing because no
+    summary refresh ran. Not settled (< 60 days), but no longer 'expected drift'."""
+    db = _seed(tmp_path / "s.db", [("2660", "D1", "2026-06-03")])
+    con = _con(db)
+    try:
+        f = recon.check_window(
+            con, "2660", 2026, 6, today=TODAY, site_count_fn=lambda *a: (5012, False)
+        )
+    finally:
+        con.close()
+    assert (f.check, f.severity) == ("stale_summary", "error")
+    assert "summary refresh" in f.detail

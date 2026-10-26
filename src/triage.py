@@ -80,6 +80,25 @@ _HINTS: dict[str, dict[str, str]] = {
             "Space manually to serve the new snapshot."
         ),
     },
+    "Summary refresh": {
+        "_default": (
+            "The scheduled summary refresh failed. Each unit is gated before it is "
+            "written, and units that refreshed cleanly WERE published — only the "
+            "failed ones are stale, and they are first in line next run."
+        ),
+        "Refresh summaries": (
+            "The refresh crashed before reporting a result — usually the headless "
+            "scraper (the FI$Cal SCPRS site throttling Actions' cloud IPs, or a page "
+            "change; see `src/scprs.py`). Nothing was published."
+        ),
+        "Fail on refused": (
+            "A unit was **refused by its gate** (export hit the 65k row cap, the site "
+            "returned no rows, or the re-scrape would shrink the unit past tolerance) "
+            "or its scrape errored — the step summary names the unit and reason. A "
+            "transient error self-heals next run; a repeated refusal on one unit "
+            "needs a look (e.g. `python -m src.recon --bu <BU> --month <YYYY-MM>`)."
+        ),
+    },
     "CMAS refresh (Wave 2)": {
         "_default": (
             "The CMAS refresh failed. `cmas.db` is only published on success, so "
