@@ -70,7 +70,7 @@ mentioned it. Answer these five in the plan, in writing:
   (error) = an ended month >50% missing → the summary refresh has stopped.
 - **summary-refresh.yml** (daily 10:37): the ONLY scheduled writer of
   `purchases` — full-window re-scrape of the least-recently-refreshed units
-  under a 45m budget (~3-day cycle); reopens enriched days that gained
+  under a 60m budget (~3-day cycle); reopens enriched days that gained
   late/amended docs (`details_reopen`). Without it the summary freezes at its
   last manual build (the 2026-10 three-month gap).
 - **backup.yml** (weekly, Sun): cold-copies scprs.db to the backup dataset;

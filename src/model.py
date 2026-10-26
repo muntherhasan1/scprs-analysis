@@ -18,7 +18,7 @@ CLI:
     python -m src.model info
 
     # Re-scrape loaded units' full windows, least-recently-refreshed first:
-    python -m src.model refresh --budget-minutes 45
+    python -m src.model refresh --budget-minutes 60
 """
 
 from __future__ import annotations

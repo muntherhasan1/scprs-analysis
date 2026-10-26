@@ -67,7 +67,7 @@ pre-commit run --all-files                   # everything at once
 # Pipeline (each stage builds on the previous store)
 python -m src.model build 8660 01/01/2016 07/08/2026   # scrape summary -> scprs.db
 python -m src.model enrich 8660 07/01/2021 06/30/2028 --limit 200 --newest-first  # drill PO Details
-python -m src.model refresh --budget-minutes 45        # re-scrape loaded units' full windows (daily cron)
+python -m src.model refresh --budget-minutes 60        # re-scrape loaded units' full windows (daily cron)
 python -m src.warehouse build                          # scprs.db -> warehouse.db (all layers + DQ)
 
 # Inspection
