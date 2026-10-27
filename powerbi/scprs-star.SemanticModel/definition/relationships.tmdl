@@ -58,9 +58,9 @@ relationship 4e043419-838c-4764-aa2a-676eee72f6a5
 	fromColumn: fact_associated_po.start_date_key
 	toColumn: dim_date.date_key
 
-relationship amend_to_document
-	fromColumn: gold_contract_amendments.doc_bk
-	toColumn: fact_document.document_bk
+relationship amend_to_department
+	fromColumn: gold_contract_amendments.business_unit
+	toColumn: dim_department.business_unit
 
 relationship opp_to_department
 	fromColumn: gold_eprocure_posted_opportunity.business_unit

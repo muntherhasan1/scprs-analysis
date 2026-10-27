@@ -181,11 +181,14 @@ expiry, amendment growth, eProcure event counts). Three facts that came from
 profiling, not the spec draft: `competitive_flag` values are
 `Competitive`/`Non-Competitive`/`Other` (title case);
 `gold_market_concentration.top_supplier_pct` is 0–100 (the `[Top Supplier %]`
-measure divides by 100 so it formats as a percentage); and neither
-`purchase_document` nor `department_name` is unique in the star, so the four
-mart relationships key on `business_unit` and on a calculated
-`business_unit|purchase_document` composite (matching the hidden
-`fact_document.document_bk`) rather than the spec's draft columns.
+measure divides by 100 so it formats as a percentage); and none of the star's
+string document/department identifiers can key a relationship —
+`purchase_document` and `department_name` are not unique, and even
+`document_bk` collides under the VertiPaq engine's case-insensitive string
+comparison (49 real document pairs differ only in casing, e.g.
+`0820|22IT-0154` vs `0820|22it-0154`) — so all four mart relationships key on
+`business_unit`. The amendments mart therefore relates to `dim_department`,
+not `fact_document`.
 
 `python powerbi/build_report.py` generates the whole report file: the
 **chrome** (sidebar — its 1px dividers and 3px active-page bar are below the

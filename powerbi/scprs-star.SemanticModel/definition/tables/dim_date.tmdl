@@ -100,8 +100,11 @@ table dim_date
 						{"day", Int64.Type},
 						{"fiscal_year", Int64.Type},
 						{"fiscal_quarter", Int64.Type}
-					})
+					}),
+					// the star's unknown-date member (date_key 0) has a null full_date,
+					// which a marked date table must not carry
+					NoUnknown = Table.SelectRows(Typed, each [full_date] <> null)
 				in
-					Typed
+					NoUnknown
 
 	annotation PBI_ResultType = Table
