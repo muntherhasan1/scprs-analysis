@@ -14,8 +14,14 @@ Finding semantics:
   * ``ground_truth_gap`` (error) — the site has materially more rows than the
     store for a SETTLED month (older than ``settle_days``). Settled months only
     accrete slowly; a gap past ``tolerance_pct`` means lost or never-loaded data.
-  * ``recent_drift`` (warn) — same gap on a recent month; expected, the site
-    accretes ahead of our scrape cadence.
+  * ``stale_summary`` (error) — a recent but ENDED month (over
+    ``stale_after_days`` past its last day) missing more than
+    ``stale_gap_pct`` of the site's rows. The scheduled summary refresh
+    re-covers every unit every few days, so a gap that size means the refresh
+    stopped. (2026-10: no refresh existed; Aug-Oct sat 99.9% missing for
+    weeks while this probe called it ``recent_drift``.)
+  * ``recent_drift`` (warn) — a smaller gap on a recent month; expected, the
+    site accretes ahead of our refresh cadence.
   * ``store_ahead`` (warn) — the store has MORE rows than the site: either the
     site pruned documents or our store double-loaded; worth eyes either way.
   * ``window_truncated`` (warn) — a sampled month hit the 65k export cap and
@@ -38,15 +44,18 @@ import sqlite3
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
-from .model import DB_PATH
+# The coverage policy window lives in model (shared with `model refresh`);
+# 8660 additionally holds 2016+, which sampling from the policy window still
+# validates.
+from .model import DB_PATH, POLICY_START
 
-# The coverage policy: every loaded unit is expected to hold this window (the
-# last-5 + next-2 fiscal-year priority range; 8660 additionally holds 2016+,
-# which sampling from the policy window still validates).
-POLICY_START = datetime.date(2021, 7, 1)
 DEFAULT_SAMPLES = 5
 DEFAULT_TOLERANCE_PCT = 2.0
 DEFAULT_SETTLE_DAYS = 60
+# stale_summary: the refresh rotation re-covers each unit every ~3 days, so
+# two weeks after a month ends it should hold far more than half the site.
+DEFAULT_STALE_AFTER_DAYS = 14
+DEFAULT_STALE_GAP_PCT = 50.0
 
 
 @dataclass
@@ -148,10 +157,18 @@ def check_window(
         )
     gap = site - store
     gap_pct = 100.0 * gap / site
-    settled = (today - datetime.date.fromisoformat(iso_last)).days > settle_days
+    age_days = (today - datetime.date.fromisoformat(iso_last)).days
+    settled = age_days > settle_days
     detail = f"site={site} store={store} (missing {gap}, {gap_pct:.1f}%)"
     if settled and gap_pct > tolerance_pct:
         return Finding("ground_truth_gap", "error", scope, detail + " on a SETTLED month")
+    if age_days > DEFAULT_STALE_AFTER_DAYS and gap_pct > DEFAULT_STALE_GAP_PCT:
+        return Finding(
+            "stale_summary",
+            "error",
+            scope,
+            detail + f" {age_days}d after month end — is the summary refresh running?",
+        )
     return Finding("recent_drift" if not settled else "small_gap", "warn", scope, detail)
 
 

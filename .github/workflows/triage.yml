@@ -9,6 +9,7 @@ on:
   workflow_run:
     workflows:
       - "Enrich (Wave 2)"
+      - "Warehouse refresh (Wave 2c)"
       - "CMAS refresh (Wave 2)"
       - "eProcure registry refresh"
       - "Deploy MCP Space"

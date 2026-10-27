@@ -1,0 +1,118 @@
+name: Summary refresh
+
+# Keeps every loaded unit's SCPRS summary current. Until 2026-10 nothing did:
+# `purchases` was only written by the dispatch-only Summary build, so the
+# store froze at the 2026-07-28 load — Aug-Oct sat 99.9% missing for weeks,
+# and every late-entered document and amendment (version bump) on older
+# contracts was invisible to enrichment.
+#
+# Each run re-scrapes the FULL window of the least-recently-refreshed units
+# (`model refresh`: from the earlier of the policy start and the unit's stored
+# first day, so it can only re-cover or widen) until the budget is spent. The
+# full window — not a trailing slice — is what catches amendments on old
+# contracts. All 24 units took ~2h20m on 2026-07-28 (34 units after the
+# 2026-10 wave: est. ~3h), so a 60-min daily budget cycles the whole store
+# every ~3 days. A reload also reopens enriched days
+# that gained new/amended documents, so enrich drills them.
+on:
+  schedule:
+    # Daily 10:37 UTC — in the quiet gap after the 09:17 enrich slot (~70m)
+    # and before 12:17; warehouse-refresh at 13:47 picks the result up. The
+    # writer lock queues it behind any overlap.
+    - cron: "37 10 * * *"
+  workflow_dispatch:
+    inputs:
+      business_units:
+        description: Comma-separated BU codes to refresh (blank = rotation order)
+        default: ""
+      budget_minutes:
+        description: Start no new unit after this many minutes (must stay well under timeout-minutes)
+        default: "60"
+
+permissions:
+  contents: read
+
+# Single-writer guarantee shared with enrich/summary-build/CMAS/eProcure:
+# queue, never cancel (a writer killed mid-upload could corrupt the dataset).
+concurrency:
+  group: scprs-operational-writer
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    # Backstop only — `refresh --budget-minutes` starts no unit after the
+    # budget, so worst case = setup (usually ~2m, but 13m observed on
+    # 2026-10-26 run 40353722312: slow apt for playwright --with-deps) +
+    # budget 60m + the slowest unit finishing (3540 solo: 50m on 2026-07-28,
+    # run 30325120879) + publish ~3m ≈ 126m. 150 keeps headroom over that;
+    # if 3540 grows past it, split it into its own dispatch first.
+    timeout-minutes: 150
+    env:
+      PYTHONUNBUFFERED: "1" # a killed run must still show how far it got
+      SCPRS_DATASET: ${{ vars.SCPRS_DATASET || 'munther-hasan/scprs-operational-db' }}
+      HF_SCPRS_TOKEN: ${{ secrets.HF_SCPRS_TOKEN }}
+      PLAYWRIGHT_NO_SANDBOX: "1"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt "huggingface_hub>=0.25"
+          playwright install --with-deps chromium
+
+      - name: Fetch scprs.db from the dataset
+        run: python -m src.data_sync fetch-operational
+
+      # Every unit is gated before it is written (row-cap hit, empty result,
+      # or shrink past tolerance → refused, stored rows untouched), so the
+      # store is consistent whichever units succeeded. The step itself always
+      # exits 0 and reports through outputs: the units that DID refresh still
+      # publish, and the last step fails the run so triage alerts.
+      - name: Refresh summaries (gated per unit)
+        id: refresh
+        env:
+          IN_BUS: ${{ inputs.business_units }}
+          IN_BUDGET: ${{ inputs.budget_minutes }}
+        run: |
+          set +e
+          args=(--budget-minutes "${IN_BUDGET:-60}")
+          for bu in $(echo "$IN_BUS" | tr ',' ' '); do args+=(--bu "$bu"); done
+          start=$SECONDS
+          python -m src.model refresh "${args[@]}" 2>&1 | tee refresh.log
+          rc=${PIPESTATUS[0]}
+          result=$(grep -E '^RESULT ' refresh.log | tail -1)
+          refreshed=$(echo "$result" | sed -nE 's/.*refreshed=([0-9]+).*/\1/p')
+          echo "rc=$rc" >> "$GITHUB_OUTPUT"
+          echo "refreshed=${refreshed:-0}" >> "$GITHUB_OUTPUT"
+          {
+            echo "### Summary refresh (budget ${IN_BUDGET:-60}m)"
+            echo '```'
+            grep -E '^  [0-9A-Z]{4}: |REFUSED|ERROR|budget|^RESULT' refresh.log
+            echo "refresh step took $(( (SECONDS - start) / 60 ))m"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ -z "$result" ]; then
+            echo "::error::refresh crashed before reporting a RESULT line (exit $rc)"
+          fi
+          exit 0
+
+      - name: Publish scprs.db back to the dataset
+        if: steps.refresh.outputs.refreshed != '0'
+        run: python -m src.data_sync publish-operational
+
+      - name: Fail on refused or errored units
+        if: steps.refresh.outputs.rc != '0'
+        env:
+          RC: ${{ steps.refresh.outputs.rc }}
+        run: |
+          echo "::error::summary refresh exited $RC — a unit was refused by its gate or errored (see the step summary). Units that succeeded WERE published; the failed ones retry next run."
+          exit 1

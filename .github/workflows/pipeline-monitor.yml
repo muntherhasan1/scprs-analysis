@@ -13,6 +13,9 @@ name: Pipeline monitor
 #      not happening at all", whatever the cause.
 #   3. serve dataset newest-commit age — catches "running but nothing reaches
 #      the Spaces" (the silent-staleness failure mode).
+#   4. last SUCCESSFUL "Summary refresh" run age — the summary has no other
+#      writer, so a dead refresh silently freezes `purchases` (2026-10: three
+#      months missing before anything noticed).
 #
 # Findings open/update one idempotent alert issue (keep-warm pattern) and the
 # run fails red; recovery auto-closes it. On a clean pass it pings the
@@ -39,13 +42,23 @@ concurrency:
 
 env:
   ALERT_LABEL: pipeline-monitor-alert
-  # Enrich publishes every 3h; 9h = two missed slots + ~2.5h runtime headroom
-  # (a healthy full-budget run may conclude ~2.5h after its slot under the
-  # 150m backstop). Detection of a two-missed-slot outage can slip one 6h
+  # Enrich publishes every 3h; 9h = two missed slots + runtime headroom (a
+  # healthy full-budget run concludes ~1.5h after its slot under the 95m
+  # backstop). Detection of a two-missed-slot outage can slip one 6h
   # monitor cycle — accepted: the dead-man's switch (~14h grace) is the outer
   # bound, and tightening below ~9h would false-alert on routine GitHub cron
   # lateness (slots observed firing up to ~3h late).
   MAX_AGE_HOURS: "9"
+  # Serve commits come from warehouse-refresh.yml, every 6h with a 61–120m+
+  # build: healthy worst case ≈ 6h gap + ~1h duration spread + ~3h cron
+  # lateness ≈ 10h; a fully missed slot pushes the age past ~12h. 12 alerts
+  # on the first monitor tick after two consecutive slots produce no commit —
+  # the same two-missed-slots semantics as the enrich threshold above.
+  SERVE_MAX_AGE_HOURS: "12"
+  # Summary refresh runs daily: two missed slots (48h) + ~3h cron lateness +
+  # ~2h max duration. A single failed run doesn't page here (triage covers
+  # it); this catches "hasn't succeeded in two days, whatever the cause".
+  SUMMARY_MAX_AGE_HOURS: "53"
 
 jobs:
   monitor:
@@ -96,6 +109,23 @@ jobs:
             echo "finding=last successful 'Enrich (Wave 2)' run was ${age_h}h ago (threshold ${MAX_AGE_HOURS}h) — the pipeline is failing or not running" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Check last successful summary refresh age
+        id: summary
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          last=$(gh run list --workflow "Summary refresh" --status success \
+                   --limit 1 --json updatedAt --jq '.[0].updatedAt // empty')
+          if [ -z "$last" ]; then
+            echo "finding=no successful 'Summary refresh' run found in recent history" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          age_h=$(( ( $(date -u +%s) - $(date -u -d "$last" +%s) ) / 3600 ))
+          echo "last successful summary refresh: $last (${age_h}h ago, max ${SUMMARY_MAX_AGE_HOURS}h)"
+          if [ "$age_h" -ge "$SUMMARY_MAX_AGE_HOURS" ]; then
+            echo "finding=last successful 'Summary refresh' run was ${age_h}h ago (threshold ${SUMMARY_MAX_AGE_HOURS}h) — new SCPRS documents are not reaching the store" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Check serve dataset commit age
         id: serve
         env:
@@ -103,7 +133,7 @@ jobs:
           WAREHOUSE_DATASET: ${{ vars.WAREHOUSE_DATASET }}
         run: |
           set +e
-          out=$(python -m src.pipeline_monitor serve-age --max-hours "$MAX_AGE_HOURS")
+          out=$(python -m src.pipeline_monitor serve-age --max-hours "$SERVE_MAX_AGE_HOURS")
           rc=$?
           echo "$out"
           if [ "$rc" -ne 0 ]; then
@@ -118,29 +148,31 @@ jobs:
             -d "Out-of-band pipeline monitor finding" 2>/dev/null || true
 
       - name: Alert on findings
-        if: steps.enrich.outputs.finding != '' || steps.serve.outputs.finding != ''
+        if: steps.enrich.outputs.finding != '' || steps.serve.outputs.finding != '' || steps.summary.outputs.finding != ''
         env:
           GH_TOKEN: ${{ github.token }}
           F1: ${{ steps.enrich.outputs.finding }}
           F2: ${{ steps.serve.outputs.finding }}
+          F3: ${{ steps.summary.outputs.finding }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           body="Out-of-band monitor findings:"$'\n'
           [ -n "$F1" ] && body="$body"$'\n'"- $F1"
           [ -n "$F2" ] && body="$body"$'\n'"- $F2"
-          body="$body"$'\n\n'"This fires when the pipeline stops running or stops reaching the Spaces — the failure class workflow_run triage cannot see. Check the Enrich workflow's recent runs first."$'\n\n'"Run: $RUN_URL"
+          [ -n "$F3" ] && body="$body"$'\n'"- $F3"
+          body="$body"$'\n\n'"This fires when the pipeline stops running or stops reaching the Spaces — the failure class workflow_run triage cannot see. A stale enrich age points at the Enrich workflow; a stale serve commit points at Warehouse refresh; a stale summary refresh points at Summary refresh."$'\n\n'"Run: $RUN_URL"
           existing=$(gh issue list --label "$ALERT_LABEL" --state open \
             --json number --jq '.[0].number')
           if [ -n "$existing" ]; then
             echo "Commenting on existing alert issue #$existing"
             gh issue comment "$existing" --body "$body"
           else
-            gh issue create --title "🔴 Pipeline monitor: enrichment or serve refresh has stopped" \
+            gh issue create --title "🔴 Pipeline monitor: enrichment, serve, or summary refresh has stopped" \
               --label "$ALERT_LABEL" --body "$body"
           fi
 
       - name: Resolve on recovery
-        if: steps.enrich.outputs.finding == '' && steps.serve.outputs.finding == ''
+        if: steps.enrich.outputs.finding == '' && steps.serve.outputs.finding == '' && steps.summary.outputs.finding == ''
         env:
           GH_TOKEN: ${{ github.token }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
@@ -149,14 +181,14 @@ jobs:
             --json number --jq '.[].number'); do
             echo "Resolving alert issue #$n"
             gh issue close "$n" \
-              --comment "✅ Recovered — enrich runs and serve commits are fresh again. Run: $RUN_URL"
+              --comment "✅ Recovered — enrich runs, serve commits, and summary refreshes are fresh again. Run: $RUN_URL"
           done
 
       # The one alarm OUTSIDE GitHub: ping only on a clean pass, so the
       # external check pages on unhealthy AND on "the monitor itself died".
       # Skips quietly until the HEALTHCHECK_PING_URL secret is configured.
       - name: Dead-man's switch ping
-        if: steps.enrich.outputs.finding == '' && steps.serve.outputs.finding == ''
+        if: steps.enrich.outputs.finding == '' && steps.serve.outputs.finding == '' && steps.summary.outputs.finding == ''
         env:
           PING: ${{ secrets.HEALTHCHECK_PING_URL }}
         run: |
@@ -169,7 +201,7 @@ jobs:
           fi
 
       - name: Fail the run on findings
-        if: steps.enrich.outputs.finding != '' || steps.serve.outputs.finding != ''
+        if: steps.enrich.outputs.finding != '' || steps.serve.outputs.finding != '' || steps.summary.outputs.finding != ''
         run: |
           echo "::error::pipeline monitor found problems — see the alert issue"
           exit 1

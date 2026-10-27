@@ -9,7 +9,7 @@ name: CMAS refresh (Wave 2)
 on:
   schedule:
     # Daily — CMAS agreements change slowly. Enrich now runs every 3h (17 */3),
-    # so 06:37 trails the 06:17 slot and may QUEUE up to ~150 min (the enrich
+    # so 06:37 trails the 06:17 slot and may QUEUE up to ~95 min (the enrich
     # timeout backstop) on the shared writer lock — safe by design (queue,
     # never cancel), just occasionally slow.
     - cron: "37 6 * * *"

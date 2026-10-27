@@ -1,10 +1,13 @@
 name: Enrich (Wave 2)
 
-# Wave 2b+2c: scheduled cloud enrichment and warehouse refresh (plus the original
-# manual canary mode). Each run does the fetch -> enrich -> integrity-gate ->
-# publish round-trip on scprs.db (proven end-to-end on 2026-07-20, run
-# 29763141085), then rebuilds the warehouse, publishes the serve DB, and
-# best-effort restarts the Spaces — the fully device-free loop.
+# Wave 2b: scheduled cloud enrichment (plus the original manual canary mode).
+# Each run does the fetch -> enrich -> integrity-gate -> publish round-trip on
+# scprs.db (proven end-to-end on 2026-07-20, run 29763141085). The warehouse
+# rebuild / serve refresh that used to follow in this job moved to its own
+# workflow (warehouse-refresh.yml) on 2026-08-14: the silver-layer build grew
+# to 61–120 min and the combined job could no longer hold a full 70-min enrich
+# budget AND the rebuild under any sane backstop (6 straight 150-min timeout
+# kills, 08-14..15).
 #
 # Scheduled runs pick the business unit MOST IN NEED automatically
 # (`health --next-bu`: never-enriched first, then least-recently-advanced), so
@@ -13,10 +16,12 @@ name: Enrich (Wave 2)
 on:
   schedule:
     # Every 3 hours, offset from the top of the hour. 8 runs/day x limit 50
-    # ≈ 400 day-slices/day. Safe at this density: the 150-min timeout-minutes
-    # backstop is under the 180-min slot gap, and the
+    # ≈ 400 day-slices/day. Safe at this density: the 95-min timeout-minutes
+    # backstop is well under the 180-min slot gap, and the
     # scprs-operational-writer concurrency group QUEUES (never cancels) any
     # overlap, so back-to-back slots serialize rather than collide.
+    # warehouse-refresh.yml runs 90 min behind every other slot to pick up
+    # the freshly published scprs.db.
     - cron: "17 */3 * * *"
   workflow_dispatch:
     inputs:
@@ -50,23 +55,18 @@ jobs:
   enrich:
     runs-on: ubuntu-latest
     # Backstop only — enrich self-budgets (--budget-minutes 70) and exits
-    # cleanly with whatever it completed. Measured basis (2026-08-04, run
-    # 30894971044): setup+fetch ~2m + enrich budget 70m + checks/publish ~2m +
-    # warehouse rebuild + serve export ~37m + publish/verify ~3m ≈ 114m worst
-    # case. (At 90 the backstop fired on ~1/3 of runs whenever the slice used
-    # its full budget — issue #102.) The rebuild term GROWS CONTINUOUSLY
-    # (~2.7 min/day measured 07/24→08/04: 9.6m → ~39m) because enrichment
-    # detail rows accumulate 8 runs/day — it is not an episodic volume event,
-    # so any fixed value here is a stopgap pending decoupling the rebuild from
-    # this job. 150 puts the full-budget kill boundary at ~75m of rebuild
-    # (~150−72m pre-rebuild−3m tail): ~36m of headroom ≈ two weeks of growth
-    # past the 50m tripwire below, while staying under the 180m cron slot gap.
-    # This timeout should never fire unless the
+    # cleanly with whatever it completed. Measured basis (2026-08-15, run
+    # 31857549467): setup+fetch ~2m + enrich budget 70m + checks/publish ~3m
+    # ≈ 75m worst case now that the warehouse rebuild lives in
+    # warehouse-refresh.yml (its growth was what kept eroding this backstop —
+    # 90 → 150 → killed anyway). 95 gives ~20m of headroom over a fixed-cost
+    # step list with no growing term, while staying far under the 180m cron
+    # slot gap. This timeout should never fire unless the
     # browser truly wedges; when it does, the run concludes `cancelled`, which
     # the triage workflow treats like a failure (the 2026-07-20..23 livelock —
     # 12 straight timeout kills on BU 3540 with zero alert — must stay loud).
     # HF dataset commits are atomic, so a kill can't half-publish scprs.db.
-    timeout-minutes: 150
+    timeout-minutes: 95
     env:
       # Unbuffered stdout: a killed run must still show how far it got — the
       # livelock above was invisible partly because Python's block-buffered
@@ -198,87 +198,6 @@ jobs:
       - name: Publish scprs.db back to the dataset
         run: python -m src.data_sync publish-operational
 
-      # ---- Wave 2c: refresh the served warehouse from the just-enriched store ----
-      # scprs.db is already published above, so a failure below never loses
-      # enrichment progress — it only leaves the Spaces serving the previous
-      # serve-DB snapshot. `warehouse build` has its own error-severity DQ gate
-      # (non-zero exit on failure), so a bad build never reaches the publish step.
-      - name: Rebuild warehouse + export serve DB
-        run: |
-          set -o pipefail
-          start=$SECONDS
-          python -m src.warehouse build 2>&1 | tee build.log
-          python -m src.warehouse serve-export 2>&1 | tee -a build.log
-          {
-            echo "### Warehouse rebuild"
-            echo '```'
-            grep -F "build timings:" build.log | tail -1
-            grep -F "serve-export:" build.log | tail -1
-            echo "rebuild step took $(( (SECONDS - start) / 60 ))m $(( (SECONDS - start) % 60 ))s"
-            echo '```'
-          } >> "$GITHUB_STEP_SUMMARY"
-          # Duration-erosion tripwire (report-only). Basis: 2026-08-04 (run
-          # 30894971044): build+export ~37 min, growing ~2.7 min/day as
-          # enrichment rows accumulate. The 150-min job backstop kills a
-          # full-budget run once this step passes ~75 min, so the threshold
-          # MUST sit well below that boundary to warn ahead of kills — 50 min
-          # gives ~2 weeks of lead time at trend. Caveat: this check only runs
-          # when the step COMPLETES; a run killed mid-rebuild never reaches it
-          # (under-budget runs are the reliable signal). When it fires, plan
-          # the rebuild decoupling — don't just raise the backstop again (the
-          # enrich-livelock lesson, build edition).
-          if [ $(( SECONDS - start )) -gt 3000 ]; then
-            echo "::warning::warehouse rebuild took $(( (SECONDS - start) / 60 ))m (>50m tripwire) — check the build-timings trend in recent step summaries"
-          fi
-
-      - name: Publish serve DB
-        env:
-          HF_WAREHOUSE_TOKEN: ${{ secrets.HF_WAREHOUSE_TOKEN }}
-        run: >
-          python -m src.data_sync publish
-          --dataset "${{ vars.WAREHOUSE_DATASET || 'munther-hasan/scprs-warehouse-data' }}"
-
-      # Restart the Spaces so they re-fetch the serve DB at boot. Best-effort
-      # for the (frozen) chat Space, but the MCP Space's restart outcome is
-      # load-bearing (#45): if it never rebooted, go-live would inevitably see
-      # old markers and the old logic ROLLED BACK GOOD DATA on every cycle.
-      # A failed MCP restart now skips go-live/rollback and fails the run with
-      # the real cause (a token problem) at the end.
-      - name: Restart Spaces (best-effort)
-        id: restart
-        env:
-          HF_DEPLOY_TOKEN: ${{ secrets.HF_DEPLOY_TOKEN }}
-          MCP_SPACE: ${{ vars.MCP_SPACE || 'munther-hasan/scprs-warehouse-mcp' }}
-        run: |
-          set +e
-          python -m src.data_sync restart-spaces --require "$MCP_SPACE"
-          rc=$?
-          set -e
-          if [ "$rc" -ne 0 ]; then
-            echo "restart_failed=1" >> "$GITHUB_OUTPUT"
-            echo "::warning::MCP Space restart did not happen — data IS published; skipping go-live (nothing to verify) and NOT rolling back"
-          fi
-
-      # Observability extended to deploys (retrospective action #4): verify over
-      # the real MCP channel that the rebooted Space serves the snapshot THIS run
-      # published. A failure here means the data is safe but NOT live — the
-      # silent-staleness failure mode of 2026-07-20, made loud. Skips (exit 0)
-      # when the MCP_VERIFY_TOKEN secret is unset. Exit codes are evidence-graded
-      # (#45): 1 = Space up but serving a DIFFERENT snapshot (roll back);
-      # 2 = could not observe (boot timeout / unreachable — fail, don't touch).
-      - name: Verify go-live (Space serves this build)
-        id: golive
-        if: steps.restart.outputs.restart_failed != '1'
-        env:
-          MCP_VERIFY_TOKEN: ${{ secrets.MCP_VERIFY_TOKEN }}
-        run: |
-          set +e
-          python -m src.golive_check
-          rc=$?
-          set -e
-          echo "rc=$rc" >> "$GITHUB_OUTPUT"
-          exit $rc
-
       # The one alarm outside GitHub (#44): a healthy end-to-end run pings the
       # dead-man's switch; the external service pages when pings stop, whatever
       # the cause — including "GitHub disabled every cron in this repo". The
@@ -297,33 +216,9 @@ jobs:
             echo "HEALTHCHECK_PING_URL not set — external dead-man's switch inactive (see #44)"
           fi
 
-      # Wave 3 auto-rollback, evidence-graded (#45): revert the serve dataset to
-      # its prior (last-good) revision ONLY on rc=1 — the Space is up and
-      # verifiably serving a different snapshot (positive evidence). rc=2
-      # (timeout / unreachable) proves nothing about the data: the run fails
-      # loudly but leaves the publish alone — the old on-any-failure trigger
-      # would have rolled back good data every 3h on a mere token rotation.
-      - name: Roll back serve DB on verified mismatch
-        if: ${{ always() && steps.golive.outputs.rc == '1' }}
-        env:
-          HF_WAREHOUSE_TOKEN: ${{ secrets.HF_WAREHOUSE_TOKEN }}
-          HF_DEPLOY_TOKEN: ${{ secrets.HF_DEPLOY_TOKEN }}
-        run: >
-          python -m src.data_sync rollback-serve
-          --dataset "${{ vars.WAREHOUSE_DATASET || 'munther-hasan/scprs-warehouse-data' }}"
-
-      # Deferred failure for a skipped go-live: the publish chain completed (no
-      # rollback needed, nothing lost) but the refresh is NOT live — fail with
-      # the actual cause so triage names the token, not a phantom deploy issue.
-      - name: Fail on restart-token problem
-        if: ${{ always() && steps.restart.outputs.restart_failed == '1' }}
-        run: |
-          echo "::error::MCP Space restart failed — check HF_DEPLOY_TOKEN (write scope on the Space repo). Data is published; reboot the Space manually or fix the token for the next cron."
-          exit 1
-
-      # Deferred failure for canary NOT_FOUND (#47): everything published and
-      # went live, but the canary has no fixture to score against — alert via a
-      # red run + triage without having forfeited any banked work.
+      # Deferred failure for canary NOT_FOUND (#47): everything published, but
+      # the canary has no fixture to score against — alert via a red run +
+      # triage without having forfeited any banked work.
       - name: Escalate canary target-not-found
         if: ${{ always() && steps.wave1.outputs.canary_notfound == '1' }}
         run: |

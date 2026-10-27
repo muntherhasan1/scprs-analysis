@@ -112,7 +112,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
-          body="$(cat recon.log)"$'\n\n'"An ERROR here means a settled month has materially fewer rows in the store than on the live site — lost or never-loaded data. Re-dispatch 'Summary build' for the affected unit with its FULL window to repair, then re-run this probe targeted (bu/month inputs) to confirm."$'\n\n'"Run: $RUN_URL"
+          body="$(cat recon.log)"$'\n\n'"A ground_truth_gap ERROR means a settled month has materially fewer rows in the store than on the live site — lost or never-loaded data. A stale_summary ERROR means a recently ended month is mostly missing — the scheduled 'Summary refresh' has stopped or keeps failing for that unit (check its runs). Repair either by dispatching 'Summary refresh' with the unit in its bu input (it derives the FULL window itself), then re-run this probe targeted (bu/month inputs) to confirm."$'\n\n'"Run: $RUN_URL"
           existing=$(gh issue list --label "$RECON_LABEL" --state open \
             --json number --jq '.[0].number')
           if [ -n "$existing" ]; then

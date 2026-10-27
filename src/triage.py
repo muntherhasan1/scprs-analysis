@@ -42,10 +42,25 @@ _HINTS: dict[str, dict[str, str]] = {
             "correctly blocked — this is a real data-quality signal. Inspect the "
             "enriched data / `dw_dq_results` before the next run."
         ),
+        "canary target-not-found": (
+            "The canary's fixture document is no longer findable on the site (archive "
+            "purge or availability change) — the parser is unproven, not indicted, and "
+            "the run's enrichment WAS published. Recapture the fixture from an "
+            "already-drilled document: `python -m src.canary --capture --document <id>`."
+        ),
+    },
+    "Warehouse refresh (Wave 2c)": {
+        "_default": (
+            "The scheduled warehouse rebuild / serve refresh failed. It only READS "
+            "the published `scprs.db` snapshot, so no enrichment progress is at "
+            "risk — the Spaces just keep serving the previous serve-DB snapshot "
+            "until the next successful refresh."
+        ),
         "Rebuild warehouse": (
-            "The warehouse build failed its error-tier DQ gate — check "
-            "`dw_dq_results`. `scprs.db` is already published, so enrichment "
-            "progress is safe; only the serve refresh was blocked."
+            "The warehouse build failed its error-tier DQ gate (check "
+            "`dw_dq_results`) or the job's `timeout-minutes` killed it mid-build — "
+            "compare the build-timings trend in recent step summaries (the silver "
+            "layer dominates and grows with enrichment volume)."
         ),
         "Publish serve DB": (
             "The serve-DB publish failed — check the `HF_WAREHOUSE_TOKEN` scope and "
@@ -64,11 +79,24 @@ _HINTS: dict[str, dict[str, str]] = {
             "rolled back; fix the token (write scope on the Space repo) or reboot the "
             "Space manually to serve the new snapshot."
         ),
-        "canary target-not-found": (
-            "The canary's fixture document is no longer findable on the site (archive "
-            "purge or availability change) — the parser is unproven, not indicted, and "
-            "the run's enrichment WAS published. Recapture the fixture from an "
-            "already-drilled document: `python -m src.canary --capture --document <id>`."
+    },
+    "Summary refresh": {
+        "_default": (
+            "The scheduled summary refresh failed. Each unit is gated before it is "
+            "written, and units that refreshed cleanly WERE published — only the "
+            "failed ones are stale, and they are first in line next run."
+        ),
+        "Refresh summaries": (
+            "The refresh crashed before reporting a result — usually the headless "
+            "scraper (the FI$Cal SCPRS site throttling Actions' cloud IPs, or a page "
+            "change; see `src/scprs.py`). Nothing was published."
+        ),
+        "Fail on refused": (
+            "A unit was **refused by its gate** (export hit the 65k row cap, the site "
+            "returned no rows, or the re-scrape would shrink the unit past tolerance) "
+            "or its scrape errored — the step summary names the unit and reason. A "
+            "transient error self-heals next run; a repeated refusal on one unit "
+            "needs a look (e.g. `python -m src.recon --bu <BU> --month <YYYY-MM>`)."
         ),
     },
     "CMAS refresh (Wave 2)": {

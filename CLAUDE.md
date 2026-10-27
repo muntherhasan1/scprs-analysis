@@ -67,6 +67,7 @@ pre-commit run --all-files                   # everything at once
 # Pipeline (each stage builds on the previous store)
 python -m src.model build 8660 01/01/2016 07/08/2026   # scrape summary -> scprs.db
 python -m src.model enrich 8660 07/01/2021 06/30/2028 --limit 200 --newest-first  # drill PO Details
+python -m src.model refresh --budget-minutes 60        # re-scrape loaded units' full windows (daily cron)
 python -m src.warehouse build                          # scprs.db -> warehouse.db (all layers + DQ)
 
 # Inspection
@@ -119,6 +120,16 @@ doc) and resumes doc-by-doc next run via a skip set (`_drilled_docs`), and is
 only recorded once its grid is fully covered. The CI cron relies on this —
 without it, a business unit whose single day exceeds the job timeout livelocks
 the scheduler (killed → unrecorded → re-picked; see the 2026-07 BU 3540 incident).
+
+**The summary is kept current by `model refresh`, not `build`.** `build`
+replaces a unit's whole summary with the window you pass (narrower = data
+loss). `refresh` derives each unit's full window itself, gates the scrape
+before writing (row cap / empty / shrink → refused, rows untouched), and
+rotates least-recently-refreshed first (`summary_refresh`) — the daily
+`summary-refresh.yml` cron. Any reload also writes `details_reopen` for
+enriched days that gained late-entered or amended documents; `enrich` treats
+those as pending. Never delete from `details_progress` to reopen a day — its
+row count is a monotonic `contracts` metric.
 
 **`warehouse.py` is a medallion warehouse built by SQL-generating Python.**
 `build_all` runs bronze → silver → gold in one batch, logged in `dw_batch` with
