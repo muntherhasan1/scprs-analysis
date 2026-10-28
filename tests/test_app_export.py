@@ -148,3 +148,72 @@ def test_hhi_and_shard():
     assert app_export._hhi([]) == (0, 0.0, 0.0)
     assert app_export._shard("0000015235") == "35"
     assert app_export._shard("0820CFD") == "xx"
+
+
+def test_insights_vectors_overview_and_search(tmp_path):
+    out, counts = _build(tmp_path)
+
+    # Contract-size vector: every document lands in exactly one bucket.
+    sizes = {p.stem: _load(p) for p in (out / "insights" / "size").glob("*.json")}
+    assert set(sizes) == {"under-10k"}  # docs A (150) and B (5000)
+    assert sizes["under-10k"]["document_count"] == 2
+    assert sizes["under-10k"]["total_value"] == 5150.0  # current version only
+    assert sizes["under-10k"]["basis"] == "contracts"
+
+    # Acquisition vector rolls sub-types up to the base type.
+    acq = {p.stem for p in (out / "insights" / "acquisition").glob("*.json")}
+    assert acq == {"it-services", "non-it-services"}
+    it = _load(out / "insights" / "acquisition" / "it-services.json")
+    assert it["acquisition_type"] == "IT Services" and it["label"] == "IT services"
+    assert [s["key"] for s in it["size_mix"]] == ["under-10k"]
+
+    # Product category vector: line-item basis, longest UNSPSC prefix wins.
+    cats = {p.stem: _load(p) for p in (out / "insights" / "category").glob("*.json")}
+    assert set(cats) == {"it-equipment", "it-services"}  # 4323..., 8111... (not 81 engineering)
+    assert all(c["basis"] == "line_items" for c in cats.values())
+    assert cats["it-services"]["top_commodities"][0]["unspsc"] == "81111508"
+
+    ov = _load(out / "insights" / "overview.json")
+    meta = _load(out / "meta.json")
+    assert ov["headline"]["documents"] == meta["coverage"]["documents"]
+    assert ov["headline"]["total_value"] == meta["coverage"]["total_value"]
+    assert ov["headline"]["open_opportunities"] == 2
+    assert [m["key"] for m in ov["size_mix"]] == ["under-10k"]
+    assert round(sum(m["share_pct"] for m in ov["acquisition_mix"]), 1) == 100.0
+
+    # Search: departments carry curated aliases; vectors carry keywords.
+    search = _load(out / "search.json")["items"]
+    puc = next(i for i in search if i["type"] == "department" and i["key"] == "8660")
+    assert "CPUC" in puc["terms"]
+    assert any(i["type"] == "category" and "laptop" in i["terms"] for i in search)
+    index = _load(out / "departments" / "index.json")["items"]
+    assert "CPUC" in next(d for d in index if d["business_unit"] == "8660")["aliases"]
+    assert counts["insight_pages"] == len(sizes) + len(acq) + len(cats)
+
+
+def test_size_buckets_and_category_matcher():
+    assert app_export._size_bucket(None) is None
+    assert app_export._size_bucket(0) == "adjustment"
+    assert app_export._size_bucket(-50) == "adjustment"
+    assert app_export._size_bucket(9_999.99) == "under-10k"
+    assert app_export._size_bucket(10_000) == "10k-100k"
+    assert app_export._size_bucket(250_000) == "250k-500k"
+    assert app_export._size_bucket(10_000_000) == "10m-plus"
+    assert app_export._base_acquisition("NON-IT Services_Expert Witnesses") == "NON-IT Services"
+    assert app_export._base_acquisition(None) == "Unknown"
+    match = app_export._category_matcher(app_export.load_categories())
+    assert match("81111508") == "it-services"  # 8111 beats 81
+    assert match("81101500") == "engineering"
+    assert match("72141100") == "construction"
+    assert match("99999999") == match(None) == "other"
+
+
+def test_reference_files_are_consistent():
+    cats = app_export.load_categories()
+    keys = [c["key"] for c in cats]
+    assert len(keys) == len(set(keys)) and app_export.OTHER_CATEGORY[0] not in keys
+    prefixes = [p for c in cats for p in c["prefixes"]]
+    assert len(prefixes) == len(set(prefixes)), "a UNSPSC prefix maps to two categories"
+    valid = {r.split(",")[0] for r in warehouse.DEPARTMENTS_CSV.read_text().splitlines()[1:]}
+    aliases = app_export.load_aliases()
+    assert aliases and set(aliases) <= valid, set(aliases) - valid

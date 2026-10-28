@@ -19,6 +19,22 @@ python -m src.app_export --today 2026-07-25   # pin "open" solicitations to a sn
 | `departments/{bu}.json` | spend by fiscal year, acquisition mix, top canonical suppliers, canonical HHI, solicitation history, open solicitations |
 | `suppliers/index.json` | one row per canonical supplier (search) |
 | `suppliers/shard-{NN}.json` | supplier pages keyed by `canonical_id`; `NN` = its last two digits, `xx` for non-numeric ids |
+| `insights/overview.json` | the dashboard home: headline counts, spend by fiscal year (with `department_count` reporting each year), top departments and companies, acquisition / size / category mixes, solicitations closing soon |
+| `insights/{acquisition,size,category}/{key}.json` | one page per vector value: totals, trend, top departments and suppliers, concentration, plus a cross-mix (size mix, acquisition mix, or top UNSPSC commodities) |
+| `search.json` | small index (~60 KB) over departments (with aliases) and every vector value; suppliers stay in the lazy `suppliers/index.json` |
+
+Insight vectors:
+
+- **Acquisition type** rolls glued sub-types (`NON-IT Services_Expert Witnesses`, a
+  silver parsing gap on ~1% of documents) up to the base type before `_`.
+- **Contract size** buckets `grand_total` (`SIZE_BUCKETS`); `$0` and credits get
+  their own `adjustment` bucket so they don't read as small buys.
+- **Product category** maps line-item UNSPSC codes to ~15 plain-language
+  categories via `references/product_categories.csv` (longest prefix wins, so
+  `8111` IT services beats `81` engineering). It covers only itemized contracts:
+  `basis: "line_items"`, and the UI must say so.
+- **Department aliases** (Caltrans, CHP, DMV, …) come from
+  `references/department_aliases.csv`; add a row when a search misses.
 
 Rules the export enforces (don't move them into the front end):
 
