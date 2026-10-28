@@ -26,6 +26,10 @@ into its own `data/cmas.db` + CSVs. `python -m src.cmas extract`. The warehouse
 folds it in as an **optional side input** (like `supplier_enrichment.db`): skipped
 if `data/cmas.db` is absent. See `docs/CMAS.md`.
 
+`app_export.py` writes the planned vendor web app's static JSON (`data/app/`)
+from the serve DB, recomputing supplier share/HHI by canonical supplier. See
+`docs/VENDOR_APP.md`.
+
 `eprocure.py` is likewise standalone: Cal eProcure's SB/DVBE certified-supplier
 registry (headless Playwright on the same PeopleSoft host as SCPRS — the overlay
 APIs are not drivable without a browser) plus the lean CSCR event slices
