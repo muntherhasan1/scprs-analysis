@@ -10,6 +10,9 @@ front end never sums, dedupes or joins. Reads the slim serve DB (run
   departments/{bu}.json          one page's data per business unit
   suppliers/index.json           one row per canonical supplier (search)
   suppliers/shard-{NN}.json      supplier pages keyed by canonical_id; NN = last 2 digits
+  insights/overview.json         the dashboard home: headline, trends, mixes, closing soon
+  insights/{vector}/{key}.json   a page per acquisition type, size bucket, product category
+  search.json                    small index over departments (+ aliases) and the vectors
 
 Grain rules (the contract's): documents are current-version (``gold_document``);
 every supplier figure is per CANONICAL supplier computed from ``gold_document``
@@ -24,12 +27,13 @@ departments get ``loaded: false`` and null spend blocks, never zeros.
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import re
 import shutil
 import sqlite3
 from collections import defaultdict
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 from . import scprs
@@ -148,7 +152,9 @@ def _supplier_flags(con) -> dict[str, dict]:
     return flags
 
 
-def _departments(con, opps: list[dict], flags: dict[str, dict]) -> tuple[list[dict], dict]:
+def _departments(
+    con, opps: list[dict], flags: dict[str, dict], aliases: dict[str, list[str]] | None = None
+) -> tuple[list[dict], dict]:
     """(index rows, {bu: page payload}) for every business unit in dim_department."""
     names = {
         r["business_unit"]: r["department_name"]
@@ -220,6 +226,7 @@ def _departments(con, opps: list[dict], flags: dict[str, dict]) -> tuple[list[di
         row = {
             "business_unit": bu,
             "department_name": name,
+            "aliases": (aliases or {}).get(bu, []),  # curated: Caltrans, CHP, DMV, ...
             "loaded": loaded,
             "coverage_from": h["coverage_from"] if loaded else None,
             "coverage_to": h["coverage_to"] if loaded else None,
@@ -417,6 +424,349 @@ def _suppliers(con, flags: dict[str, dict]) -> tuple[list[dict], dict[str, dict]
     return index, shards
 
 
+# --------------------------------------------------------------------------- insights
+# Three "vectors" a vendor browses by, beside department and supplier. Acquisition
+# type and contract size cover every contract; product category comes from
+# line-item UNSPSC codes, so it covers only itemized contracts (basis
+# "line_items") and the UI must say so.
+
+# (key, label, lower bound inclusive, upper bound exclusive). grand_total <= 0
+# (credits, adjustments) gets its own bucket so it doesn't read as a small buy.
+SIZE_BUCKETS = (
+    ("adjustment", "$0 or adjustment", None, 0.0),
+    ("under-10k", "Under $10K", 0.0, 10_000.0),  # exclusive of 0 (see _size_bucket)
+    ("10k-100k", "$10K–$100K", 10_000.0, 100_000.0),
+    ("100k-250k", "$100K–$250K", 100_000.0, 250_000.0),
+    ("250k-500k", "$250K–$500K", 250_000.0, 500_000.0),
+    ("500k-1m", "$500K–$1M", 500_000.0, 1_000_000.0),
+    ("1m-5m", "$1M–$5M", 1_000_000.0, 5_000_000.0),
+    ("5m-10m", "$5M–$10M", 5_000_000.0, 10_000_000.0),
+    ("10m-plus", "$10M+", 10_000_000.0, None),
+)
+
+# Base acquisition types. 1% of documents carry the sub-type glued on
+# ("NON-IT Services_Expert Witnesses", a silver parsing gap); the part before
+# "_" rolls them up so the vector doesn't splinter into ~45 types.
+ACQUISITION_LABELS = {
+    "NON-IT Goods": "Goods (non-IT)",
+    "NON-IT Services": "Services (non-IT)",
+    "IT Goods": "IT goods",
+    "IT Services": "IT services",
+    "Telecom": "Telecom",
+    "Encumbrance Only": "Encumbrance only (funding record)",
+    "Unknown": "Unknown",
+}
+
+REFERENCES = Path(__file__).resolve().parent.parent / "references"
+ALIASES_CSV = REFERENCES / "department_aliases.csv"
+CATEGORIES_CSV = REFERENCES / "product_categories.csv"
+OTHER_CATEGORY = ("other", "Other / unclassified")
+
+
+def _slug(text: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")
+
+
+def _size_bucket(v) -> str | None:
+    if v is None:
+        return None
+    if v <= 0:
+        return SIZE_BUCKETS[0][0]  # $0 contracts and credits, not "small buys"
+    for key, _label, lo, hi in SIZE_BUCKETS:
+        if (lo is None or v >= lo) and (hi is None or v < hi):
+            return key
+    return None
+
+
+def _base_acquisition(t) -> str:
+    return (t or "Unknown").split("_", 1)[0].strip() or "Unknown"
+
+
+def load_aliases(path: Path = ALIASES_CSV) -> dict[str, list[str]]:
+    """{business_unit: [alias, ...]} from the curated CSV (missing file = none)."""
+    out: dict[str, list[str]] = defaultdict(list)
+    if Path(path).exists():
+        with open(path, encoding="utf-8", newline="") as f:
+            for r in csv.DictReader(f):
+                out[r["business_unit"].strip()].append(r["alias"].strip())
+    return out
+
+
+def load_categories(path: Path = CATEGORIES_CSV) -> list[dict]:
+    """Curated UNSPSC-prefix → plain-language category rows, file order."""
+    with open(path, encoding="utf-8", newline="") as f:
+        return [
+            {
+                "key": r["key"],
+                "label": r["label"],
+                "prefixes": r["unspsc_prefixes"].split(),
+                "keywords": [k.strip() for k in r["keywords"].split(";") if k.strip()],
+            }
+            for r in csv.DictReader(f)
+        ]
+
+
+def _category_matcher(categories: list[dict]):
+    """unspsc -> category key; the LONGEST matching prefix wins (8111 beats 81)."""
+    prefixes = sorted(
+        ((p, c["key"]) for c in categories for p in c["prefixes"]), key=lambda t: -len(t[0])
+    )
+
+    def match(unspsc) -> str:
+        code = str(unspsc or "")
+        return next((key for p, key in prefixes if code.startswith(p)), OTHER_CATEGORY[0])
+
+    return match
+
+
+# The slice sources: one temp table per vector with the same columns, so one
+# aggregation routine serves all three. Each SELECT is an internal constant.
+_DOC_SLICE = (
+    "SELECT {key} AS k, business_unit, purchase_document, canonical_id, canonical_name, "
+    "fiscal_year, grand_total AS v, {cross} AS x, NULL AS x_desc FROM gold_document"
+)
+_LINE_SLICE = (
+    "SELECT app_category(l.unspsc) AS k, l.business_unit, l.purchase_document, "
+    "d.canonical_id, d.canonical_name, l.fiscal_year, l.line_amount AS v, "
+    "l.unspsc AS x, l.category AS x_desc FROM gold_line_item l "
+    "JOIN gold_document d ON d.business_unit = l.business_unit "
+    "AND d.purchase_document = l.purchase_document"
+)
+_VECTORS = (
+    (
+        "acquisition",
+        _DOC_SLICE.format(key="app_acq(acquisition_type)", cross="app_size(grand_total)"),
+    ),
+    ("size", _DOC_SLICE.format(key="app_size(grand_total)", cross="app_acq(acquisition_type)")),
+    ("category", _LINE_SLICE),
+)
+
+
+_DOCS = "COUNT(DISTINCT business_unit || '|' || purchase_document) AS document_count"
+_Q_HEAD = (
+    "SELECT k, {docs}, COUNT(*) AS row_count, SUM(v) AS total_value "
+    "FROM temp.{t} WHERE k IS NOT NULL GROUP BY k"
+)
+_Q_BY_FY = (
+    "SELECT k, fiscal_year, {docs}, SUM(v) AS total_value FROM temp.{t} "
+    "WHERE k IS NOT NULL AND fiscal_year IS NOT NULL GROUP BY 1, 2 ORDER BY 2"
+)
+_Q_DEPTS = (
+    "SELECT k, business_unit, {docs}, SUM(v) AS total_value FROM temp.{t} "
+    "WHERE k IS NOT NULL GROUP BY 1, 2 ORDER BY total_value DESC"
+)
+_Q_SUPPLIERS = (
+    "SELECT k, canonical_id, MAX(canonical_name) AS canonical_name, {docs}, "
+    "SUM(v) AS total_value FROM temp.{t} WHERE k IS NOT NULL "
+    "GROUP BY 1, 2 ORDER BY total_value DESC"
+)
+_Q_CROSS = (
+    "SELECT k, x, MAX(x_desc) AS x_desc, {docs}, COUNT(*) AS row_count, "
+    "SUM(v) AS total_value FROM temp.{t} WHERE k IS NOT NULL AND x IS NOT NULL "
+    "GROUP BY 1, 2 ORDER BY total_value DESC"
+)
+
+
+def _slices(con, table: str, flags: dict[str, dict], dept_names: dict[str, str]) -> dict:
+    """{key: page payload} for one vector's temp table (internal constant name)."""
+
+    # {t} = the vector's temp table (internal constant); DOCS counts distinct contracts.
+    def q(sql: str) -> list[dict]:
+        return _rows(con, sql.replace("{docs}", _DOCS).format(t=table))
+
+    head = {r["k"]: r for r in q(_Q_HEAD)}
+    grand = sum(h["total_value"] or 0 for h in head.values())
+    by_fy, depts, sups, cross = (defaultdict(list) for _ in range(4))
+    for r in q(_Q_BY_FY):
+        by_fy[r.pop("k")].append({**r, "total_value": _money(r["total_value"])})
+    for r in q(_Q_DEPTS):
+        depts[r.pop("k")].append(r)
+    for r in q(_Q_SUPPLIERS):
+        sups[r.pop("k")].append(r)
+    for r in q(_Q_CROSS):
+        cross[r.pop("k")].append(r)
+
+    pages = {}
+    for k, h in head.items():
+        total = h["total_value"] or 0
+        n, hhi, top = _hhi([s["total_value"] for s in sups[k]])
+        pages[k] = {
+            "key": k,
+            "document_count": h["document_count"],
+            "line_count": h["row_count"],
+            "total_value": _money(total),
+            "share_of_total_pct": round(100 * total / grand, 1) if grand else None,
+            "spend_by_fiscal_year": by_fy[k],
+            "top_departments": [
+                {
+                    "business_unit": d["business_unit"],
+                    "department_name": dept_names.get(d["business_unit"], d["business_unit"]),
+                    "document_count": d["document_count"],
+                    "total_value": _money(d["total_value"]),
+                    "share_pct": round(100 * (d["total_value"] or 0) / total, 2) if total else None,
+                }
+                for d in depts[k][:TOP_N]
+            ],
+            "top_departments_total_count": len(depts[k]),
+            "top_suppliers": [
+                {
+                    "canonical_id": s["canonical_id"],
+                    "canonical_name": s["canonical_name"],
+                    "supplier_kind": _supplier_kind(s["canonical_id"]),
+                    "document_count": s["document_count"],
+                    "total_value": _money(s["total_value"]),
+                    "share_pct": round(100 * (s["total_value"] or 0) / total, 2) if total else None,
+                    **flags[s["canonical_id"]],
+                }
+                for s in sups[k][:TOP_N]
+            ],
+            "top_suppliers_total_count": len(sups[k]),
+            "concentration": {"supplier_count": n, "hhi": hhi, "top_supplier_pct": top},
+            "_cross": cross[k],
+        }
+    return pages
+
+
+def _insights(con, flags, dept_index, sup_index, opps, today, categories):
+    """(overview payload, {vector: {key: page}}, search items) — all precomputed."""
+    match = _category_matcher(categories)
+    con.create_function("app_size", 1, _size_bucket, deterministic=True)
+    con.create_function("app_acq", 1, _base_acquisition, deterministic=True)
+    con.create_function("app_category", 1, match, deterministic=True)
+    dept_names = {d["business_unit"]: d["department_name"] for d in dept_index}
+    size_labels = {k: label for k, label, _lo, _hi in SIZE_BUCKETS}
+    cat_meta = {c["key"]: c for c in categories}
+    cat_meta[OTHER_CATEGORY[0]] = {"label": OTHER_CATEGORY[1], "keywords": []}
+
+    vectors = {}
+    for vector, select in _VECTORS:
+        table = f"app_{vector}"
+        con.execute(f"DROP TABLE IF EXISTS temp.{table}")  # noqa: S608 — internal name
+        con.execute(f"CREATE TEMP TABLE {table} AS {select}")  # noqa: S608 — internal constants
+        vectors[vector] = _slices(con, table, flags, dept_names)
+
+    def mix(pages, labels, order=None):
+        keys = order or sorted(pages, key=lambda k: -(pages[k]["total_value"] or 0))
+        return [
+            {
+                "key": k,
+                "label": labels(k),
+                "document_count": pages[k]["document_count"],
+                "total_value": pages[k]["total_value"],
+                "share_pct": pages[k]["share_of_total_pct"],
+            }
+            for k in keys
+            if k in pages
+        ]
+
+    acq_label = lambda k: ACQUISITION_LABELS.get(k, k)  # noqa: E731
+    size_order = [k for k, *_ in SIZE_BUCKETS]
+    out: dict[str, dict] = {}
+    for vector, pages in vectors.items():
+        out[vector] = {}
+        for k, page in pages.items():
+            cross = page.pop("_cross")
+            if vector == "acquisition":
+                slug, label = _slug(k), acq_label(k)
+                page.update(kind="acquisition", key=slug, label=label, acquisition_type=k,
+                            basis="contracts")  # fmt: skip
+                by_size = {c["x"]: c for c in cross}
+                page["size_mix"] = [
+                    {"key": s, "label": size_labels[s],
+                     "document_count": by_size[s]["document_count"],
+                     "total_value": _money(by_size[s]["total_value"])}
+                    for s in size_order if s in by_size
+                ]  # fmt: skip
+            elif vector == "size":
+                slug, label = k, size_labels[k]
+                page.update(kind="size", label=label, basis="contracts")
+                page["acquisition_mix"] = [
+                    {"key": _slug(c["x"]), "label": acq_label(c["x"]),
+                     "document_count": c["document_count"], "total_value": _money(c["total_value"])}
+                    for c in cross
+                ]  # fmt: skip
+            else:
+                slug, label = k, cat_meta[k]["label"]
+                page.update(kind="category", label=label, basis="line_items",
+                            keywords=cat_meta[k]["keywords"])  # fmt: skip
+                page["top_commodities"] = [
+                    {"unspsc": c["x"], "description": c["x_desc"], "line_count": c["row_count"],
+                     "total_value": _money(c["total_value"])}
+                    for c in cross[:TOP_N]
+                ]  # fmt: skip
+                page["top_commodities_total_count"] = len(cross)
+            if vector != "category":
+                page.pop("line_count")
+            out[vector][slug] = page
+
+    fy = _rows(
+        con,
+        "SELECT fiscal_year, COUNT(*) AS document_count, SUM(grand_total) AS total_value, "
+        "COUNT(DISTINCT business_unit) AS department_count FROM gold_document "
+        "WHERE fiscal_year IS NOT NULL GROUP BY 1 ORDER BY 1",
+    )
+    week = (date.fromisoformat(today) + timedelta(days=7)).isoformat()
+    companies = [s for s in sup_index if s["supplier_kind"] == "company"]
+    overview = {
+        "headline": {
+            "documents": sum(d["document_count"] or 0 for d in dept_index),
+            "total_value": _money(sum(d["total_value"] or 0 for d in dept_index)),
+            "departments_loaded": sum(d["loaded"] for d in dept_index),
+            "departments_total": len(dept_index),
+            "company_count": len(companies),
+            "open_opportunities": len(opps),
+            "closing_within_7_days": sum(o["bid_close_date"] <= week for o in opps),
+            "open_sb_only": sum(o["sb_only"] for o in opps),
+            "open_dvbe_only": sum(o["dvbe_only"] for o in opps),
+        },
+        # department_count: how many departments report in that year — coverage
+        # varies by year, so a dip can be fewer departments, not less buying.
+        "spend_by_fiscal_year": [{**r, "total_value": _money(r["total_value"])} for r in fy],
+        "top_departments": [
+            {k: d[k] for k in ("business_unit", "department_name", "document_count", "total_value")}
+            for d in dept_index[:10]
+            if d["loaded"]
+        ],
+        "top_companies": [
+            {
+                k: s[k]
+                for k in (
+                    "canonical_id",
+                    "canonical_name",
+                    "document_count",
+                    "total_value",
+                    "department_count",
+                    "sb_certified",
+                    "dvbe_certified",
+                )
+            }
+            for s in companies[:10]
+        ],  # fmt: skip
+        "acquisition_mix": mix(out["acquisition"], lambda k: out["acquisition"][k]["label"]),
+        "size_mix": mix(out["size"], lambda k: size_labels[k], size_order),
+        "category_mix": mix(out["category"], lambda k: out["category"][k]["label"]),
+        "category_basis": "line_items",
+        "closing_soon": opps[:10],
+    }
+
+    aliases = {d["business_unit"]: d.get("aliases", []) for d in dept_index}
+    search = [
+        {"type": "department", "key": d["business_unit"], "label": d["department_name"],
+         "terms": [d["business_unit"], *aliases[d["business_unit"]]],
+         "total_value": d["total_value"], "loaded": d["loaded"]}
+        for d in dept_index
+    ]  # fmt: skip
+    for vector, pages in out.items():
+        for slug, p in pages.items():
+            terms = [p.get("acquisition_type", "")] if vector == "acquisition" else []
+            search.append(
+                {"type": vector, "key": slug, "label": p["label"],
+                 "terms": [t for t in (*terms, *p.get("keywords", [])) if t],
+                 "total_value": p["total_value"], "loaded": True}
+            )  # fmt: skip
+    return overview, out, search
+
+
 def export_app(
     serve_path: Path = SERVE_DB,
     app_dir: Path = APP_DIR,
@@ -442,8 +792,11 @@ def export_app(
         loaded = {r[0] for r in con.execute("SELECT DISTINCT business_unit FROM gold_document")}
         opps = _opportunities(con, today, loaded)
         flags = _supplier_flags(con)
-        dept_index, dept_pages = _departments(con, opps, flags)
+        dept_index, dept_pages = _departments(con, opps, flags, load_aliases())
         sup_index, sup_shards = _suppliers(con, flags)
+        overview, insight_pages, search = _insights(
+            con, flags, dept_index, sup_index, opps, today, load_categories()
+        )
         cov = con.execute(
             "SELECT COUNT(*), SUM(grand_total), MIN(start_date), MAX(start_date), "
             "SUM(line_count > 0) FROM gold_document"
@@ -502,6 +855,11 @@ def export_app(
         _write(staging / "suppliers" / f"shard-{nn}.json", {"suppliers": body}, generated_at)
         for nn, body in sorted(sup_shards.items())
     ]
+    sizes["overview"] = _write(staging / "insights" / "overview.json", overview, generated_at)
+    for vector, pages in insight_pages.items():
+        for key, page in pages.items():
+            _write(staging / "insights" / vector / f"{key}.json", page, generated_at)
+    sizes["search"] = _write(staging / "search.json", {"items": search}, generated_at)
     shutil.rmtree(app_dir, ignore_errors=True)
     staging.rename(app_dir)
 
@@ -513,6 +871,8 @@ def export_app(
         "supplier_shards": len(shard_bytes),
         "largest_shard_bytes": max(shard_bytes, default=0),
         "suppliers_index_bytes": sizes["suppliers_index"],
+        "insight_pages": sum(len(p) for p in insight_pages.values()),
+        "search_bytes": sizes["search"],
     }
     log(f"app-export: {app_dir} {counts}")
     return counts

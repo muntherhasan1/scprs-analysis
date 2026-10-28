@@ -1,0 +1,16 @@
+key,label,unspsc_prefixes,keywords
+construction,Construction & public works,72 30 22 95 71,road;highway;bridge;paving;asphalt;building;construction;contractor;public works;portable building;well drilling
+it-equipment,Computers & IT equipment,43 45 32,computer;laptop;notebook;desktop;server;network;software license;monitor;printer;camera;electronics
+it-services,IT & software services,8111 8116,software development;IT services;tech support;cloud;hosting;programming;systems integration;help desk;cybersecurity
+engineering,"Engineering, research & environmental services",81 77,engineering;architecture;research;environmental assessment;surveying;testing;geology;lab analysis
+professional,"Professional, legal & financial services",80 82 84,consulting;legal;expert witness;attorney;management;accounting;audit;insurance;financial;marketing;advertising;design
+vehicles,"Vehicles, fleet & transportation",25 78 15,vehicle;fleet;truck;auto parts;repair;maintenance;tires;fuel;oil;lubricant;towing;shipping;freight
+waste-land,"Waste, land & agriculture",76 11 70 10 21,waste;recycling;hazardous;disposal;landscaping;irrigation;agriculture;farming;forestry;herbicide;mowing
+safety,"Safety, security & uniforms",46 92 53,safety;protective equipment;PPE;gloves;security;alarm;surveillance;guard;uniform;clothing
+office,"Office supplies, printing & furniture",44 14 60 55 56 49,office supplies;toner;paper;printing;signs;furniture;chairs;pens;awards
+industrial,"Tools, industrial equipment & supplies",23 24 27 31 40 39 26 20 12 13,tools;hardware;industrial;machinery;filters;lighting;lamps;batteries;chemicals;HVAC;material handling
+medical,"Medical, lab & health",41 42 51 85,medical;laboratory;lab supplies;pharmaceutical;health care;clinic;medical equipment
+training-events,"Training, education & events",86 90,training;education;workshop;conference;meeting space;hotel;lodging
+telecom-utilities,Telecom & utilities,83,telecom;telephone;internet;cable;utilities;electricity;water service
+household,"Food, cleaning & household",47 48 50 52 91 54,janitorial;cleaning;food;beverage;water;kitchen;laundry;towels;linens
+community,Community & civic services,93 94,community services;nonprofit;social services;civic;taxes;fees
