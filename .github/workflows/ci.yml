@@ -60,7 +60,8 @@ jobs:
           -r requirements-dev.txt
 
       - name: Dependency vulnerability scan (pip-audit, web app)
-        # Accepted risk (2026-10-26; +CVE-2026-112394 raw decoder 2026-10-27):
+        # Accepted risk (2026-10-26; +CVE-2026-112394 raw decoder 2026-10-27;
+        # +CVE-2026-112403 JPEG draft/thumbnail decoder 2026-10-28):
         # pillow 12.3.0 advisories fixed in 13.0.0,
         # which every gradio 6.x (<=6.30.0) blocks via pillow<13. All sit in
         # pillow's codecs for untrusted image files (TIFF/GIF/PDF/EPS/...); the
@@ -76,6 +77,7 @@ jobs:
           --ignore-vuln CVE-2026-112392
           --ignore-vuln CVE-2026-112393
           --ignore-vuln CVE-2026-112394
+          --ignore-vuln CVE-2026-112403
           --ignore-vuln CVE-2026-112395
           --ignore-vuln CVE-2026-112396
           --ignore-vuln CVE-2026-112397
