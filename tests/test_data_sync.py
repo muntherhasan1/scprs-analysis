@@ -613,3 +613,51 @@ def test_publish_cmas_cli(tmp_path, monkeypatch):
     data_sync._cli()
     assert captured["repo"] == "acme/op"
     assert captured["path"] == str(db)
+
+
+def test_publish_app_refuses_without_meta(tmp_path):
+    # An empty / half-written export must never reach the public dataset.
+    (tmp_path / "opportunities.json").write_text("{}")
+    with pytest.raises(FileNotFoundError):
+        data_sync.publish_app(tmp_path, "acme/app")
+
+
+def test_publish_app_uploads_json_and_prunes_stale(tmp_path, monkeypatch):
+    (tmp_path / "meta.json").write_text("{}")
+    captured = {}
+
+    class FakeApi:
+        def __init__(self, token=None):
+            captured["token"] = token
+
+        def upload_folder(self, **kw):
+            captured.update(kw)
+            return type("Info", (), {"commit_url": "https://hf/commit/app"})()
+
+    import huggingface_hub
+
+    monkeypatch.setattr(huggingface_hub, "HfApi", FakeApi)
+    url = data_sync.publish_app(tmp_path, "acme/app", token="app-write")  # noqa: S106 — fake
+    assert url == "https://hf/commit/app"
+    assert captured["token"] == "app-write"  # noqa: S105 — fake token
+    assert captured["repo_id"] == "acme/app" and captured["repo_type"] == "dataset"
+    # Pages that left the export are deleted in the same commit; only JSON ships.
+    assert captured["delete_patterns"] == ["*.json"]
+    assert captured["allow_patterns"] == ["*.json"]
+
+
+def test_publish_app_cli_prefers_app_token(monkeypatch, tmp_path):
+    monkeypatch.setenv("HF_APP_TOKEN", "app-write")
+    monkeypatch.setenv("HF_TOKEN", "cached-login")
+    captured = {}
+
+    def recorder(app_dir, repo, token=None):
+        captured.update(app_dir=app_dir, repo=repo, passed=token)
+        return "https://hf/commit/app"
+
+    monkeypatch.setattr(data_sync, "publish_app", recorder)
+    monkeypatch.setattr(
+        sys, "argv", ["data_sync", "publish-app", "--dataset", "acme/app", "--path", str(tmp_path)]
+    )
+    data_sync._cli()
+    assert captured == {"app_dir": tmp_path, "repo": "acme/app", "passed": "app-write"}

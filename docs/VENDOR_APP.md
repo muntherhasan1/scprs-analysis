@@ -34,5 +34,17 @@ Rules the export enforces (don't move them into the front end):
 - The output directory is rebuilt via a staging dir and swapped in, so a department
   or supplier that leaves the warehouse can't leave a stale page behind.
 
-Not wired yet: publishing `data/app/` to a public HF dataset (needs the dataset
-and a write token) and the static Space that serves the site.
+## Publishing
+
+`warehouse-refresh.yml` runs the export and `python -m src.data_sync publish-app`
+after go-live verifies the build, so only a verified build reaches the public
+slice. One commit per publish; files the export no longer writes are deleted.
+The step is dormant until set up:
+
+1. Create the **public** dataset in the HF UI (no pipeline token can create repos,
+   and `publish-app` deliberately never creates one).
+2. Mint a fine-grained token with write on that dataset only; add it as the
+   `HF_APP_TOKEN` Actions secret.
+3. Set the `APP_DATASET` Actions variable to the dataset id.
+
+Not wired yet: the static Space that serves the site.
