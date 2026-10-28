@@ -166,6 +166,22 @@ jobs:
           python -m src.data_sync rollback-serve
           --dataset "${{ vars.WAREHOUSE_DATASET || 'munther-hasan/scprs-warehouse-data' }}"
 
+      # Vendor web app feed (docs/VENDOR_APP.md): static JSON derived from the
+      # serve DB, published to a PUBLIC dataset — so only after go-live has
+      # verified this build (rc=0); a mismatch/rollback or skipped go-live never
+      # reaches the public slice. Dormant until the APP_DATASET repo variable
+      # is set (the public dataset is created by hand in the HF UI; HF_APP_TOKEN
+      # = fine-grained write on that one dataset). A failure fails the run, but
+      # after the serve DB is already live.
+      - name: Export + publish vendor app JSON
+        if: ${{ success() && steps.golive.outputs.rc == '0' && vars.APP_DATASET != '' }}
+        env:
+          HF_APP_TOKEN: ${{ secrets.HF_APP_TOKEN }}
+          APP_DATASET: ${{ vars.APP_DATASET }}
+        run: |
+          python -m src.app_export
+          python -m src.data_sync publish-app
+
       # Deferred failure for a skipped go-live: the publish chain completed (no
       # rollback needed, nothing lost) but the refresh is NOT live — fail with
       # the actual cause so triage names the token, not a phantom deploy issue.

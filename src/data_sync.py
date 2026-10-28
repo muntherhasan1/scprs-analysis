@@ -542,6 +542,43 @@ def _operational_token() -> str | None:
     return os.environ.get("HF_SCPRS_TOKEN") or os.environ.get("HF_TOKEN")
 
 
+def publish_app(app_dir: Path, repo: str, token: str | None = None) -> str:
+    """Upload the vendor web app's static JSON (``app_export``) to the PUBLIC HF
+    Dataset ``repo`` as one commit, deleting files the export no longer writes (a
+    department or supplier that left the warehouse must not keep a stale page).
+
+    Unlike the private stores, the repo is never created here: it is public by
+    design, so it must be created deliberately (HF UI) — a typo'd name fails with a
+    404 instead of minting a stray repo. ``meta.json`` must exist, so an empty or
+    half-written directory is never published.
+    """
+    from huggingface_hub import HfApi
+
+    app_dir = Path(app_dir)
+    if not (app_dir / "meta.json").exists():
+        raise FileNotFoundError(
+            f"{app_dir / 'meta.json'} not found — run `python -m src.app_export` first"
+        )
+    info = _with_retries(
+        lambda: HfApi(token=token).upload_folder(
+            folder_path=str(app_dir),
+            repo_id=repo,
+            repo_type="dataset",
+            allow_patterns=["*.json"],
+            delete_patterns=["*.json"],
+            commit_message="Publish vendor app JSON",
+        ),
+        what=f"app publish to {repo}",
+    )
+    return getattr(info, "commit_url", str(info))
+
+
+def _app_token() -> str | None:
+    """Token for the public app dataset: prefer the dedicated ``HF_APP_TOKEN``
+    (fine-grained, write on that one dataset only), fall back to ``HF_TOKEN``."""
+    return os.environ.get("HF_APP_TOKEN") or os.environ.get("HF_TOKEN")
+
+
 def _cli() -> None:
     import argparse
 
@@ -627,6 +664,11 @@ def _cli() -> None:
         help="Revert the serve dataset to its previous revision and restart the Spaces",
     )
     rbk.add_argument("--dataset", default=os.environ.get("WAREHOUSE_DATASET"))
+    papp = sub.add_parser(
+        "publish-app", help="Upload data/app/ (vendor app JSON) to the PUBLIC app dataset"
+    )
+    papp.add_argument("--dataset", default=os.environ.get("APP_DATASET"))
+    papp.add_argument("--path", default=None, help="app JSON directory (default: data/app)")
 
     args = ap.parse_args()
 
@@ -700,6 +742,13 @@ def _cli() -> None:
         print(f"Rolled back {SERVE_FILENAME} in {args.dataset} to last-good: {url}")
         for space, outcome in restart_spaces():  # re-fetch the rolled-back data
             print(f"{space}: {outcome}")
+    elif args.cmd == "publish-app":
+        from .app_export import APP_DIR
+
+        if not args.dataset:
+            raise SystemExit("set --dataset or the APP_DATASET env var")
+        url = publish_app(Path(args.path or APP_DIR), args.dataset, token=_app_token())
+        print(f"Published app JSON -> {args.dataset}: {url}")
 
 
 if __name__ == "__main__":
