@@ -12,6 +12,12 @@ updates:
     # pandas was upgraded to 3.x by hand (2026-07): requirements.txt now floors at
     # >=3.0, so the earlier semver-major hold is removed and pandas updates flow
     # normally like every other dependency.
+    ignore:
+      # mcp 2.x removed mcp.server.fastmcp (src/mcp_server.py imports it), so a
+      # major bump boot-crashes the MCP Space. Requirements cap mcp<2; drop this
+      # hold when mcp_server.py is migrated to MCPServer.
+      - dependency-name: "mcp"
+        update-types: ["version-update:semver-major"]
 
   # Keep GitHub Actions pinned to current, non-vulnerable versions.
   - package-ecosystem: github-actions
