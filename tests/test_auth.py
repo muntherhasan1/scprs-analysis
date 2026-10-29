@@ -138,3 +138,9 @@ def test_middleware_rate_limits_per_principal():
     h = [(b"authorization", b"Bearer s1")]
     assert _drive(mw, headers=h)[0] == 200
     assert _drive(mw, headers=h)[0] == 429  # second within the window
+
+
+def test_identify_rejects_non_ascii_tokens_without_raising():
+    tokens = {"secret-token": "alice"}
+    assert auth.identify("é", tokens) is None
+    assert auth.identify("secret-token", tokens) == "alice"

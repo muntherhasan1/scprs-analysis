@@ -61,10 +61,13 @@ def identify(provided: str, tokens: dict[str, str]) -> str | None:
     """Return the principal for ``provided``, or None if it matches no token.
 
     Compares against *every* token with no early return, so the time taken does
-    not reveal which (or whether an early) token matched."""
+    not reveal which (or whether an early) token matched. Compared as UTF-8
+    bytes: compare_digest raises TypeError on a non-ASCII str, which turned a
+    junk header into a 500 (and a traceback with the token map in its locals)."""
     match: str | None = None
+    given = provided.encode("utf-8", "replace")
     for tok, label in tokens.items():
-        if hmac.compare_digest(provided, tok):
+        if hmac.compare_digest(given, tok.encode("utf-8")):
             match = label
     return match
 

@@ -248,3 +248,22 @@ def test_logfile_name_namespaced_per_space(monkeypatch):
     # Explicit override wins.
     monkeypatch.setenv("QUERY_LOG_FILE", "custom.jsonl")
     assert query_log._logfile_name() == "custom.jsonl"
+
+
+def test_run_select_bounds_memory_whatever_the_spelling(tiny_db, monkeypatch):
+    """The blob deny-list is evadable (comments, quoted names, printf padding);
+    the SQLite length limit and the result-byte budget are the real bound."""
+    for q in (
+        "SELECT printf('%.*c', 200000000, 'x') AS s",
+        'SELECT length("zeroblob"(200000000)) AS n',
+        "SELECT zeroblob/**/(200000000) AS b",
+    ):
+        res = wq.run_select(q)
+        # Refused, or SQLite yields NULL instead of building the value.
+        assert "error" in res or res["rows"] == [{k: None for k in res["columns"]}], q
+    monkeypatch.setattr(wq, "MAX_RESULT_BYTES", 50_000)
+    res = wq.run_select(
+        "WITH RECURSIVE r(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM r WHERE i < 100) "
+        "SELECT printf('%.*c', 90000, 'x') AS s FROM r"
+    )
+    assert res == {"error": "Query result is too large; select fewer or shorter columns."}

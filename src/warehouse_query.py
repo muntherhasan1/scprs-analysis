@@ -35,8 +35,16 @@ SELECT_ONLY = re.compile(r"^\s*(select|with)\b", re.IGNORECASE)
 # the public web app. Interrupts via SQLite's progress handler. 0 disables.
 QUERY_TIMEOUT_S = float(os.environ.get("QUERY_TIMEOUT_S", "10"))
 # Memory bombs: randomblob/zeroblob can materialize huge cells the row cap can't
-# bound. No analytical use — reject outright.
+# bound. No analytical use — reject outright. (A regex is a speed bump, not the
+# defence: zeroblob/**/(n), "zeroblob"(n) and printf('%.*c', n, 'x') all evade
+# it. The hard bounds are MAX_VALUE_BYTES and MAX_RESULT_BYTES below.)
 _BLOB_DENY = re.compile(r"\b(randomblob|zeroblob)\s*\(", re.IGNORECASE)
+# Largest string/blob SQLite may build on a query connection (SQLITE_LIMIT_LENGTH);
+# anything bigger fails inside SQLite ("string or blob too big") before it is
+# allocated. The longest real value (a line-item description) is a few KB.
+MAX_VALUE_BYTES = 100_000
+# Total size of the rows one query may return; fetching stops past it.
+MAX_RESULT_BYTES = 5_000_000
 
 # Curated, human-authored hints surfaced by `list_marts` and `schema_for_llm` so an
 # NL/MCP model picks the right mart *and dimension* instead of guessing (e.g. it must
@@ -102,7 +110,12 @@ def connect() -> sqlite3.Connection:
     uri = f"file:{WAREHOUSE_DB.as_posix()}?mode=ro"
     con = sqlite3.connect(uri, uri=True, timeout=30)
     con.row_factory = sqlite3.Row
+    con.setlimit(sqlite3.SQLITE_LIMIT_LENGTH, MAX_VALUE_BYTES)
     return con
+
+
+def _row_bytes(row: sqlite3.Row) -> int:
+    return sum(len(v) if isinstance(v, (str, bytes)) else 8 for v in row)
 
 
 def analytical_objects(con: sqlite3.Connection) -> set[str]:
@@ -236,10 +249,21 @@ def run_select(query: str, max_rows: int = 200) -> dict:
                 deadline = time.monotonic() + QUERY_TIMEOUT_S
                 con.set_progress_handler(lambda: 1 if time.monotonic() > deadline else 0, 10_000)
             cur = con.execute(stripped)  # read-only connection; writes raise
-            rows = cur.fetchmany(limit)
+            rows, size = [], 0
+            while len(rows) < limit and (row := cur.fetchone()) is not None:
+                size += _row_bytes(row)
+                if size > MAX_RESULT_BYTES:
+                    return {"error": "Query result is too large; select fewer or shorter columns."}
+                rows.append(row)
             cols = [d[0] for d in cur.description] if cur.description else []
     except sqlite3.Error as exc:
-        msg = "Query exceeded the time limit." if "interrupt" in str(exc).lower() else str(exc)
+        text = str(exc).lower()
+        if "interrupt" in text:
+            msg = "Query exceeded the time limit."
+        elif "too big" in text:
+            msg = "Query builds a value larger than the limit."
+        else:
+            msg = str(exc)
         return {"error": msg}
     return {
         "columns": cols,
