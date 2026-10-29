@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import time
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
@@ -91,6 +92,24 @@ def _type(page, selector: str, value: str) -> None:
     page.wait_for_timeout(1000)
 
 
+def _grid_total(text: str) -> int | None:
+    """Total row count from the results-grid banner, or None if not shown."""
+    m = re.search(GRID_BANNER, text)
+    return int(m.group(3).replace(",", "")) if m else None
+
+
+_TRUNCATION_WORDS = ("exceeds excel", "row limit", f"{ROW_CAP:,}", str(ROW_CAP))
+
+
+def _dialog_warns_truncation(before: str, after: str) -> bool:
+    """Fallback when the banner is missing: a truncation keyword that the
+    download dialog ADDED to the page. Matching the whole page instead flagged
+    BU 3790's 10-row day as capped because a contract title read
+    "S24650003 - BULK FUEL" (2026-10: every refresh of 3790 was refused)."""
+    b, a = before.lower(), after.lower()
+    return any(a.count(k) > b.count(k) for k in _TRUNCATION_WORDS)
+
+
 def download_extract(
     business_unit: str,
     from_date: str,
@@ -126,10 +145,13 @@ def download_extract(
             page.click(_SEARCH)
             page.wait_for_timeout(6000)
 
-            if "No Records Found" in page.inner_text("body"):
+            grid = page.inner_text("body")
+            if "No Records Found" in grid:
                 return Extract(business_unit, from_date, to_date, None, False, True)
+            # The grid banner ("1 to 200 of 70,123") is the authoritative size.
+            total = _grid_total(grid)
 
-            truncated = False
+            truncated = total is not None and total > ROW_CAP
             with page.expect_download(timeout=timeout_ms) as dl_info:
                 page.click(_DL_SUMMARY)
                 page.wait_for_timeout(2500)
@@ -138,8 +160,7 @@ def download_extract(
                 # exceeds the row cap the dialog also warns about truncation.
                 ok = page.locator(_MODAL_OK)
                 if ok.count() and ok.is_visible():
-                    body = page.inner_text("body").lower()
-                    if any(k in body for k in ("exceeds excel", "row limit", str(ROW_CAP))):
+                    if total is None and _dialog_warns_truncation(grid, page.inner_text("body")):
                         truncated = True
                     ok.click()
             dl = dl_info.value
@@ -414,10 +435,24 @@ def collect_po_details(
                 return []
 
             first_page = page.locator("a[id^='PURCHASE_DOC$']").count()
+            if not first_page:
+                # Neither rows nor "No Records Found" within the poll: the grid
+                # never rendered. Recording this as a done day with 0 documents
+                # hid whole days from enrichment (e.g. 3600 2023-08-16, 30 docs).
+                log("results grid did not load; leaving the day incomplete")
+                if stats is not None:
+                    stats["complete"] = False
+                return []
             m = re.search(GRID_BANNER, page.inner_text("body"))
             grid_total = int(m.group(3).replace(",", "")) if m else first_page
             log(f"{grid_total} document(s) in the grid; {first_page} on page 1")
             skipped = 0
+            # Distinct documents covered (drilled or skipped) this pass. The grid
+            # order can shift between pages, so a document may show on two pages
+            # while another shows on none: drill each once, and call the pass
+            # complete only when the distinct count reaches the grid's total
+            # (8570 2024-07-01: 613 drills recorded "done", 486 distinct docs).
+            seen: set[str] = set()
             complete = True
             page_no = 1
             while True:
@@ -431,7 +466,10 @@ def collect_po_details(
                         break
                     link = page.locator(f"[id='PURCHASE_DOC${i}']")
                     doc = link.inner_text().strip()
+                    if doc in seen:
+                        continue  # repeated on a later page: already covered
                     if skip_docs and doc in skip_docs:
+                        seen.add(doc)
                         skipped += 1
                         continue
                     if deadline is not None and time.monotonic() >= deadline:
@@ -449,6 +487,7 @@ def collect_po_details(
                     detail.wait_for_timeout(1200)
                     header, lines, pos = parse_po_details(detail.content())
                     detail.close()
+                    seen.add(doc)
                     results.append({"document": doc, "header": header, "lines": lines, "pos": pos})
                     log(f"  [p{page_no} {i + 1}/{n}] {doc}: {len(lines)} lines, {len(pos)} POs")
                 if stop:
@@ -483,6 +522,12 @@ def collect_po_details(
                 page_no += 1
             if skipped:
                 log(f"  skipped {skipped} already-drilled document(s)")
+            if complete and len(seen) < grid_total:
+                log(
+                    f"  covered {len(seen)} of {grid_total} grid document(s) "
+                    "(grid order shifted between pages); leaving the day incomplete"
+                )
+                complete = False
             if stats is not None:
                 stats.update(
                     {

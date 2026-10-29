@@ -108,3 +108,18 @@ def test_download_range_splits_on_row_cap_without_dialog(monkeypatch):
     df, warnings = scprs.download_range("3540", "07/01/2025", "06/30/2026")
     assert len(calls) > 1  # bisected on the row count despite no dialog flag
     assert warnings == []  # leaves are under the cap, so nothing kept partial
+
+
+def test_truncation_comes_from_the_grid_banner_not_page_text():
+    """BU 3790, 2026-10: a 10-row day whose grid shows a title containing
+    "65000" ("S24650003 - BULK FUEL") was read as capped, so every refresh of
+    the unit was refused. Only the banner total, or a warning the download
+    dialog itself adds, may flag truncation."""
+    grid = "1 to 10 of 10\nS24650003 - BULK FUEL- UNLEADED GASOLINE"
+    assert scprs._grid_total(grid) == 10
+    assert scprs._grid_total("1 to 200 of 70,123") == 70123
+    assert scprs._grid_total("No banner here") is None
+    # The same text before and after the dialog: no new warning -> not truncated.
+    assert not scprs._dialog_warns_truncation(grid, grid + "\nOK")
+    # The dialog adds a cap warning -> truncated.
+    assert scprs._dialog_warns_truncation(grid, grid + "\nResult exceeds 65,000 row limit")

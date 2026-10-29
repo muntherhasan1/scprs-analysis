@@ -54,15 +54,21 @@ jobs:
           python-version: "3.12"
           cache: pip
 
-      - name: Install minimal deps
+      # The full requirements, not a minimal set: data_sync's CLI imports
+      # model -> scprs -> playwright for its default paths. With only
+      # huggingface_hub installed every run crashed on ModuleNotFoundError
+      # (2026-10-04..25) and, without pipefail, still reported success.
+      # Browsers are not needed (no `playwright install`).
+      - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install "huggingface_hub>=0.25" python-dotenv
+          pip install -r requirements.txt "huggingface_hub>=0.25"
 
       - name: Copy operational stores to the backup dataset
         env:
           KEEP: ${{ inputs.keep }}
         run: |
+          set -o pipefail  # the job must fail when the backup does, not when tee does
           python -m src.data_sync backup-operational --keep "${KEEP:-4}" \
             2>&1 | tee backup.log
           {

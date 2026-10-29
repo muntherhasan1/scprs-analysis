@@ -138,3 +138,17 @@ def test_cli_report_emits_json(capsys, monkeypatch):
     out = json.loads(capsys.readouterr().out)
     assert out["title"].startswith("⚠️ Pipeline failure")
     assert "evidence-graded" in out["body"]  # the go-live hint
+
+
+def test_every_hinted_workflow_is_watched_by_triage():
+    """A workflow with triage hints but missing from triage.yml's workflow_run
+    list fails silently (Summary refresh, 2026-10-27..29: three red runs, no
+    issue). Keep the two in lockstep."""
+    from pathlib import Path
+
+    wf = (Path(__file__).resolve().parent.parent / ".github/workflows/triage.yml").read_text(
+        encoding="utf-8"
+    )
+    watched = wf.split("workflows:", 1)[1].split("types:", 1)[0]
+    missing = [name for name in triage._HINTS if f'"{name}"' not in watched]
+    assert missing == []

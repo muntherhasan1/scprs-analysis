@@ -17,6 +17,7 @@ on:
       - "CI"
       - "Query review"
       - "Summary build"
+      - "Summary refresh"
       - "Ground-truth recon"
       - "Operational backup"
     types: [completed]

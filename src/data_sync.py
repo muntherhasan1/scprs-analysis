@@ -468,6 +468,10 @@ def publish_eprocure_db(db_path: Path, repo: str, token: str | None = None) -> s
     )
 
 
+# How many recent commits rollback searches for the previous serve DB.
+_ROLLBACK_SEARCH = 20
+
+
 def rollback_serve_db(repo: str, token: str | None = None) -> str:
     """Revert the serve dataset to its previous revision. Returns the commit URL.
 
@@ -475,18 +479,37 @@ def rollback_serve_db(repo: str, token: str | None = None) -> str:
     verification then fails, this re-publishes the **prior** revision of
     ``warehouse-serve.db`` as a new commit, so the Spaces fetch known-good data on
     their next boot instead of being stuck on a bad/unverified snapshot. The serve
-    dataset is git-based, so every ``publish`` is a versioned commit and the
-    last-good copy is always one revision back. Raises if there is nothing to roll
-    back to (a single commit)."""
+    dataset is git-based, so every ``publish`` is a versioned commit.
+
+    The last-good copy is the newest revision whose ``warehouse-serve.db`` blob
+    DIFFERS from the current one -- not simply one commit back: a publish makes
+    two commits (the DB, then ``marts/``), so ``commits[1]`` is usually the bad
+    DB itself. Raises if no earlier differing revision exists."""
     from huggingface_hub import HfApi, hf_hub_download
 
     api = HfApi()
     commits = api.list_repo_commits(repo, repo_type="dataset", token=token)
-    if len(commits) < 2:
-        raise WarehouseFetchError(
-            f"cannot roll back {repo!r}: only {len(commits)} commit(s) — no prior revision"
+
+    def blob(rev: str) -> str | None:
+        info = api.get_paths_info(
+            repo, [SERVE_FILENAME], revision=rev, repo_type="dataset", token=token
         )
-    prev = commits[1].commit_id  # commits[0] is the just-published (bad) revision
+        return info[0].blob_id if info else None
+
+    current = blob(commits[0].commit_id) if commits else None
+    prev = next(
+        (
+            c.commit_id
+            for c in commits[1:_ROLLBACK_SEARCH]
+            if blob(c.commit_id) not in (None, current)
+        ),
+        None,
+    )
+    if current is None or prev is None:
+        raise WarehouseFetchError(
+            f"cannot roll back {repo!r}: no earlier revision of {SERVE_FILENAME} "
+            f"in the last {_ROLLBACK_SEARCH} commits"
+        )
     cached = hf_hub_download(  # nosec B615 — our own private dataset, explicit prior rev
         repo_id=repo,
         filename=SERVE_FILENAME,
