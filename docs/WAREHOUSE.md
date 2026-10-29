@@ -22,9 +22,21 @@ Bronze is the immutable landing zone — nothing is cleaned here.
   collapses to the **current version** so `silver_document` is one row per
   document. Line/PO rows are filtered to the current version too (a document can
   be drilled at several versions), then de-duplicated.
+- **Merge precedence.** The PO Details drill-down overrides the summary only
+  while its version is at least the summary's; a document amended after it was
+  drilled takes the (daily-refreshed) summary for every shared field and is
+  flagged `detail_is_stale = 1` (warn check `stale_drilldowns`). Drill-only
+  fields (bill code, merchandise/freight) always come from the drill.
+  **`grand_total` is the summary's at every version** (the figure an SCPRS
+  search returns); the drill fills it only when the summary has none. At equal
+  versions the two pages can still disagree: live-checked 2026-10-29, 3 of 8
+  such drills were out of date and 5 were the site disagreeing with itself.
 - **Conforming.** Amounts/dates cast to real types; the combined acquisition
-  string is split into `acquisition_type` / `acquisition_sub_type`; a
-  `competitive_flag` is derived from the method.
+  string — from the summary *and* the drill-down, which glues sub-types for
+  NON-IT Services — is split into `acquisition_type` / `acquisition_sub_type`
+  (error check `acquisition_type_split`); a `competitive_flag` is derived from
+  the method. The drill-down's literal `N/A` placeholder (end date, LPA, buyer,
+  UNSPSC) becomes NULL (error check `no_na_sentinels`).
 - **Defaulting.** NULL business keys become explicit `Unknown`/`UNKNOWN` members
   (no NULL dimension keys downstream).
 - **Quality flags.** `dq_line_reconciles` marks whether an enriched document's

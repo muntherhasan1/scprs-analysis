@@ -444,9 +444,10 @@ SIZE_BUCKETS = (
     ("10m-plus", "$10M+", 10_000_000.0, None),
 )
 
-# Base acquisition types. 1% of documents carry the sub-type glued on
-# ("NON-IT Services_Expert Witnesses", a silver parsing gap); the part before
-# "_" rolls them up so the vector doesn't splinter into ~45 types.
+# Base acquisition types. Silver splits the combined "Type_SubType" string
+# (the drill-down's glued "NON-IT Services_Expert Witnesses" too, since the
+# 2026-10 fix, gated by the acquisition_type_split DQ check); rolling up on the
+# part before "_" stays as a guard so the vector can never splinter again.
 ACQUISITION_LABELS = {
     "NON-IT Goods": "Goods (non-IT)",
     "NON-IT Services": "Services (non-IT)",

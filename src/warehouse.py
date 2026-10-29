@@ -422,6 +422,45 @@ def _src_has_local(con: sqlite3.Connection, table: str) -> bool:
 # --------------------------------------------------------------------------- #
 # Silver: clean, conform, type, default, flag
 # --------------------------------------------------------------------------- #
+def _clean(expr: str) -> str:
+    """SQL: blank and the PO Details page's literal "N/A" placeholder -> NULL.
+
+    The drill-down stores "N/A" for an absent end date, LPA or buyer (199K end
+    dates in 2026-10); left as text it beat real values in COALESCE and sorted
+    above every ISO date. `expr` is an internal column reference, never input.
+    """
+    return f"NULLIF(NULLIF(TRIM({expr}), ''), 'N/A')"
+
+
+def _acq_type(expr: str) -> str:
+    """SQL: the type half of a combined "Type_SubType" acquisition string."""
+    return (
+        f"CASE WHEN instr({expr}, '_') > 0 THEN substr({expr}, 1, instr({expr}, '_') - 1) "
+        f"ELSE {expr} END"
+    )
+
+
+def _acq_sub_type(expr: str) -> str:
+    """SQL: the sub-type half of a combined "Type_SubType" string (NULL if none)."""
+    return f"CASE WHEN instr({expr}, '_') > 0 THEN substr({expr}, instr({expr}, '_') + 1) END"
+
+
+# Drill-down text columns cleaned of sentinels before the merge.
+_DETAIL_TEXT_COLS = (
+    "department_name",
+    "bill_code",
+    "status",
+    "acquisition_type",
+    "acquisition_method",
+    "start_date",
+    "end_date",
+    "lpa_contract_id",
+    "supplier_name",
+    "buyer_name",
+    "buyer_email",
+)
+
+
 def build_silver(con: sqlite3.Connection, batch: str, ts: str) -> dict:
     # Drop derived views up front: they are rebuilt in gold, and leaving stale ones
     # would let a broken view block the ALTER ... RENAME steps in _finalize below.
@@ -453,9 +492,16 @@ def build_silver(con: sqlite3.Connection, batch: str, ts: str) -> dict:
 
     # -- silver_document: one row per (business_unit, purchase_document); merges the
     #    authoritative drill-down (document_details) over the summary (purchases).
+    #    The drill-down wins only while it is at least as new as the summary row:
+    #    a document amended after it was drilled keeps a stale drill (old value,
+    #    version, status) until re-drilled, and the summary -- refreshed daily --
+    #    is then the current truth for every field it carries. Drill-only fields
+    #    (bill code, merchandise / freight amounts) still come from the drill.
     det = "bronze_document_details" if have_details else None
     con.execute("DROP TABLE IF EXISTS silver_document")
-    d_col = (lambda c: f"d.{c}") if det else (lambda c: "NULL")
+    fresh = "(p.version IS NULL OR d.version >= CAST(p.version AS INTEGER))"
+    d_col = (lambda c: f"CASE WHEN {fresh} THEN d.{c} END") if det else (lambda c: "NULL")
+    d_raw = (lambda c: f"d.{c}") if det else (lambda c: "NULL")
     # Source grain is (document, version): collapse to the current (latest) version
     # so silver_document is one row per document. Details are deduped the same way
     # (the results grid can list a document once per version -> repeated drills).
@@ -467,7 +513,12 @@ def build_silver(con: sqlite3.Connection, batch: str, ts: str) -> dict:
     from_clause = "FROM pur p"
     where_clause = "WHERE p._rn = 1"
     if det:
-        ctes += f", det AS (SELECT *, {rank} AS _rn FROM {det})"
+        cleaned = ", ".join(f"{_clean(c)} AS {c}" for c in _DETAIL_TEXT_COLS)
+        ctes += (
+            f", det AS (SELECT business_unit, purchase_document, "
+            f"CAST(version AS INTEGER) AS version, {cleaned}, merchandise_amount, "
+            f"freight_tax_misc, grand_total, {rank} AS _rn FROM {det})"
+        )
         from_clause += (
             " LEFT JOIN det d ON d.business_unit = p.business_unit "
             "AND d.purchase_document = p.purchase_document AND d._rn = 1"
@@ -481,20 +532,24 @@ def build_silver(con: sqlite3.Connection, batch: str, ts: str) -> dict:
           p.purchase_document,
           COALESCE({d_col("department_name")}, p.department_name, 'Unknown') AS department_name,
           COALESCE(p.supplier_id, 'UNKNOWN')                                 AS supplier_id,
-          COALESCE({d_col("supplier_name")}, p.supplier_name, 'Unknown')     AS supplier_name,
+          -- Name from the summary, which carries exactly one per supplier_id;
+          -- the drill-down's name varies per document (DBAs, remit-to names) and
+          -- split 65 canonical suppliers into several rows (LA County showed as
+          -- "CA COURT ASSOCIATION INC" on its app page, 2026-10 review).
+          COALESCE(p.supplier_name, {d_col("supplier_name")}, 'Unknown')     AS supplier_name,
           COALESCE({d_col("buyer_name")}, p.buyer_name, 'Unknown')           AS buyer_name,
           COALESCE({d_col("buyer_email")}, p.buyer_email, '')                AS buyer_email,
-          -- acquisition type: prefer drill-down; else split summary "type_subtype"
+          -- acquisition type: prefer drill-down; else the summary. BOTH can carry
+          -- the combined "Type_SubType" string (the drill-down does for every
+          -- NON-IT Services doc), so both are split -- the unsplit drill value hid
+          -- 42% of contract value from acquisition_type filters (2026-10).
           COALESCE(
-            {d_col("acquisition_type")},
-            CASE WHEN instr(p.acquisition_type_sub_type, '_') > 0
-                 THEN substr(p.acquisition_type_sub_type, 1, instr(p.acquisition_type_sub_type,'_')-1)
-                 ELSE p.acquisition_type_sub_type END,
+            {_acq_type(d_col("acquisition_type"))},
+            {_acq_type("p.acquisition_type_sub_type")},
             'Unknown') AS acquisition_type,
           COALESCE(
-            CASE WHEN instr(p.acquisition_type_sub_type, '_') > 0
-                 THEN substr(p.acquisition_type_sub_type, instr(p.acquisition_type_sub_type,'_')+1)
-                 ELSE NULL END,
+            {_acq_sub_type(d_col("acquisition_type"))},
+            {_acq_sub_type("p.acquisition_type_sub_type")},
             'N/A') AS acquisition_sub_type,
           COALESCE({d_col("acquisition_method")}, p.acquisition_method, 'Unknown') AS acquisition_method,
           CASE
@@ -505,15 +560,24 @@ def build_silver(con: sqlite3.Connection, batch: str, ts: str) -> dict:
             ELSE 'Other' END AS competitive_flag,
           COALESCE({d_col("status")}, p.status)               AS status,
           CAST(COALESCE({d_col("version")}, p.version) AS INTEGER) AS version,
-          {d_col("bill_code")}                                AS bill_code,
+          {d_raw("bill_code")}                                AS bill_code,
           COALESCE({d_col("lpa_contract_id")}, p.lpa_contract_id) AS lpa_contract_id,
           COALESCE({d_col("start_date")}, p.start_date)       AS start_date,
           COALESCE({d_col("end_date")}, p.end_date)           AS end_date,
-          {d_col("merchandise_amount")}                       AS merchandise_amount,
-          {d_col("freight_tax_misc")}                         AS freight_tax_misc,
-          COALESCE({d_col("grand_total")}, p.grand_total)     AS grand_total,
+          {d_raw("merchandise_amount")}                       AS merchandise_amount,
+          {d_raw("freight_tax_misc")}                         AS freight_tax_misc,
+          -- Contract value: the summary's figure, which is what an SCPRS search
+          -- returns, at every version. Even at the SAME version the PO Details
+          -- header can disagree (live-checked 2026-10-29: 3 of 8 drills were
+          -- simply out of date, and 5 had the site's two pages disagreeing,
+          -- 2 of them showing $0.00 on PO Details). The drill only fills a gap.
+          COALESCE(p.grand_total, {d_col("grand_total")})     AS grand_total,
           CASE WHEN {("d.purchase_document" if det else "NULL")} IS NOT NULL THEN 1 ELSE 0 END
                                                               AS is_enriched,
+          -- drilled at an older version than the summary now shows (re-drill due)
+          CASE WHEN {("d.purchase_document" if det else "NULL")} IS NOT NULL
+                    AND NOT {fresh if det else "1"} THEN 1 ELSE 0 END
+                                                              AS detail_is_stale,
           -- classification available for ALL docs (drill-down POs are enriched-only)
           CASE WHEN p.associated_pos IS NOT NULL AND TRIM(p.associated_pos) <> ''
                THEN 1 ELSE 0 END                              AS has_associated_pos
@@ -536,9 +600,11 @@ def build_silver(con: sqlite3.Connection, batch: str, ts: str) -> dict:
             FROM (
               SELECT business_unit, purchase_document,
                      CAST(line_number AS INTEGER) AS line_number,
-                     item_id, item_description,
-                     COALESCE(unspsc, 'UNKNOWN') AS unspsc,
-                     COALESCE(unspsc_description, 'Unknown') AS unspsc_description,
+                     NULLIF(NULLIF(TRIM(item_id), ''), 'N/A') AS item_id,
+                     item_description,
+                     COALESCE(NULLIF(NULLIF(TRIM(unspsc), ''), 'N/A'), 'UNKNOWN') AS unspsc,
+                     COALESCE(NULLIF(NULLIF(TRIM(unspsc_description), ''), 'N/A'), 'Unknown')
+                       AS unspsc_description,
                      unit_of_measure,
                      CAST(quantity AS REAL) AS quantity,
                      CAST(unit_price AS REAL) AS unit_price,
@@ -569,7 +635,8 @@ def build_silver(con: sqlite3.Connection, batch: str, ts: str) -> dict:
                    po_total, po_status
             FROM (
               SELECT business_unit, purchase_document, po_id,
-                     COALESCE(buyer, 'Unknown') AS buyer, start_date,
+                     COALESCE(NULLIF(NULLIF(TRIM(buyer), ''), 'N/A'), 'Unknown') AS buyer,
+                     start_date,
                      CAST(po_total AS REAL) AS po_total, po_status,
                      CAST(COALESCE(document_version, '-1') AS INTEGER) AS _v,
                      MAX(CAST(COALESCE(document_version, '-1') AS INTEGER))
@@ -1540,6 +1607,31 @@ _DQ_CHECKS = [
         "(SELECT document_bk FROM fact_document)",
     ),
     (
+        # A combined "Type_SubType" string left in acquisition_type silently drops
+        # those docs from every acquisition_type = '...' filter (2026-10 bug B1).
+        "acquisition_type_split",
+        "error",
+        "silver_document",
+        "SELECT COUNT(*) FROM silver_document WHERE instr(acquisition_type, '_') > 0",
+    ),
+    (
+        # The drill-down's "N/A" placeholder must never survive into silver.
+        "no_na_sentinels",
+        "error",
+        "silver_document",
+        "SELECT COUNT(*) FROM silver_document WHERE 'N/A' IN "
+        "(end_date, lpa_contract_id, buyer_name, start_date, status)",
+    ),
+    (
+        # Drill-down older than the current summary version: the summary wins for
+        # shared fields; lines/merchandise stay at the drilled version until a
+        # re-drill. Trending up = enrichment is not revisiting amendments.
+        "stale_drilldowns",
+        "warn",
+        "silver_document (detail_is_stale)",
+        "SELECT COUNT(*) FROM silver_document WHERE detail_is_stale = 1",
+    ),
+    (
         "line_items_reconcile",
         "warn",
         "silver_document (enriched)",
@@ -1630,17 +1722,21 @@ def capture_document_history(con: sqlite3.Connection, batch: str, ts: str) -> in
                start_date, end_date, supplier_id, supplier_name,
                TRIM(COALESCE(acquisition_type_sub_type,'')||' / '||
                     COALESCE(acquisition_method,''), ' /') AS acquisition,
-               {_HISTORY_SIG} AS content_sig, ? AS batch_id, ? AS observed_at
+               sig AS content_sig, ? AS batch_id, ? AS observed_at
         FROM (SELECT DISTINCT business_unit, purchase_document, version, grand_total, status,
                      start_date, end_date, supplier_id, supplier_name,
-                     acquisition_type_sub_type, acquisition_method
+                     acquisition_type_sub_type, acquisition_method,
+                     {_HISTORY_SIG} AS sig
               FROM bronze_purchases) b
+        -- Compare against b.sig: an unqualified signature here resolved its
+        -- columns to h (the history row itself), so every same-version change
+        -- of value, status or dates matched and was never recorded (2026-10).
         WHERE NOT EXISTS (
           SELECT 1 FROM dw_document_history h
           WHERE h.business_unit = b.business_unit
             AND h.purchase_document = b.purchase_document
             AND h.version = b.version
-            AND h.content_sig = {_HISTORY_SIG})
+            AND h.content_sig = b.sig)
         """,  # noqa: S608 - signature is a fixed internal expression; values are bound
         (batch, ts),
     )
