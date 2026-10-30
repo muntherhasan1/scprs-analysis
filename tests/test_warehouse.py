@@ -960,3 +960,305 @@ def test_silver_merge_splits_types_drops_sentinels_and_ignores_stale_drills(tmp_
     assert checks["acquisition_type_split"]["passed"]
     assert checks["no_na_sentinels"]["passed"]
     assert checks["stale_drilldowns"]["failed"] == 1
+
+
+def _add_drill(con, doc, merchandise, lines, supplier=("S7", "Gamma"), version="1"):
+    """One summary + drilled document with `lines` = [(line_no, desc, qty, price), ...]
+    inserted in load order (repeats included verbatim)."""
+    con.execute(
+        "INSERT INTO purchases (business_unit, purchase_document, version, grand_total, "
+        "start_date, acquisition_type_sub_type, acquisition_method, supplier_id, supplier_name, "
+        "buyer_name, buyer_email, status, department_name, associated_pos) "
+        "VALUES ('8660', ?, ?, ?, '2021-05-01', 'IT Goods', 'Formal - COMPETITIVE', ?, ?, "
+        "'Bob', 'b@x', 'Active', 'PUC', NULL)",
+        (doc, version, merchandise, *supplier),
+    )
+    con.execute(
+        "INSERT INTO document_details (business_unit, purchase_document, version, "
+        "merchandise_amount, freight_tax_misc, grand_total) VALUES ('8660', ?, ?, ?, 0, ?)",
+        (doc, version, merchandise, merchandise),
+    )
+    con.executemany(
+        "INSERT INTO document_lines (business_unit, purchase_document, document_version, "
+        "line_number, item_description, unspsc, unspsc_description, quantity, unit_price, "
+        "line_status) VALUES ('8660', ?, ?, ?, ?, '43230000', 'Software', ?, ?, 'Active')",
+        [(doc, version, *ln) for ln in lines],
+    )
+
+
+def test_silver_line_keeps_repeated_schedules_and_collapses_repeat_drills(tmp_path):
+    """Identical drill rows mean two different things: the page listing a line
+    on several schedules (keep every row) or the same document drilled twice
+    into one load (the whole line set appended again -- collapse it). A
+    content DISTINCT got the first wrong ($8.46M on the 2026-10 snapshot)."""
+    src, wh = tmp_path / "scprs.db", tmp_path / "warehouse.db"
+    _seed_source(src)
+    con = sqlite3.connect(src)
+    # R: line 1 really appears twice (two schedules) -> 3 rows, $300 = merchandise
+    _add_drill(con, "R", 300.0, [("1", "Widget", 1, 100), ("1", "Widget", 1, 100),
+                                 ("2", "Gadget", 1, 100)])  # fmt: skip
+    # D: a 2-line drill appended twice in one load -> 2 rows, $75
+    _add_drill(con, "D", 75.0, [("1", "Widget", 1, 50), ("2", "Gadget", 1, 25),
+                                ("1", "Widget", 1, 50), ("2", "Gadget", 1, 25)])  # fmt: skip
+    # S: one line on three schedules; the header says all three count -> keep 3
+    _add_drill(con, "S", 30.0, [("1", "Bolt", 1, 10)] * 3)
+    # T: one line drilled twice; the header counts it once -> 1 row
+    _add_drill(con, "T", 10.0, [("1", "Nut", 1, 10)] * 2)
+    # H: page lists "Shipping" twice but the header counts it once, and the
+    # other lines are distinct -> not a repeat drill; only DISTINCT reconciles
+    _add_drill(con, "H", 30.0, [("1", "Tent", 1, 20), ("2", "Shipping", 1, 10),
+                                ("2", "Shipping", 1, 10)])  # fmt: skip
+    # Z: no header amount to reconcile against -> structure alone decides
+    _add_drill(con, "Z", 0.0, [("1", "Cap", 1, 5), ("1", "Cap", 1, 5), ("2", "Hat", 1, 5)])
+    con.commit()
+    con.close()
+    result = warehouse.build_all(
+        wh_path=wh, source_path=src, enrichment_db=tmp_path / "no_enrich.db", log=lambda *a: None
+    )
+    assert not result["errors"]
+    con = sqlite3.connect(wh)
+    try:
+        got = dict(
+            con.execute(
+                "SELECT purchase_document, COUNT(*) || ':' || SUM(line_amount) FROM silver_line "
+                "GROUP BY purchase_document"
+            ).fetchall()
+        )
+        assert got["R"] == "3:300.0"
+        assert got["D"] == "2:75.0"
+        assert got["S"] == "3:30.0"
+        assert got["T"] == "1:10.0"
+        assert got["H"] == "2:30.0"
+        assert got["Z"] == "3:15.0"
+        assert got["B"] == "2:5000.0"  # the plain seeded doc is untouched
+        # every doc with a header amount now reconciles
+        assert (
+            con.execute(
+                "SELECT COUNT(*) FROM silver_document WHERE dq_line_reconciles = 0"
+            ).fetchone()[0]
+            == 0
+        )
+        # line_count follows the deduped lines; the load order survives
+        assert con.execute(
+            "SELECT line_count FROM silver_document WHERE purchase_document = 'R'"
+        ).fetchone() == (3,)
+        assert [
+            r[0]
+            for r in con.execute(
+                "SELECT line_number FROM silver_line WHERE purchase_document = 'D' ORDER BY line_sk"
+            )
+        ] == [1, 2]
+    finally:
+        con.close()
+
+
+def test_orphan_drill_rows_are_counted_and_facts_agree(tmp_path):
+    """Drill lines / POs whose document left the summary are dropped from BOTH
+    facts (fact_associated_po used to keep them) and surface as a warn."""
+    src, wh = tmp_path / "scprs.db", tmp_path / "warehouse.db"
+    _seed_source(src)
+    con = sqlite3.connect(src)
+    con.execute(
+        "INSERT INTO document_lines (business_unit, purchase_document, document_version, "
+        "line_number, item_description, quantity, unit_price) "
+        "VALUES ('8660', 'GONE', '1', '1', 'x', 1, 99)"
+    )
+    con.execute(
+        "INSERT INTO document_pos (business_unit, purchase_document, document_version, po_id, "
+        "po_total) VALUES ('8660', 'GONE', '1', 'P9', 99)"
+    )
+    con.commit()
+    con.close()
+    result = warehouse.build_all(
+        wh_path=wh, source_path=src, enrichment_db=tmp_path / "no_enrich.db", log=lambda *a: None
+    )
+    checks = {d["check"]: d for d in result["dq"]}
+    assert checks["orphan_drill_rows"]["severity"] == "warn"
+    assert checks["orphan_drill_rows"]["failed"] == 2
+    assert checks["document_grain_parity"]["passed"]
+    assert "fact_line_document_subset" not in checks
+    con = sqlite3.connect(wh)
+    try:
+        for t in ("lv_fact_line", "lv_fact_associated_po"):
+            assert (
+                con.execute(
+                    f"SELECT COUNT(*) FROM {t} WHERE purchase_document = 'GONE'"  # noqa: S608
+                ).fetchone()[0]
+                == 0
+            )
+    finally:
+        con.close()
+
+
+def test_document_grain_parity_catches_a_lost_fact_row(tmp_path):
+    """The parity check now compares bronze with fact_document, so a document
+    lost (or duplicated) between silver and the fact fails it -- the old
+    bronze-vs-silver form could never fail."""
+    src, wh = tmp_path / "scprs.db", tmp_path / "warehouse.db"
+    _seed_source(src)
+    warehouse.build_all(
+        wh_path=wh, source_path=src, enrichment_db=tmp_path / "no_enrich.db", log=lambda *a: None
+    )
+    con = sqlite3.connect(wh)
+    try:
+        con.execute(
+            "DELETE FROM fact_document WHERE rowid = (SELECT MIN(rowid) FROM fact_document)"
+        )
+        checks = {d["check"]: d for d in warehouse.run_dq(con, "t", "t")}
+        assert not checks["document_grain_parity"]["passed"]
+    finally:
+        con.close()
+
+
+def test_blank_summary_rows_are_kept_and_counted(tmp_path):
+    src, wh = tmp_path / "scprs.db", tmp_path / "warehouse.db"
+    _seed_source(src)
+    con = sqlite3.connect(src)
+    con.execute("INSERT INTO purchases (business_unit, purchase_document) VALUES ('8660', 'BLANK')")
+    con.commit()
+    con.close()
+    result = warehouse.build_all(
+        wh_path=wh, source_path=src, enrichment_db=tmp_path / "no_enrich.db", log=lambda *a: None
+    )
+    checks = {d["check"]: d for d in result["dq"]}
+    assert checks["summary_rows_without_attributes"]["failed"] == 1
+    assert not result["errors"]
+
+
+def test_side_input_name_collision_is_left_unmatched(tmp_path):
+    """A normalized name shared by two uncurated canonical ids must not pin a
+    CMAS / eProcure row to whichever id sorts first; it stays unmatched and is
+    counted, and crosswalk gaps use the same normalization."""
+    src, wh = tmp_path / "scprs.db", tmp_path / "warehouse.db"
+    cmas = tmp_path / "cmas.db"
+    _seed_source(src)  # "Acme" (S1), "Beta" (S2)
+    con = sqlite3.connect(src)
+    # "ACME, INC." normalizes like "Acme" but is a separate, uncurated id
+    _add_drill(con, "Q", 10.0, [("1", "x", 1, 10)], supplier=("S8", "ACME, INC."))
+    con.commit()
+    con.close()
+    _seed_cmas(
+        cmas,
+        [
+            ("3-01-01-1001", "Acme Inc", "SB", "2030-01-01"),
+            ("3-01-01-1002", "Beta LLC", "SB", "2030-01-01"),
+        ],
+    )
+    result = warehouse.build_all(
+        wh_path=wh,
+        source_path=src,
+        enrichment_db=tmp_path / "no_enrich.db",
+        cmas_db=cmas,
+        log=lambda *a: None,
+    )
+    checks = {d["check"]: d for d in result["dq"]}
+    assert checks["canonical_crosswalk_gaps"]["failed"] == 1  # UPPER(TRIM()) missed it
+    assert checks["side_input_ambiguous_names"]["failed"] == 1
+    con = sqlite3.connect(wh)
+    try:
+        matched = dict(
+            con.execute("SELECT agreement_number, matched_canonical_id FROM bronze_cmas")
+        )
+        assert matched == {"3-01-01-1001": None, "3-01-01-1002": "S2"}
+        assert con.execute("SELECT canonical_ids FROM dw_supplier_name_collision").fetchall() == [
+            ("S1,S8",)
+        ]
+    finally:
+        con.close()
+
+
+def test_unknown_bucket_is_not_a_rival_and_side_input_duplicates_stay_unmatched(tmp_path):
+    """The UNKNOWN bucket (summary rows without a supplier id keep the vendor's
+    name: WW GRAINGER INC under UNKNOWN in 2026-10) must not make the real
+    company's name ambiguous, and carries one fixed label. From the other side,
+    two distinct eProcure firms normalizing alike can't both be our supplier."""
+    src, wh = tmp_path / "scprs.db", tmp_path / "warehouse.db"
+    cmas, epr = tmp_path / "cmas.db", tmp_path / "eprocure.db"
+    _seed_source(src)  # "Acme" (S1), "Beta" (S2)
+    con = sqlite3.connect(src)
+    con.execute(
+        "INSERT INTO purchases (business_unit, purchase_document, version, grand_total, "
+        "start_date, acquisition_type_sub_type, acquisition_method, supplier_id, "
+        "supplier_name, status, department_name) VALUES ('8660', 'U', '1', 7.0, "
+        "'2021-02-18', 'IT Goods', 'Formal - COMPETITIVE', NULL, 'Acme', 'Active', 'PUC')"
+    )
+    con.commit()
+    con.close()
+    _seed_cmas(cmas, [("3-01-01-1001", "Acme Inc", "SB", "2030-01-01")])
+    _seed_eprocure(
+        epr,
+        [
+            ("100", "Beta, Inc.", "DVBE", "2025-01-01", "2030-01-31"),
+            ("200", "Beta LLC", "SB", "2025-01-01", "2030-01-31"),  # a different firm
+        ],
+    )
+    result = warehouse.build_all(
+        wh_path=wh,
+        source_path=src,
+        enrichment_db=tmp_path / "no_enrich.db",
+        cmas_db=cmas,
+        eprocure_db=epr,
+        log=lambda *a: None,
+    )
+    checks = {d["check"]: d for d in result["dq"]}
+    assert checks["canonical_crosswalk_gaps"]["failed"] == 0
+    assert checks["side_input_ambiguous_names"]["failed"] == 2  # both Beta records
+    con = sqlite3.connect(wh)
+    try:
+        assert con.execute("SELECT matched_canonical_id FROM bronze_cmas").fetchall() == [("S1",)]
+        assert con.execute(
+            "SELECT DISTINCT matched_canonical_id FROM bronze_eprocure"
+        ).fetchall() == [(None,)]
+        assert con.execute(
+            "SELECT source, name_norm, firm_count FROM dw_side_input_name_collision"
+        ).fetchall() == [("eprocure", "BETA", 2)]
+        assert con.execute(
+            "SELECT DISTINCT canonical_name FROM gold_document WHERE canonical_id = 'UNKNOWN'"
+        ).fetchall() == [(warehouse.UNKNOWN_SUPPLIER_NAME,)]
+        assert con.execute(
+            "SELECT supplier_name FROM gold_supplier_share WHERE supplier_id = 'UNKNOWN'"
+        ).fetchall() == [(warehouse.UNKNOWN_SUPPLIER_NAME,)]
+        assert con.execute(
+            "SELECT COUNT(*) FROM gold_supplier_master WHERE canonical_id = 'UNKNOWN'"
+        ).fetchone() == (1,)
+    finally:
+        con.close()
+
+
+def test_share_and_hhi_marts_group_by_canonical_supplier(tmp_path, monkeypatch):
+    """Two registrations of one company are ONE competitor in the share / HHI /
+    acquisition-profile marts (they feed Power BI and MCP)."""
+    from src import supplier_master
+
+    src, wh = tmp_path / "scprs.db", tmp_path / "warehouse.db"
+    _seed_source(src)
+    con = sqlite3.connect(src)
+    _add_drill(con, "Q", 50.0, [("1", "x", 1, 50)], supplier=("S8", "Acme West"))
+    con.commit()
+    con.close()
+    master = {"S8": {"canonical_id": "S1", "canonical_name": "Acme", "parent_name": None}}
+    monkeypatch.setattr(supplier_master, "load_master", lambda *a, **k: master)
+    warehouse.build_all(
+        wh_path=wh, source_path=src, enrichment_db=tmp_path / "no_enrich.db", log=lambda *a: None
+    )
+    con = sqlite3.connect(wh)
+    try:
+        share = con.execute(
+            "SELECT supplier_id, supplier_name, total_value FROM gold_supplier_share "
+            "WHERE supplier_id = 'S1'"
+        ).fetchall()
+        assert share == [("S1", "Acme", 200.0)]  # doc A v2 $150 + Q $50
+        assert (
+            con.execute(
+                "SELECT supplier_count FROM gold_market_concentration "
+                "WHERE acquisition_type = 'IT Goods'"
+            ).fetchone()[0]
+            == 1
+        )
+        prof = con.execute(
+            "SELECT supplier_id, total_value FROM gold_supplier_acquisition_profile "
+            "WHERE supplier_name = 'Acme' AND acquisition_type = 'IT Goods'"
+        ).fetchall()
+        assert prof == [("S1", 50.0)]
+    finally:
+        con.close()

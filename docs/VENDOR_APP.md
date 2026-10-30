@@ -39,13 +39,21 @@ Insight vectors:
 Rules the export enforces (don't move them into the front end):
 
 - **Canonical suppliers only.** Shares and HHI are recomputed from `gold_document`
-  by `canonical_id`; `gold_supplier_share` / `gold_market_concentration` group by
-  registration and split re-registered companies.
+  by `canonical_id` (the export's own computation; `gold_supplier_share` /
+  `gold_market_concentration` are canonical too since 2026-10, but the app
+  doesn't depend on them).
 - **Null, not zero.** Unloaded departments still get a page (eProcure history and
   open solicitations cover every department) with `loaded: false` and null spend blocks.
 - **`supplier_kind`** labels interagency counterparties (`DEPT…`/`UNIV…` →
   `government`) and redacted/pooled payees (`…CFD`, `…SGP`, `UNKNOWN` →
   `placeholder`) so the UI doesn't present them as competitors; totals still include them.
+- **`partial` on every fiscal-year row** (department pages, the overview trend,
+  supplier pages): true when the data window doesn't span the whole Jul–Jun
+  year, with coverage ending at the export date — so the year in progress and
+  later years (contracts entered ahead of their start date) are always partial.
+  Department rows use the department's own window; overview and supplier rows
+  use the warehouse's.
+- **`cmas_holder`** needs a CMAS agreement still in term on the export date.
 - **Public slice.** CMAS contact name/email/website are never selected.
 - The output directory is rebuilt via a staging dir and swapped in, so a department
   or supplier that leaves the warehouse can't leave a stale page behind.

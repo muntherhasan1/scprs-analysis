@@ -450,9 +450,13 @@ def collect_po_details(
             # Distinct documents covered (drilled or skipped) this pass. The grid
             # order can shift between pages, so a document may show on two pages
             # while another shows on none: drill each once, and call the pass
-            # complete only when the distinct count reaches the grid's total
-            # (8570 2024-07-01: 613 drills recorded "done", 486 distinct docs).
+            # complete only when the distinct (document, version) rows seen reach
+            # the grid's total (8570 2024-07-01: 613 drills recorded "done", 486
+            # distinct docs). The total counts ROWS, and a document can hold one
+            # row per version (0690 2026-01-27: S251017090 at versions 0 and 1,
+            # "1 to 7 of 7"), so counting documents alone never completes that day.
             seen: set[str] = set()
+            rows_seen: set[tuple[str, str]] = set()
             complete = True
             page_no = 1
             while True:
@@ -466,6 +470,8 @@ def collect_po_details(
                         break
                     link = page.locator(f"[id='PURCHASE_DOC${i}']")
                     doc = link.inner_text().strip()
+                    ver = page.locator(f"[id='VERSION_NBR${i}']")
+                    rows_seen.add((doc, ver.inner_text().strip() if ver.count() else ""))
                     if doc in seen:
                         continue  # repeated on a later page: already covered
                     if skip_docs and doc in skip_docs:
@@ -522,9 +528,9 @@ def collect_po_details(
                 page_no += 1
             if skipped:
                 log(f"  skipped {skipped} already-drilled document(s)")
-            if complete and len(seen) < grid_total:
+            if complete and len(rows_seen) < grid_total:
                 log(
-                    f"  covered {len(seen)} of {grid_total} grid document(s) "
+                    f"  covered {len(rows_seen)} of {grid_total} grid row(s) "
                     "(grid order shifted between pages); leaving the day incomplete"
                 )
                 complete = False
@@ -542,6 +548,27 @@ def collect_po_details(
     return results
 
 
+def read_export_html(path: Path):
+    """Read a PeopleSoft "Excel" export (really an HTML table) as UTF-8.
+
+    The file carries no charset declaration, so ``pandas.read_html(path)``
+    decoded its UTF-8 bytes as Latin-1: '¿' became 'Â¿' and a trailing
+    non-breaking space survived ``strip()`` as 'Â' — garbling 8 document ids
+    and 11,585 item titles in prod (e.g. 4265 '22-10799Â'). Decode explicitly
+    (cp1252 if a file is ever not valid UTF-8) and turn NBSP into a plain space.
+    """
+    import io
+
+    import pandas as pd
+
+    raw = Path(path).read_bytes()
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        text = raw.decode("cp1252", errors="replace")
+    return pd.read_html(io.StringIO(text.replace("\xa0", " ")))[0]
+
+
 def load_extract(path: Path):
     """Parse a downloaded SCPRS .xls (HTML table) into a tidy DataFrame.
 
@@ -551,7 +578,7 @@ def load_extract(path: Path):
     """
     import pandas as pd
 
-    df = pd.read_html(path)[0]
+    df = read_export_html(path)
     # Strip leading apostrophes the export puts on id-like text columns.
     # (Handle both the legacy object dtype and pandas' newer str dtype.)
     for col in df.columns:

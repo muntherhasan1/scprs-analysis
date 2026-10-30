@@ -21,7 +21,16 @@ Bronze is the immutable landing zone — nothing is cleaned here.
 - **Grain resolution.** The source is at *(document, version)* grain; silver
   collapses to the **current version** so `silver_document` is one row per
   document. Line/PO rows are filtered to the current version too (a document can
-  be drilled at several versions), then de-duplicated.
+  be drilled at several versions), then de-duplicated. Lines dedupe on
+  **structure, not content**: a document drilled twice into one load appends
+  its whole line set again (rows = one block repeated k times, in load order)
+  and collapses to the first block, while a line PO Details genuinely lists on
+  several schedules keeps every row. The header's `merchandise_amount` breaks
+  the rare tie (one line repeated k times looks the same both ways): the first
+  of structural / all rows / distinct rows that reconciles within $1 wins. The
+  old content `DISTINCT` dropped 234 docs / $8.46M of real lines on the
+  2026-10 snapshot (removing it outright would have re-added $2.50B of
+  repeat-drill duplicates across 4,719 docs).
 - **Merge precedence.** The PO Details drill-down overrides the summary only
   while its version is at least the summary's; a document amended after it was
   drilled takes the (daily-refreshed) summary for every shared field and is
@@ -88,12 +97,18 @@ kept on the fact rather than modeled as a `dim_item`).
 
 **Competitive-intelligence marts:**
 - `gold_supplier_profile` — vendor scorecard (value, reach, % won non-competitively).
-- `gold_supplier_share` — supplier share of each department's spend.
-- `gold_market_concentration` — HHI + top-supplier share per dept × acquisition type.
+- `gold_supplier_share` — supplier share of each department's spend, per
+  **canonical** supplier (`supplier_id`/`supplier_name` carry the canonical
+  id/name).
+- `gold_market_concentration` — HHI + top-supplier share per dept × acquisition
+  type, over **canonical** suppliers (`supplier_count` counts companies). Until
+  2026-10 both grouped by registration, which understates concentration (on the
+  2026-10 snapshot 20 of 183 cells moved, by at most 20 points).
 - `gold_price_benchmark` — unit-price spread per UNSPSC where 2+ suppliers compete.
 - `gold_supplier_unspsc_profile` / `gold_supplier_specialization` — what each
   vendor supplies and how specialized.
-- `gold_supplier_acquisition_profile` — broad (all-document) category footprint.
+- `gold_supplier_acquisition_profile` — broad (all-document) category footprint,
+  per canonical supplier like `gold_supplier_share`.
 
 **Canonical vendor (master data):** SCPRS issues a `supplier_id` per *registration*,
 so one company can appear under several ids (NORTH RIDGE CONSULTING has two; BETA
@@ -127,6 +142,18 @@ roughly triples the match rate over the plain `UPPER()` join. It exposes
 **`gold_supplier_cmas`** (our canonical suppliers that also hold a CMAS agreement —
 SCPRS spend beside CMAS terms / SB-DVBE / product reach). Absent `data/cmas.db`,
 the build is a clean no-op. See `docs/CMAS.md`.
+A normalized name shared by **2+ canonical ids** (an uncurated duplicate
+registration) is left **unmatched** rather than pinned to one arbitrary id and
+its partial spend; those names are listed in `dw_supplier_name_collision`
+(warn checks `canonical_crosswalk_gaps` and `side_input_ambiguous_names`).
+Unifying the ids in `references/supplier_master.csv` restores the match.
+Only company ids are candidates: the `UNKNOWN` bucket (summary rows with no
+supplier id keep the vendor's name, e.g. WW GRAINGER) and government /
+placeholder ids (`DEPT…`, `UNIV…`, `…CFD`, `…SGP`) never count as a rival.
+The rule also runs from the other side: 2+ distinct eProcure firms
+(`cert_id`) whose names normalize alike stay unmatched too, listed in
+`dw_side_input_name_collision` and counted by `side_input_ambiguous_names`.
+The `UNKNOWN` bucket's `canonical_name` is always `Unknown supplier`.
 
 **eProcure SB/DVBE certification integration:** a third optional side input,
 Cal eProcure's certified-supplier registry (`data/eprocure.db`,
@@ -154,10 +181,11 @@ superior courts stay NULL — ~2% of events). On top sit
 **`gold_eprocure_posted_opportunity`** (solicitations open for bid as of the
 last extraction, with bid close dates) and **`gold_eprocure_event_demand`**
 (per department × bid-close year: solicitation volume and SB-only/DVBE-only
-set-aside counts — the demand-side companion to
-`gold_supplier_certification`). Caveats the marts carry in their definitions:
-the set-aside flags are title-derived ("SB ONLY"/"DVBE ONLY" in the event
-name), so counts are a floor, not a census; coverage is Posted + recent
+set-aside counts, plus `sb_or_dvbe_count` for set-asides open to either — the
+demand-side companion to `gold_supplier_certification`). Caveats the marts
+carry in their definitions: the set-aside flags are title-derived (re-derived
+at ingest by `eprocure.set_aside_flags` from the "... ONLY" clause of the
+event name), so counts are a floor, not a census; coverage is Posted + recent
 Historical years, not the full archive; Posted rows have no published date by
 source design. A pre-events `eprocure.db` (registry only) still builds cleanly.
 
@@ -185,9 +213,13 @@ Two marts derive from it:
 - **`dw_batch`** — one row per build (batch id, start/finish, status, row counts).
 - **`dw_dq_results`** — every check's outcome per batch, with a **severity**:
   - `error` (gates the build): no null document keys, unique document grain,
-    document-grain parity vs bronze, and fact→dimension referential integrity.
-  - `warn` (informational): line-item reconciliation, and negative grand totals
-    (real credits/deobligations in the source data).
+    document-grain parity (distinct bronze documents = `fact_document` rows,
+    end to end), and fact→dimension referential integrity.
+  - `warn` (informational): line-item reconciliation, negative grand totals
+    (real credits/deobligations in the source data), `orphan_drill_rows`
+    (drill lines/POs whose document left the summary — dropped from both
+    facts), `summary_rows_without_attributes` (blank rows SCPRS lists with no
+    version/date/value; kept), and the crosswalk / side-input name checks.
 
 ## PR output diff (`src/warehouse_diff.py`)
 A change to `warehouse.py` (a mart, a grain, a join, an abbreviation) can shift the

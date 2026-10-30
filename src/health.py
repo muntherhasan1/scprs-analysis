@@ -94,19 +94,31 @@ def _load_state(con: sqlite3.Connection) -> list[_UnitState]:
 
     `purchases` holds the summary (distinct start_date = an active day to drill);
     `details_progress` records each finished day. Left join so units with no
-    enrichment yet still appear (as 0 covered)."""
+    enrichment yet still appear (as 0 covered). A day in `details_reopen` (a
+    refresh found late-entered or amended documents on it) is pending again,
+    exactly as `enrich` treats it — otherwise a unit whose only work left is
+    reopened days would never be picked and never flagged stalled."""
+    has_reopen = con.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'details_reopen'"
+    ).fetchone()
+    reopened = (
+        "AND NOT EXISTS (SELECT 1 FROM details_reopen r "
+        "WHERE r.business_unit = dp.business_unit AND r.day = dp.day)"
+        if has_reopen
+        else ""
+    )
     rows = con.execute(
-        """
+        f"""
         SELECT p.business_unit,
                COUNT(DISTINCT p.start_date)  AS summary_days,
                COUNT(DISTINCT dp.day)        AS enriched_days,
                MAX(dp.completed_at)          AS last_enriched
         FROM purchases p
         LEFT JOIN details_progress dp
-          ON dp.business_unit = p.business_unit AND dp.day = p.start_date
+          ON dp.business_unit = p.business_unit AND dp.day = p.start_date {reopened}
         GROUP BY p.business_unit
         ORDER BY p.business_unit
-        """
+        """  # noqa: S608 - the only interpolation is a fixed internal clause
     ).fetchall()
     return [_UnitState(bu, sd, dd, _parse_ts(ts)) for bu, sd, dd, ts in rows]
 

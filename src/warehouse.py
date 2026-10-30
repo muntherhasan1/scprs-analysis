@@ -37,7 +37,7 @@ import sqlite3
 from datetime import datetime
 from pathlib import Path
 
-from . import scprs, supplier_master
+from . import eprocure, scprs, supplier_master
 
 
 class DwBuildError(RuntimeError):
@@ -328,6 +328,10 @@ _EPROCURE_EVENT_COLUMNS = {
     "search_status": "TEXT",
     "search_year": "INTEGER",
 }
+# Set-aside flags are re-derived from event_name at ingest (eprocure.set_aside_flags)
+# rather than trusted from the store, so a classifier fix reaches every stored row
+# without a re-scrape. sb_or_dvbe is warehouse-only (not a column in eprocure.db).
+_EPROCURE_EVENT_BRONZE = {**_EPROCURE_EVENT_COLUMNS, "sb_or_dvbe": "INTEGER"}
 
 
 def _ingest_eprocure_events(con: sqlite3.Connection, eprocure_db: Path, batch: str, ts: str) -> int:
@@ -337,12 +341,13 @@ def _ingest_eprocure_events(con: sqlite3.Connection, eprocure_db: Path, batch: s
     event ids collide across departments (several agencies issue a "25-007").
     Posted rows have NULL published_date by source design (the Posted grid carries
     no Published Date column). `sb_only`/`dvbe_only` are title-derived set-aside
-    flags ("SB ONLY"/"DVBE ONLY" in the event name) — a floor, not a census.
+    flags re-derived from the event name (eprocure.set_aside_flags) — a floor,
+    not a census; `sb_or_dvbe` marks a set-aside open to either group.
     Optional: an absent eprocure.db, or a pre-events store without the events
     table, yields an empty table and the build proceeds unaffected.
     """
     con.execute("DROP TABLE IF EXISTS bronze_eprocure_events")
-    defs = ", ".join(f"{c} {t}" for c, t in _EPROCURE_EVENT_COLUMNS.items())
+    defs = ", ".join(f"{c} {t}" for c, t in _EPROCURE_EVENT_BRONZE.items())
     con.execute(
         f"CREATE TABLE bronze_eprocure_events ({defs}, "  # noqa: S608 - column names are internal constants
         "_batch_id TEXT, _loaded_at TEXT, _source TEXT)"
@@ -357,11 +362,16 @@ def _ingest_eprocure_events(con: sqlite3.Connection, eprocure_db: Path, batch: s
                 cols = list(_EPROCURE_EVENT_COLUMNS)
                 sel = ", ".join(cols)
                 cur = src.execute(f"SELECT {sel} FROM events")  # noqa: S608 - internal constants
-                rows = [[*r, batch, ts, "eprocure.db"] for r in cur.fetchall()]
+                name_at, sb_at = cols.index("event_name"), cols.index("sb_only")
+                for r in cur.fetchall():
+                    r = list(r)
+                    sb, dvbe, either = eprocure.set_aside_flags(r[name_at])
+                    r[sb_at : sb_at + 2] = [sb, dvbe]
+                    rows.append([*r, either, batch, ts, "eprocure.db"])
         finally:
             src.close()
     if rows:
-        ph = ", ".join("?" * (len(_EPROCURE_EVENT_COLUMNS) + 3))
+        ph = ", ".join("?" * (len(_EPROCURE_EVENT_BRONZE) + 3))
         con.executemany(
             f"INSERT INTO bronze_eprocure_events VALUES ({ph})",  # noqa: S608 - fixed arity
             rows,
@@ -373,6 +383,16 @@ def _ingest_eprocure_events(con: sqlite3.Connection, eprocure_db: Path, batch: s
 # canonical-supplier stamp after gold is built.
 _SIDE_INPUT_TABLES = ("bronze_cmas", "bronze_eprocure")
 
+# Supplier ids that are not companies: the UNKNOWN bucket, interagency
+# departments/campuses (DEPT518000, DEPT7300W0, UNIV678000) and pooled or
+# redacted payees (0820CFD, 4500SGP). Same families as app_export's kinds.
+_NON_COMPANY_ID = re.compile(r"^(UNKNOWN|(DEPT|UNIV)\w+|\d+(CFD|SGP))$")
+
+# The canonical name of the UNKNOWN bucket. Its rows keep whatever vendor name
+# the summary carried (4 names in 2026-10), so MAX(canonical_name) labelled
+# PINNACLE PETROLEUM's spend "WW GRAINGER INC"; one fixed label instead.
+UNKNOWN_SUPPLIER_NAME = "Unknown supplier"
+
 
 def _resolve_side_input_suppliers(con: sqlite3.Connection) -> None:
     """Stamp each side-input row (CMAS agreement, eProcure certification) with the
@@ -383,16 +403,53 @@ def _resolve_side_input_suppliers(con: sqlite3.Connection) -> None:
     Runs after dim_supplier + _abbreviate_gold, so it reads canonical identity via
     the logical-named lv_dim_supplier view.
     """
-    # normalized canonical name -> canonical (id, name); first wins on the rare
-    # collision, deterministic by canonical_id.
-    lookup: dict[str, tuple[str, str]] = {}
+    # normalized canonical name -> every canonical (id, name) carrying it. A name
+    # shared by 2+ canonical ids is an uncurated duplicate registration: matching
+    # it would pin the side-input row to one arbitrary registration (and its
+    # partial spend), so it stays unmatched until references/supplier_master.csv
+    # unifies the ids. Ambiguous names land in dw_supplier_name_collision, which
+    # the canonical_crosswalk_gaps / side_input_ambiguous_names checks count.
+    # Only company suppliers are match candidates: the UNKNOWN bucket (summary
+    # rows with no supplier id keep their vendor's NAME, e.g. WW GRAINGER) and
+    # government/placeholder ids would otherwise read as a rival canonical and
+    # make the real company's name ambiguous.
+    by_key: dict[str, dict[str, str]] = {}
     for cid, cname in con.execute(
         "SELECT DISTINCT canonical_id, canonical_name FROM lv_dim_supplier "
         "WHERE canonical_name IS NOT NULL ORDER BY canonical_id"
     ):
         key = supplier_master.normalize_name(cname)
-        if key and key not in lookup:
-            lookup[key] = (cid, cname)
+        if key and not _NON_COMPANY_ID.match(cid):
+            by_key.setdefault(key, {}).setdefault(cid, cname)
+    lookup = {k: next(iter(v.items())) for k, v in by_key.items() if len(v) == 1}
+    con.execute("DROP TABLE IF EXISTS dw_supplier_name_collision")
+    con.execute(
+        "CREATE TABLE dw_supplier_name_collision (name_norm TEXT PRIMARY KEY, "
+        "canonical_count INTEGER, canonical_ids TEXT)"
+    )
+    con.executemany(
+        "INSERT INTO dw_supplier_name_collision VALUES (?, ?, ?)",
+        [(k, len(v), ",".join(sorted(v))) for k, v in by_key.items() if len(v) > 1],
+    )
+    # The same rule from the other side: 2+ distinct eProcure firms (cert_id)
+    # whose names normalize alike (INC/LLC stripped: BLACKBIRD INDUSTRIES Inc.
+    # in Fresno vs BlackBird Industries LLC in Elk Grove) can't all be our
+    # supplier; OR-ing their flags onto one canonical would claim a DVBE status
+    # only one of them holds. Left unmatched and listed for curation.
+    con.execute("DROP TABLE IF EXISTS dw_side_input_name_collision")
+    con.execute(
+        "CREATE TABLE dw_side_input_name_collision (source TEXT, name_norm TEXT, "
+        "firm_count INTEGER, PRIMARY KEY (source, name_norm))"
+    )
+    if _src_has_local(con, "bronze_eprocure"):
+        con.execute(
+            "INSERT INTO dw_side_input_name_collision "
+            "SELECT 'eprocure', supplier_norm, COUNT(DISTINCT cert_id) FROM bronze_eprocure "
+            "WHERE supplier_norm <> '' GROUP BY supplier_norm HAVING COUNT(DISTINCT cert_id) > 1"
+        )
+    side_ambiguous = {
+        r[0] for r in con.execute("SELECT name_norm FROM dw_side_input_name_collision")
+    }
     for table in _SIDE_INPUT_TABLES:
         if not _src_has_local(con, table):
             continue
@@ -401,7 +458,7 @@ def _resolve_side_input_suppliers(con: sqlite3.Connection) -> None:
             for rowid, norm in con.execute(
                 f"SELECT rowid, supplier_norm FROM {table}"  # noqa: S608 - internal constant
             )
-            if norm in lookup
+            if norm in lookup and not (table == "bronze_eprocure" and norm in side_ambiguous)
         ]
         con.executemany(
             f"UPDATE {table} SET matched_canonical_id = ?, "  # noqa: S608 - internal constant
@@ -443,6 +500,138 @@ def _acq_type(expr: str) -> str:
 def _acq_sub_type(expr: str) -> str:
     """SQL: the sub-type half of a combined "Type_SubType" string (NULL if none)."""
     return f"CASE WHEN instr({expr}, '_') > 0 THEN substr({expr}, instr({expr}, '_') + 1) END"
+
+
+# Line content: two drill rows equal on all of these are the same-looking line.
+_LINE_CONTENT = (
+    "line_number, item_id, item_description, unspsc, unspsc_description, "
+    "unit_of_measure, quantity, unit_price, line_status"
+)
+_SL_TEMPS = ("_sl_cur", "_sl_doc", "_sl_bad", "_sl_mode")
+
+
+def _build_silver_line(con: sqlite3.Connection) -> None:
+    """silver_line: the current version's drill lines, with repeat drills removed.
+
+    Two things put identical rows in one document's lines, and they need
+    opposite treatment:
+    * the SAME document drilled more than once into one load (the results grid
+      listing it on two pages) appends the whole line set again, so the rows
+      are one block repeated k times. Collapse to the first block.
+    * PO Details genuinely lists a line several times (separate schedules with
+      the same content). Keep every row.
+    A content-level DISTINCT (the old rule) did the first and broke the second:
+    234 docs / $8.46M of real lines lost on the 2026-10 snapshot. Here a doc is
+    collapsed only when its rows, in load order, are an exact repetition of a
+    leading block (rowid periodicity). The header's merchandise_amount then
+    settles the rare ambiguous doc (one line repeated k times looks the same
+    either way): keep the first of structural / all rows / distinct rows that
+    reconciles to it within $1, else structural. All passes are window
+    functions, aggregates and one indexed self-join -- linear, no correlated
+    subqueries (the PR #139 lesson).
+    """
+    for t in _SL_TEMPS:
+        con.execute(f"DROP TABLE IF EXISTS temp.{t}")
+    con.execute(
+        f"""
+        CREATE TEMP TABLE _sl_cur AS
+        SELECT *,
+               ROW_NUMBER() OVER (PARTITION BY business_unit, purchase_document
+                                  ORDER BY _rid) - 1 AS _ord,
+               COUNT(*) OVER (PARTITION BY business_unit, purchase_document) AS _n,
+               COUNT(*) OVER (PARTITION BY business_unit, purchase_document,
+                              {_LINE_CONTENT}) AS _k,
+               ROW_NUMBER() OVER (PARTITION BY business_unit, purchase_document,
+                                  {_LINE_CONTENT} ORDER BY _rid) AS _occ
+        FROM (
+          SELECT business_unit, purchase_document,
+                 CAST(line_number AS INTEGER) AS line_number,
+                 {_clean("item_id")} AS item_id,
+                 item_description,
+                 COALESCE({_clean("unspsc")}, 'UNKNOWN') AS unspsc,
+                 COALESCE({_clean("unspsc_description")}, 'Unknown') AS unspsc_description,
+                 unit_of_measure,
+                 CAST(quantity AS REAL) AS quantity,
+                 CAST(unit_price AS REAL) AS unit_price,
+                 ROUND(CAST(quantity AS REAL) * CAST(unit_price AS REAL), 2) AS line_amount,
+                 line_status,
+                 rowid AS _rid,
+                 CAST(COALESCE(document_version, '-1') AS INTEGER) AS _v,
+                 MAX(CAST(COALESCE(document_version, '-1') AS INTEGER))
+                   OVER (PARTITION BY business_unit, purchase_document) AS _maxv
+          FROM bronze_document_lines
+        )
+        WHERE _v = _maxv
+        """
+    )
+    con.execute("CREATE INDEX temp._sl_cur_ix ON _sl_cur(business_unit, purchase_document, _ord)")
+    # candidate period: n rows made of kmin copies of an n/kmin-row block
+    con.execute(
+        """
+        CREATE TEMP TABLE _sl_doc AS
+        SELECT business_unit, purchase_document, MAX(_n) AS n,
+               CASE WHEN MIN(_k) > 1 AND MAX(_n) % MIN(_k) = 0
+                    THEN MAX(_n) / MIN(_k) ELSE MAX(_n) END AS per
+        FROM _sl_cur GROUP BY business_unit, purchase_document
+        """
+    )
+    same = " AND ".join(f"b.{c} IS b0.{c}" for c in _LINE_CONTENT.split(", "))
+    con.execute(
+        f"""
+        CREATE TEMP TABLE _sl_bad AS
+        SELECT DISTINCT b.business_unit, b.purchase_document
+        FROM _sl_doc p
+        JOIN _sl_cur b ON b.business_unit = p.business_unit
+             AND b.purchase_document = p.purchase_document AND b._ord >= p.per
+        JOIN _sl_cur b0 ON b0.business_unit = b.business_unit
+             AND b0.purchase_document = b.purchase_document AND b0._ord = b._ord % p.per
+        WHERE p.per < p.n AND NOT ({same})
+        """
+    )
+    con.execute(
+        """
+        CREATE TEMP TABLE _sl_mode AS
+        WITH d AS (
+          SELECT p.business_unit, p.purchase_document, p.per,
+                 (p.per < p.n AND x.business_unit IS NULL) AS periodic
+          FROM _sl_doc p
+          LEFT JOIN _sl_bad x ON x.business_unit = p.business_unit
+               AND x.purchase_document = p.purchase_document),
+        t AS (
+          SELECT d.business_unit, d.purchase_document, d.per, d.periodic,
+                 SUM(CASE WHEN NOT d.periodic OR c._ord < d.per
+                          THEN c.line_amount ELSE 0 END) AS structural,
+                 SUM(c.line_amount) AS raw,
+                 SUM(CASE WHEN c._occ = 1 THEN c.line_amount ELSE 0 END) AS dist
+          FROM d JOIN _sl_cur c ON c.business_unit = d.business_unit
+               AND c.purchase_document = d.purchase_document
+          GROUP BY d.business_unit, d.purchase_document)
+        SELECT t.business_unit, t.purchase_document, t.per, t.periodic,
+               CASE WHEN COALESCE(s.merchandise_amount, 0) = 0 THEN 's'
+                    WHEN ABS(COALESCE(t.structural, 0) - s.merchandise_amount) < 1 THEN 's'
+                    WHEN ABS(COALESCE(t.raw, 0) - s.merchandise_amount) < 1 THEN 'r'
+                    WHEN ABS(COALESCE(t.dist, 0) - s.merchandise_amount) < 1 THEN 'd'
+                    ELSE 's' END AS mode
+        FROM t LEFT JOIN silver_document s ON s.business_unit = t.business_unit
+             AND s.purchase_document = t.purchase_document
+        """
+    )
+    con.execute(
+        """
+        CREATE TABLE silver_line AS
+        SELECT c.business_unit, c.purchase_document, c.line_number, c.item_id,
+               c.item_description, c.unspsc, c.unspsc_description, c.unit_of_measure,
+               c.quantity, c.unit_price, c.line_amount, c.line_status
+        FROM _sl_cur c JOIN _sl_mode m ON m.business_unit = c.business_unit
+             AND m.purchase_document = c.purchase_document
+        WHERE m.mode = 'r'
+           OR (m.mode = 's' AND (NOT m.periodic OR c._ord < m.per))
+           OR (m.mode = 'd' AND c._occ = 1)
+        ORDER BY c.business_unit, c.purchase_document, c._ord
+        """
+    )
+    for t in _SL_TEMPS:
+        con.execute(f"DROP TABLE temp.{t}")
 
 
 # Drill-down text columns cleaned of sentinels before the merge.
@@ -589,34 +778,7 @@ def build_silver(con: sqlite3.Connection, batch: str, ts: str) -> dict:
     # -- silver_line
     con.execute("DROP TABLE IF EXISTS silver_line")
     if have_lines:
-        # Keep only the current document version's lines (a document can be drilled
-        # at several versions); DISTINCT then collapses identical repeat drills.
-        con.execute(
-            """
-            CREATE TABLE silver_line AS
-            SELECT DISTINCT business_unit, purchase_document, line_number, item_id, item_description,
-                   unspsc, unspsc_description, unit_of_measure, quantity, unit_price,
-                   ROUND(quantity * unit_price, 2) AS line_amount, line_status
-            FROM (
-              SELECT business_unit, purchase_document,
-                     CAST(line_number AS INTEGER) AS line_number,
-                     NULLIF(NULLIF(TRIM(item_id), ''), 'N/A') AS item_id,
-                     item_description,
-                     COALESCE(NULLIF(NULLIF(TRIM(unspsc), ''), 'N/A'), 'UNKNOWN') AS unspsc,
-                     COALESCE(NULLIF(NULLIF(TRIM(unspsc_description), ''), 'N/A'), 'Unknown')
-                       AS unspsc_description,
-                     unit_of_measure,
-                     CAST(quantity AS REAL) AS quantity,
-                     CAST(unit_price AS REAL) AS unit_price,
-                     line_status,
-                     CAST(COALESCE(document_version, '-1') AS INTEGER) AS _v,
-                     MAX(CAST(COALESCE(document_version, '-1') AS INTEGER))
-                       OVER (PARTITION BY business_unit, purchase_document) AS _maxv
-              FROM bronze_document_lines
-            )
-            WHERE _v = _maxv
-            """
-        )
+        _build_silver_line(con)
     else:  # no enriched lines yet: empty table with the full schema downstream expects
         con.execute(
             "CREATE TABLE silver_line (business_unit TEXT, purchase_document TEXT, "
@@ -874,6 +1036,10 @@ def build_gold(con: sqlite3.Connection, batch: str, ts: str) -> dict:
           dep.dept_key,
           a.po_total
         FROM silver_associated_po a
+        -- same population as fact_line: drill rows whose document is no longer in
+        -- the summary are orphans (counted by the orphan_drill_rows check)
+        JOIN silver_document s ON s.business_unit = a.business_unit
+             AND s.purchase_document = a.purchase_document
         LEFT JOIN dim_date dt ON dt.full_date = a.start_date
         LEFT JOIN dim_department dep ON dep.business_unit = a.business_unit
         """
@@ -915,7 +1081,9 @@ def _apply_supplier_master(con, master: dict | None = None) -> None:
     for col in ("canonical_id", "canonical_name", "parent_name"):
         con.execute(f"ALTER TABLE dim_supplier ADD COLUMN {col} TEXT")  # noqa: S608 - constants
     con.execute(
-        "UPDATE dim_supplier SET canonical_id = supplier_id, canonical_name = supplier_name"
+        "UPDATE dim_supplier SET canonical_id = supplier_id, canonical_name = "
+        "CASE WHEN supplier_id = 'UNKNOWN' THEN ? ELSE supplier_name END",
+        (UNKNOWN_SUPPLIER_NAME,),
     )
     if not master:
         return
@@ -943,12 +1111,14 @@ def _apply_supplier_master(con, master: dict | None = None) -> None:
         "    (SELECT x.parent_name FROM _xref x WHERE x.supplier_id = dim_supplier.supplier_id) "
         "WHERE supplier_id IN (SELECT supplier_id FROM _xref)"
     )
-    # Propagate a parent to every sibling registration of the same canonical entity.
+    # Propagate a parent to every sibling registration of the same canonical
+    # entity. Aggregated once and joined: the per-row correlated MAX over an
+    # unindexed canonical_id was quadratic (95s at 62.6K suppliers, 2026-10).
     con.execute(
-        "UPDATE dim_supplier SET parent_name = "
-        "  (SELECT MAX(d2.parent_name) FROM dim_supplier d2 "
-        "   WHERE d2.canonical_id = dim_supplier.canonical_id) "
-        "WHERE parent_name IS NULL"
+        "UPDATE dim_supplier SET parent_name = p.parent_name "
+        "FROM (SELECT canonical_id, MAX(parent_name) AS parent_name FROM dim_supplier "
+        "      WHERE parent_name IS NOT NULL GROUP BY canonical_id) AS p "
+        "WHERE dim_supplier.canonical_id = p.canonical_id AND dim_supplier.parent_name IS NULL"
     )
     con.execute("DROP TABLE _xref")
 
@@ -1250,7 +1420,7 @@ def _build_marts(con):
                    CASE WHEN d.business_unit IS NOT NULL THEN 1 ELSE 0 END
                         AS matched_to_department,
                    e.published_date, e.end_date, e.status,
-                   e.sb_only, e.dvbe_only, e.search_status, e.search_year
+                   e.sb_only, e.dvbe_only, e.search_status, e.search_year, e.sb_or_dvbe
             FROM ev e
             LEFT JOIN dept d ON d.dept_norm = UPPER(TRIM(e.department_name))
             WHERE e._rn = 1""",
@@ -1260,15 +1430,16 @@ def _build_marts(con):
         # grid has no Published Date column).
         "gold_eprocure_posted_opportunity": """
             SELECT event_id, event_name, department_name, business_unit,
-                   end_date AS bid_close_date, sb_only, dvbe_only
+                   end_date AS bid_close_date, sb_only, dvbe_only, sb_or_dvbe
             FROM gold_eprocure_event
             WHERE status = 'Posted'""",
         # Set-aside demand: each department's solicitation volume per calendar
         # year (year of bid close) and how much of it is SB-only / DVBE-only set
-        # aside — the demand-side companion to gold_supplier_certification's
-        # supply side. The set-aside flags are title-derived ("SB ONLY" /
-        # "DVBE ONLY" in the event name), so these counts are a floor, not a
-        # census. Coverage: Posted plus the recent Historical years extracted —
+        # aside (or open to either: sb_or_dvbe_count, appended last so existing
+        # column positions hold) — the demand-side companion to
+        # gold_supplier_certification's supply side. The set-aside flags are
+        # title-derived (eprocure.set_aside_flags over the event name's
+        # "... ONLY" clause), so these counts are a floor, not a census. Coverage: Posted plus the recent Historical years extracted —
         # not the full archive.
         "gold_eprocure_event_demand": """
             SELECT department_name, business_unit,
@@ -1276,31 +1447,45 @@ def _build_marts(con):
                    COUNT(*) AS event_count,
                    SUM(sb_only) AS sb_only_count,
                    SUM(dvbe_only) AS dvbe_only_count,
-                   ROUND(100.0 * (SUM(sb_only) + SUM(dvbe_only)) / COUNT(*), 1)
-                         AS set_aside_pct
+                   ROUND(100.0 * (SUM(sb_only) + SUM(dvbe_only) + SUM(sb_or_dvbe)) / COUNT(*), 1)
+                         AS set_aside_pct,
+                   SUM(sb_or_dvbe) AS sb_or_dvbe_count
             FROM gold_eprocure_event
             GROUP BY department_name, business_unit, event_year""",
-        # Supplier share of each department's total spend.
+        # Supplier share of each department's total spend, per CANONICAL supplier
+        # (a company's several registrations are one competitor): supplier_id /
+        # supplier_name carry the canonical id / name (= the registration's own
+        # for the uncurated majority), so the output columns are unchanged.
         "gold_supplier_share": """
             WITH v AS (
-              SELECT dep.business_unit, f.supplier_key, SUM(f.grand_total) AS val
-              FROM fact_document f JOIN dim_department dep ON dep.dept_key = f.dept_key
-              GROUP BY dep.business_unit, f.supplier_key)
-            SELECT v.business_unit, s.supplier_id, s.supplier_name,
+              SELECT dep.business_unit, s.canonical_id, SUM(f.grand_total) AS val
+              FROM fact_document f
+              JOIN dim_department dep ON dep.dept_key = f.dept_key
+              JOIN dim_supplier s ON s.supplier_key = f.supplier_key
+              GROUP BY dep.business_unit, s.canonical_id),
+            n AS (
+              SELECT canonical_id, MAX(canonical_name) AS canonical_name
+              FROM dim_supplier GROUP BY canonical_id)
+            SELECT v.business_unit, v.canonical_id AS supplier_id,
+                   n.canonical_name AS supplier_name,
                    ROUND(v.val, 0) AS total_value,
                    ROUND(100.0 * v.val / SUM(v.val) OVER (PARTITION BY v.business_unit), 2)
                          AS share_pct
-            FROM v JOIN dim_supplier s ON s.supplier_key = v.supplier_key
+            FROM v JOIN n ON n.canonical_id = v.canonical_id
             WHERE v.val > 0""",
-        # Market concentration (HHI) per department x acquisition type.
+        # Market concentration (HHI) per department x acquisition type, over
+        # CANONICAL suppliers: splitting one company across its registrations
+        # understates concentration and overstates supplier_count, which now
+        # counts companies (2026-10 snapshot: 20 of 183 cells moved, by <= 20).
         # HHI: <1500 competitive, 1500-2500 moderate, >2500 concentrated.
         "gold_market_concentration": """
             WITH v AS (
-              SELECT dep.business_unit, a.acquisition_type, f.supplier_key,
+              SELECT dep.business_unit, a.acquisition_type, s.canonical_id,
                      SUM(f.grand_total) AS val
               FROM fact_document f
               JOIN dim_department dep ON dep.dept_key = f.dept_key
               JOIN dim_acquisition a ON a.acq_key = f.acq_key
+              JOIN dim_supplier s ON s.supplier_key = f.supplier_key
               GROUP BY 1, 2, 3),
             sh AS (
               SELECT business_unit, acquisition_type, val,
@@ -1355,14 +1540,21 @@ def _build_marts(con):
                    ROUND(100.0 * r.val / NULLIF(r.total, 0), 1) AS primary_category_pct
             FROM ranked r JOIN dim_supplier s ON s.supplier_key = r.supplier_key
             WHERE r.rn = 1""",
-        # Broad-coverage version from document-level acquisition type (all docs).
+        # Broad-coverage version from document-level acquisition type (all docs),
+        # per CANONICAL supplier like gold_supplier_share (supplier_id /
+        # supplier_name carry the canonical id / name; columns unchanged).
         "gold_supplier_acquisition_profile": """
-            SELECT s.supplier_id, s.supplier_name, a.acquisition_type,
+            WITH n AS (
+              SELECT canonical_id, MAX(canonical_name) AS canonical_name
+              FROM dim_supplier GROUP BY canonical_id)
+            SELECT s.canonical_id AS supplier_id, n.canonical_name AS supplier_name,
+                   a.acquisition_type,
                    COUNT(*) AS document_count, ROUND(SUM(f.grand_total), 0) AS total_value
             FROM fact_document f
             JOIN dim_supplier s ON s.supplier_key = f.supplier_key
+            JOIN n ON n.canonical_id = s.canonical_id
             JOIN dim_acquisition a ON a.acq_key = f.acq_key
-            GROUP BY s.supplier_id, s.supplier_name, a.acquisition_type""",
+            GROUP BY s.canonical_id, n.canonical_name, a.acquisition_type""",
         # Vendor scorecard + web-researched firmographics (with confidence).
         "gold_supplier_enriched": """
             SELECT p.supplier_id, p.supplier_name, p.award_count, p.total_value,
@@ -1569,11 +1761,15 @@ _DQ_CHECKS = [
         "GROUP BY business_unit, purchase_document HAVING COUNT(*) > 1)",
     ),
     (
+        # Bronze -> gold end to end: every summary document lands in fact_document
+        # exactly once. (Comparing against silver_document could never fail --
+        # silver is built from that very set; a dim join that fans out or drops a
+        # document only shows up in the fact.)
         "document_grain_parity",
         "error",
-        "distinct bronze docs vs silver_document",
+        "distinct bronze docs vs fact_document",
         "SELECT ABS((SELECT COUNT(*) FROM (SELECT DISTINCT business_unit, purchase_document "
-        "FROM bronze_purchases)) - (SELECT COUNT(*) FROM silver_document))",
+        "FROM bronze_purchases)) - (SELECT COUNT(*) FROM fact_document))",
     ),
     (
         "fact_document_dept_fk",
@@ -1600,11 +1796,28 @@ _DQ_CHECKS = [
         "SELECT COUNT(*) FROM fact_line WHERE unspsc_key IS NULL",
     ),
     (
-        "fact_line_document_subset",
-        "error",
-        "fact_line vs fact_document",
-        "SELECT COUNT(*) FROM fact_line WHERE document_bk NOT IN "
-        "(SELECT document_bk FROM fact_document)",
+        # Drill rows (lines + associated POs) whose document is no longer in the
+        # summary: the facts drop them (no header to hang dims on). Was a
+        # fact_line-vs-fact_document check that could never fail -- fact_line
+        # inner-joins the document -- so the drop was silent. Row-value IN builds
+        # one ephemeral index: linear.
+        "orphan_drill_rows",
+        "warn",
+        "silver_line + silver_associated_po without a document",
+        "SELECT (SELECT COUNT(*) FROM silver_line WHERE (business_unit, purchase_document) "
+        "NOT IN (SELECT business_unit, purchase_document FROM silver_document)) + "
+        "(SELECT COUNT(*) FROM silver_associated_po WHERE (business_unit, purchase_document) "
+        "NOT IN (SELECT business_unit, purchase_document FROM silver_document))",
+    ),
+    (
+        # SCPRS's export lists some documents with every field blank (no version,
+        # date, value or supplier). Kept -- the source lists them -- but they
+        # count as documents with no fiscal year / $0 / Unknown supplier.
+        "summary_rows_without_attributes",
+        "warn",
+        "silver_document (blank summary rows, no drill)",
+        "SELECT COUNT(*) FROM silver_document WHERE version IS NULL "
+        "AND grand_total IS NULL AND start_date IS NULL",
     ),
     (
         # A combined "Type_SubType" string left in acquisition_type silently drops
@@ -1654,7 +1867,7 @@ _DQ_CHECKS = [
         "eprocure_cert_dates_ordered",
         "warn",
         "bronze_eprocure (source quality)",
-        "SELECT COUNT(*) FROM bronze_eprocure " "WHERE cert_start_date > cert_end_date",
+        "SELECT COUNT(*) FROM bronze_eprocure WHERE cert_start_date > cert_end_date",
     ),
     (
         # Within one search slice a (department, event id) must be unique; a dupe
@@ -1671,8 +1884,7 @@ _DQ_CHECKS = [
         "eprocure_event_has_end_date",
         "warn",
         "bronze_eprocure_events (source quality)",
-        "SELECT COUNT(*) FROM bronze_eprocure_events "
-        "WHERE end_date IS NULL OR TRIM(end_date) = ''",
+        "SELECT COUNT(*) FROM bronze_eprocure_events WHERE end_date IS NULL OR TRIM(end_date) = ''",
     ),
     (
         # Crosswalk decay watch: the curated supplier_master.csv unifies KNOWN
@@ -1681,13 +1893,25 @@ _DQ_CHECKS = [
         # ids is an uncurated duplicate — canonical rollups double-count it.
         # Warn tier: the count TRENDING UP after an expansion is the signal to
         # extend references/supplier_master.csv.
+        # Counted under supplier_master.normalize_name (the same key side-input
+        # matching uses), not UPPER(TRIM()) -- that undercounted 769 vs 1,209.
         "canonical_crosswalk_gaps",
         "warn",
         "dim_supplier (uncurated duplicate names)",
-        "SELECT COUNT(*) FROM (SELECT UPPER(TRIM(supplier_name)) AS nm FROM dim_supplier "
-        "WHERE supplier_name IS NOT NULL AND TRIM(supplier_name) != '' "
-        "GROUP BY nm HAVING COUNT(DISTINCT supplier_id) > 1 "
-        "AND COUNT(DISTINCT canonical_id) > 1)",
+        "SELECT COUNT(*) FROM dw_supplier_name_collision",
+    ),
+    (
+        # CMAS / eProcure rows left unmatched because their normalized name maps
+        # to 2+ canonical ids (see _resolve_side_input_suppliers). Curating the
+        # crosswalk for these names restores the match.
+        "side_input_ambiguous_names",
+        "warn",
+        "bronze_cmas + bronze_eprocure (ambiguous supplier name)",
+        "SELECT (SELECT COUNT(*) FROM bronze_cmas WHERE supplier_norm IN "
+        "(SELECT name_norm FROM dw_supplier_name_collision)) + "
+        "(SELECT COUNT(*) FROM bronze_eprocure WHERE supplier_norm IN "
+        "(SELECT name_norm FROM dw_supplier_name_collision) OR supplier_norm IN "
+        "(SELECT name_norm FROM dw_side_input_name_collision WHERE source = 'eprocure'))",
     ),
 ]
 

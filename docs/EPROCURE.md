@@ -135,8 +135,15 @@ Mechanism (recon 2026-07-24) — the overlay, not the PeopleSoft host:
   5702"` (see #49). Posted renders in one page; Historical chunks at 50 rows
   and is paginated with the pager's Next button — the grid's Download button
   never produces a file (verified twice at 240s).
-- Event names carry set-aside markers (`**SB Only**`, `*DVBE Only*`), derived
-  into `sb_only` / `dvbe_only` flags at load.
+- Event names carry set-aside markers (`**SB Only**`, `*DVBE Only*`,
+  `**Certified SB, including MB, SB-PW, or a DVBE Only**`, `*SB/DVBE ONLY*`,
+  `**Small Business Bidders ONLY**`). `eprocure.set_aside_flags` reads the
+  clause before each "ONLY": SB groups only (SB, MB, SB-PW, small business) ->
+  `sb_only`; DVBE only -> `dvbe_only`; both -> `sb_or_dvbe` (open to either,
+  so neither "only" flag). Until 2026-10 a substring test for "DVBE ONLY"
+  tagged ~258 SB-or-DVBE events as DVBE-only and missed ~111 SB-only phrasings;
+  the warehouse re-derives the flags from the event name at ingest, so stored
+  rows are corrected without a re-scrape.
 - The Posted grid has **no Published Date column** (Historical adds it), so
   `published_date` is NULL on every `posted` row — source truth, not a bug.
 - A page turn occasionally sticks (observed live: the final 1-row page of a

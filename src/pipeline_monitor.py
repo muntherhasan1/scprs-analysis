@@ -20,11 +20,11 @@ import argparse
 import os
 from datetime import datetime, timezone
 
-# The serve dataset publishes on every successful enrich run (every 3h), so a
-# healthy pipeline commits at least 8x/day. 9h = two missed slots + ~2.5h
-# runtime headroom (enrich's 150m timeout backstop). Keep in sync with
-# MAX_AGE_HOURS in pipeline-monitor.yml.
-DEFAULT_MAX_HOURS = 9.0
+# The serve dataset is published by warehouse-refresh.yml (nominally every 6h;
+# measured fire gaps up to 9.1h because GitHub runs crons late and skips
+# slots). Keep in sync with SERVE_MAX_AGE_HOURS in pipeline-monitor.yml, which
+# passes --max-hours explicitly; this default only applies to manual runs.
+DEFAULT_MAX_HOURS = 12.0
 DEFAULT_DATASET = "munther-hasan/scprs-warehouse-data"
 
 

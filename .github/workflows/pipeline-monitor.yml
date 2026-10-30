@@ -16,6 +16,8 @@ name: Pipeline monitor
 #   4. last SUCCESSFUL "Summary refresh" run age — the summary has no other
 #      writer, so a dead refresh silently freezes `purchases` (2026-10: three
 #      months missing before anything noticed).
+#   5. last SUCCESSFUL run of each rare writer (CMAS daily, eProcure and the
+#      operational backup weekly) — a skipped cron slot is otherwise silent.
 #
 # Findings open/update one idempotent alert issue (keep-warm pattern) and the
 # run fails red; recovery auto-closes it. On a clean pass it pings the
@@ -25,9 +27,10 @@ name: Pipeline monitor
 # grace period means the pipeline OR its monitor is down.
 on:
   schedule:
-    # Offset ~35 min behind an enrich slot start ("17 */3"). A tick can land
-    # while that slot is still running — harmless: the check is on the age of
-    # the last SUCCESS, not the current run.
+    # Offset ~35 min behind an enrich slot start ("17 */3") on paper; in
+    # practice it fires ~4-5h late like the rest. A tick can land while an
+    # enrich run is still going — harmless: the check is on the age of the
+    # last SUCCESS, not the current run.
     - cron: "52 3,9,15,21 * * *"
   workflow_dispatch:
 
@@ -42,22 +45,28 @@ concurrency:
 
 env:
   ALERT_LABEL: pipeline-monitor-alert
-  # Enrich publishes every 3h; 9h = two missed slots + runtime headroom (a
-  # healthy full-budget run concludes ~1.5h after its slot under the 95m
-  # backstop). Detection of a two-missed-slot outage can slip one 6h
-  # monitor cycle — accepted: the dead-man's switch (~14h grace) is the outer
-  # bound, and tightening below ~9h would false-alert on routine GitHub cron
-  # lateness (slots observed firing up to ~3h late).
-  MAX_AGE_HOURS: "9"
-  # Serve commits come from warehouse-refresh.yml, every 6h with a 61–120m+
-  # build: healthy worst case ≈ 6h gap + ~1h duration spread + ~3h cron
-  # lateness ≈ 10h; a fully missed slot pushes the age past ~12h. 12 alerts
-  # on the first monitor tick after two consecutive slots produce no commit —
-  # the same two-missed-slots semantics as the enrich threshold above.
+  # Thresholds are set from MEASURED scheduler behaviour, not the cron
+  # spacing: GitHub fires this repo's crons hours late and silently skips
+  # slots. 2026-10-15..29: enrich's 8 nominal slots/day produced 3-5 runs;
+  # every workflow fired ~3-7h after its cron time. GitHub does not guarantee
+  # schedule delivery at all — these numbers can get worse without warning.
+  #
+  # Enrich: longest gap between consecutive scheduled fires was 9.0h (10-29
+  # 00:57 -> 09:58) and a full-budget run takes ~72m, so a HEALTHY pipeline
+  # reaches ~10.3h of success age. The old 9h threshold alerted on that
+  # routinely (#143, #145, #146: each "9h ago", each self-closed). 12h
+  # alerts after ~3 consecutive missing slots; the dead-man's switch (~14h
+  # grace) stays the outer bound.
+  MAX_AGE_HOURS: "12"
+  # Serve commits come from warehouse-refresh.yml (nominally every 6h, build
+  # 6-12m since PR #139): longest measured fire gap 9.1h (10-28 14:32 ->
+  # 23:37), so healthy age reaches ~9.3h. 12 leaves ~2.7h margin and still
+  # alerts once a slot after a long gap is missed.
   SERVE_MAX_AGE_HOURS: "12"
-  # Summary refresh runs daily: two missed slots (48h) + ~3h cron lateness +
-  # ~2h max duration. A single failed run doesn't page here (triage covers
-  # it); this catches "hasn't succeeded in two days, whatever the cause".
+  # Summary refresh runs daily; consecutive fires measured 16:00, 16:48,
+  # 17:03 (gaps <= ~25h). Two missed days (48h) + ~3h fire-time drift + ~2h
+  # max duration. A single failed run doesn't page here (triage covers it);
+  # this catches "hasn't succeeded in two days, whatever the cause".
   SUMMARY_MAX_AGE_HOURS: "53"
 
 jobs:
@@ -126,6 +135,41 @@ jobs:
             echo "finding=last successful 'Summary refresh' run was ${age_h}h ago (threshold ${SUMMARY_MAX_AGE_HOURS}h) — new SCPRS documents are not reaching the store" >> "$GITHUB_OUTPUT"
           fi
 
+      # The rare writers have no other liveness signal: triage only fires for
+      # runs that HAPPEN, and GitHub silently skips cron slots. Thresholds =
+      # slot spacing + measured fire lateness + run time (2026-08..10 history:
+      # CMAS 37 6 * * * fired 11:34-13:40 UTC, eProcure 53 4 * * 2 fired
+      # 09:07-12:12, backup 29 5 * * 0 fired 09:31-11:29 — i.e. 4-7h late).
+      #   CMAS (daily):  two missed days 48h + 8h lateness + 1h run   = 57h
+      #   weekly ones:   one missed week 168h + 8h lateness + 4h run  = 180h
+      # A weekly job pages on ONE missed slot: two would mean three weeks blind.
+      - name: Check last successful rare-writer runs
+        id: rare
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          findings=""
+          while IFS='|' read -r wf max_h why; do
+            last=$(gh run list --workflow "$wf" --status success \
+                     --limit 1 --json updatedAt --jq '.[0].updatedAt // empty')
+            if [ -z "$last" ]; then
+              findings="$findings; no successful '$wf' run found in recent history"
+              continue
+            fi
+            age_h=$(( ( $(date -u +%s) - $(date -u -d "$last" +%s) ) / 3600 ))
+            echo "last successful '$wf': $last (${age_h}h ago, max ${max_h}h)"
+            if [ "$age_h" -ge "$max_h" ]; then
+              findings="$findings; last successful '$wf' run was ${age_h}h ago (threshold ${max_h}h) — $why"
+            fi
+          done <<'EOF'
+          CMAS refresh (Wave 2)|57|CMAS agreements are not being refreshed
+          eProcure registry refresh|180|SB/DVBE certifications and solicitations are going stale
+          Operational backup|180|the operational store has no fresh cold backup
+          EOF
+          if [ -n "$findings" ]; then
+            echo "finding=${findings#; }" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Check serve dataset commit age
         id: serve
         env:
@@ -148,19 +192,20 @@ jobs:
             -d "Out-of-band pipeline monitor finding" 2>/dev/null || true
 
       - name: Alert on findings
-        if: steps.enrich.outputs.finding != '' || steps.serve.outputs.finding != '' || steps.summary.outputs.finding != ''
+        if: steps.enrich.outputs.finding != '' || steps.serve.outputs.finding != '' || steps.summary.outputs.finding != '' || steps.rare.outputs.finding != ''
         env:
           GH_TOKEN: ${{ github.token }}
           F1: ${{ steps.enrich.outputs.finding }}
           F2: ${{ steps.serve.outputs.finding }}
           F3: ${{ steps.summary.outputs.finding }}
+          F4: ${{ steps.rare.outputs.finding }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           body="Out-of-band monitor findings:"$'\n'
           [ -n "$F1" ] && body="$body"$'\n'"- $F1"
           [ -n "$F2" ] && body="$body"$'\n'"- $F2"
           [ -n "$F3" ] && body="$body"$'\n'"- $F3"
-          body="$body"$'\n\n'"This fires when the pipeline stops running or stops reaching the Spaces — the failure class workflow_run triage cannot see. A stale enrich age points at the Enrich workflow; a stale serve commit points at Warehouse refresh; a stale summary refresh points at Summary refresh."$'\n\n'"Run: $RUN_URL"
+          body="$body"$'\n\n'"This fires when the pipeline stops running or stops reaching the Spaces — the failure class workflow_run triage cannot see. A stale enrich age points at the Enrich workflow; a stale serve commit points at Warehouse refresh; a stale summary refresh points at Summary refresh; a stale CMAS / eProcure / backup age points at that workflow (its cron slots are being skipped or its runs fail)."$'\n\n'"Run: $RUN_URL"
           existing=$(gh issue list --label "$ALERT_LABEL" --state open \
             --json number --jq '.[0].number')
           if [ -n "$existing" ]; then
@@ -172,7 +217,7 @@ jobs:
           fi
 
       - name: Resolve on recovery
-        if: steps.enrich.outputs.finding == '' && steps.serve.outputs.finding == '' && steps.summary.outputs.finding == ''
+        if: steps.enrich.outputs.finding == '' && steps.serve.outputs.finding == '' && steps.summary.outputs.finding == '' && steps.rare.outputs.finding == ''
         env:
           GH_TOKEN: ${{ github.token }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
@@ -188,7 +233,7 @@ jobs:
       # external check pages on unhealthy AND on "the monitor itself died".
       # Skips quietly until the HEALTHCHECK_PING_URL secret is configured.
       - name: Dead-man's switch ping
-        if: steps.enrich.outputs.finding == '' && steps.serve.outputs.finding == '' && steps.summary.outputs.finding == ''
+        if: steps.enrich.outputs.finding == '' && steps.serve.outputs.finding == '' && steps.summary.outputs.finding == '' && steps.rare.outputs.finding == ''
         env:
           PING: ${{ secrets.HEALTHCHECK_PING_URL }}
         run: |
@@ -201,7 +246,7 @@ jobs:
           fi
 
       - name: Fail the run on findings
-        if: steps.enrich.outputs.finding != '' || steps.serve.outputs.finding != '' || steps.summary.outputs.finding != ''
+        if: steps.enrich.outputs.finding != '' || steps.serve.outputs.finding != '' || steps.summary.outputs.finding != '' || steps.rare.outputs.finding != ''
         run: |
           echo "::error::pipeline monitor found problems — see the alert issue"
           exit 1
