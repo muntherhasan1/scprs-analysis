@@ -450,6 +450,18 @@ def test_contract_change_capture(tmp_path):
     assert con.execute("SELECT COUNT(*) FROM dw_document_history").fetchone()[0] == 2
     con.close()
 
+    # A change WITHOUT a version bump (value + status) is still recorded.
+    con = sqlite3.connect(src)
+    con.execute(
+        "UPDATE purchases SET grand_total=160000.0, status='Closed' WHERE purchase_document='D'"
+    )
+    con.commit()
+    con.close()
+    warehouse.build_all(wh_path=wh, source_path=src, enrichment_db=no_enrich, log=lambda *a: None)
+    con = sqlite3.connect(wh)
+    assert con.execute("SELECT COUNT(*) FROM dw_document_history").fetchone()[0] == 3
+    con.close()
+
 
 def test_abbreviate():
     abbr = {"amount": "amt", "supplier": "sup", "name": "nm", "business_unit": "bu", "total": "tot"}
@@ -859,3 +871,86 @@ def test_eprocure_pre_events_store_is_tolerated(tmp_path):
         )
     finally:
         con.close()
+
+
+def test_silver_merge_splits_types_drops_sentinels_and_ignores_stale_drills(tmp_path):
+    """Regression for the 2026-10 drill-down audit bugs B1-B3."""
+    src, wh = tmp_path / "scprs.db", tmp_path / "warehouse.db"
+    _seed_source(src)
+    con = sqlite3.connect(src)
+    con.executemany(
+        "INSERT INTO purchases (business_unit, purchase_document, version, grand_total, "
+        "start_date, end_date, acquisition_type_sub_type, acquisition_method, supplier_id, "
+        "supplier_name, buyer_name, status, department_name) "
+        "VALUES ('8660', ?, ?, ?, '2021-04-01', ?, ?, 'Formal - COMPETITIVE', 'S3', 'Gamma', "
+        "'Ann', ?, 'PUC')",
+        [
+            # C: amended after it was drilled (summary v2, drill v1)
+            ("C", 2, 900.0, "2023-06-30", "NON-IT Goods", "Active"),
+            # D: current drill whose type arrives combined, with "N/A" placeholders
+            ("D", 1, 700.0, None, "NON-IT Services_Public Works", "Active"),
+        ],
+    )
+    con.executemany(
+        "INSERT INTO document_details (business_unit, purchase_document, version, bill_code, "
+        "merchandise_amount, grand_total, start_date, end_date, acquisition_type, "
+        "acquisition_method, lpa_contract_id, supplier_name, buyer_name, status) "
+        "VALUES ('8660', ?, ?, '059000', ?, ?, '2021-04-01', 'N/A', ?, "
+        "'Formal - COMPETITIVE', 'N/A', 'Gamma', 'N/A', ?)",
+        [
+            ("C", "1", 500.0, 500.0, "NON-IT Goods", "Closed"),
+            ("D", "1", 700.0, 700.0, "NON-IT Services_Public Works", "Active"),
+        ],
+    )
+    con.commit()
+    con.close()
+    result = warehouse.build_all(
+        wh_path=wh, source_path=src, enrichment_db=tmp_path / "no_enrich.db", log=lambda *a: None
+    )
+    con = sqlite3.connect(wh)
+    try:
+
+        def row(doc):
+            return con.execute(
+                "SELECT acquisition_type, acquisition_sub_type, grand_total, version, status, "
+                "end_date, lpa_contract_id, buyer_name, merchandise_amount, is_enriched, "
+                "detail_is_stale FROM silver_document WHERE purchase_document = ?",
+                (doc,),
+            ).fetchone()
+
+        # B2: the newer summary wins over a stale drill; drill-only fields stay.
+        assert row("C") == (
+            "NON-IT Goods",
+            "N/A",
+            900.0,
+            2,
+            "Active",
+            "2023-06-30",
+            None,
+            "Ann",
+            500.0,
+            1,
+            1,
+        )
+        # B1 + B3: combined drill type split; "N/A" never shadows the summary.
+        assert row("D") == (
+            "NON-IT Services",
+            "Public Works",
+            700.0,
+            1,
+            "Active",
+            None,
+            None,
+            "Ann",
+            700.0,
+            1,
+            0,
+        )
+        # An unenriched doc keeps the summary split and is never "stale".
+        assert row("A")[:2] == ("IT Services", "Software") and row("A")[10] == 0
+    finally:
+        con.close()
+    checks = {d["check"]: d for d in result["dq"]}
+    assert checks["acquisition_type_split"]["passed"]
+    assert checks["no_na_sentinels"]["passed"]
+    assert checks["stale_drilldowns"]["failed"] == 1

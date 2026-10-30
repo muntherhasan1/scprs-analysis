@@ -25,8 +25,8 @@ python -m src.app_export --today 2026-07-25   # pin "open" solicitations to a sn
 
 Insight vectors:
 
-- **Acquisition type** rolls glued sub-types (`NON-IT Services_Expert Witnesses`, a
-  silver parsing gap on ~1% of documents) up to the base type before `_`.
+- **Acquisition type** rolls any glued sub-type (`NON-IT Services_Expert Witnesses`)
+  up to the base type before `_` — a guard; silver splits these since 2026-10.
 - **Contract size** buckets `grand_total` (`SIZE_BUCKETS`); `$0` and credits get
   their own `adjustment` bucket so they don't read as small buys.
 - **Product category** maps line-item UNSPSC codes to ~15 plain-language
