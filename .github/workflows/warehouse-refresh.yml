@@ -76,19 +76,34 @@ jobs:
       - name: Fetch scprs.db + side inputs from the dataset
         run: python -m src.data_sync fetch-operational
 
+      # The append-only contract history (dw_document_history) is carried run to
+      # run in the WAREHOUSE dataset, since warehouse.db is rebuilt from nothing.
+      # Fails closed: if the dataset holds the history but it can't be fetched,
+      # the run stops instead of publishing an empty history over the real one.
+      # Uses the warehouse-data token (it already has read on that dataset).
+      - name: Fetch persisted contract history
+        env:
+          HF_WAREHOUSE_TOKEN: ${{ secrets.HF_WAREHOUSE_TOKEN }}
+        run: >
+          python -m src.data_sync fetch-history
+          --dataset "${{ vars.WAREHOUSE_DATASET || 'munther-hasan/scprs-warehouse-data' }}"
+
       # `warehouse build` has its own error-severity DQ gate (non-zero exit on
       # failure), so a bad build never reaches the publish step.
       - name: Rebuild warehouse + export serve DB
         run: |
           set -o pipefail
           start=$SECONDS
-          python -m src.warehouse build 2>&1 | tee build.log
+          python -m src.warehouse build --seed-history data/warehouse-history.db 2>&1 | tee build.log
           python -m src.warehouse serve-export 2>&1 | tee -a build.log
+          # Refuses (non-zero) if the history shrank below the copy it was seeded from.
+          python -m src.warehouse export-history --out data/warehouse-history.db 2>&1 | tee -a build.log
           {
             echo "### Warehouse rebuild"
             echo '```'
             grep -F "build timings:" build.log | tail -1
             grep -F "serve-export:" build.log | tail -1
+            grep -F "history" build.log | tail -3
             echo "rebuild step took $(( (SECONDS - start) / 60 ))m $(( (SECONDS - start) % 60 ))s"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
@@ -107,7 +122,7 @@ jobs:
         env:
           HF_WAREHOUSE_TOKEN: ${{ secrets.HF_WAREHOUSE_TOKEN }}
         run: >
-          python -m src.data_sync publish
+          python -m src.data_sync publish --with-history
           --dataset "${{ vars.WAREHOUSE_DATASET || 'munther-hasan/scprs-warehouse-data' }}"
 
       # Restart the Spaces so they re-fetch the serve DB at boot. Best-effort

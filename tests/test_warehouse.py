@@ -2,6 +2,8 @@
 
 import sqlite3
 
+import pytest
+
 from src import model, warehouse
 
 
@@ -466,6 +468,126 @@ def test_contract_change_capture(tmp_path):
     warehouse.build_all(wh_path=wh, source_path=src, enrichment_db=no_enrich, log=lambda *a: None)
     con = sqlite3.connect(wh)
     assert con.execute("SELECT COUNT(*) FROM dw_document_history").fetchone()[0] == 3
+    con.close()
+
+
+def _one_doc_source(path, total):
+    con = sqlite3.connect(path)
+    model._ensure_schema(con)
+    con.execute("DELETE FROM purchases")
+    con.execute(
+        "INSERT INTO purchases (business_unit, purchase_document, version, grand_total, status, "
+        "start_date, end_date, supplier_id, supplier_name, acquisition_type_sub_type, "
+        "acquisition_method, department_name) VALUES ('8660','D','1',?,'Active',"
+        "'2021-01-01','2022-01-01','S1','Acme','IT Services','Formal - COMPETITIVE','PUC')",
+        (total,),
+    )
+    con.commit()
+    con.close()
+
+
+def test_history_persists_across_fresh_rebuilds(tmp_path):
+    """CI rebuilds warehouse.db from nothing: export -> seed carries the history
+    over, so a later build appends only the change and keeps the earlier row."""
+    src, hist = tmp_path / "scprs.db", tmp_path / "warehouse-history.db"
+    no_enrich = tmp_path / "no_enrich.db"
+    quiet = lambda *a: None  # noqa: E731
+
+    _one_doc_source(src, 100.0)
+    wh1 = tmp_path / "run1.db"
+    warehouse.build_all(
+        wh_path=wh1, source_path=src, enrichment_db=no_enrich, seed_history_db=hist, log=quiet
+    )  # absent seed = fresh start
+    assert warehouse.export_history(wh1, hist, log=quiet) == 1
+    first = (
+        sqlite3.connect(wh1)
+        .execute("SELECT history_sk, observed_at FROM dw_document_history")
+        .fetchone()
+    )
+
+    # the export holds ONLY the history table (+ its index)
+    con = sqlite3.connect(hist)
+    objs = {
+        r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'")
+    }
+    con.close()
+    assert objs == {"dw_document_history", "ix_doc_history"}
+
+    # run 2: fresh warehouse, unchanged source -> nothing appended, row carried over
+    wh2 = tmp_path / "run2.db"
+    warehouse.build_all(
+        wh_path=wh2, source_path=src, enrichment_db=no_enrich, seed_history_db=hist, log=quiet
+    )
+    rows = (
+        sqlite3.connect(wh2)
+        .execute("SELECT history_sk, observed_at FROM dw_document_history")
+        .fetchall()
+    )
+    assert rows == [first]
+    warehouse.export_history(wh2, hist, log=quiet)
+
+    # run 3: value changed -> exactly one new row; the original survives untouched
+    _one_doc_source(src, 150.0)
+    wh3 = tmp_path / "run3.db"
+    warehouse.build_all(
+        wh_path=wh3, source_path=src, enrichment_db=no_enrich, seed_history_db=hist, log=quiet
+    )
+    con = sqlite3.connect(wh3)
+    rows = con.execute(
+        "SELECT history_sk, observed_at, grand_total FROM dw_document_history ORDER BY history_sk"
+    ).fetchall()
+    assert len(rows) == 2 and rows[0][:2] == first and rows[1][2] == 150.0
+    assert con.execute("SELECT COUNT(*) FROM gold_contract_change_log").fetchone()[0] == 1
+    con.close()
+
+
+def test_export_history_refuses_to_shrink(tmp_path):
+    src, hist = tmp_path / "scprs.db", tmp_path / "warehouse-history.db"
+    no_enrich = tmp_path / "no_enrich.db"
+    quiet = lambda *a: None  # noqa: E731
+    _one_doc_source(src, 100.0)
+    big = tmp_path / "big.db"
+    warehouse.build_all(wh_path=big, source_path=src, enrichment_db=no_enrich, log=quiet)
+    _one_doc_source(src, 150.0)
+    warehouse.build_all(wh_path=big, source_path=src, enrichment_db=no_enrich, log=quiet)
+    assert warehouse.export_history(big, hist, log=quiet) == 2
+
+    # an unseeded rebuild has only the current snapshot -> must not overwrite
+    small = tmp_path / "small.db"
+    warehouse.build_all(wh_path=small, source_path=src, enrichment_db=no_enrich, log=quiet)
+    with pytest.raises(warehouse.HistoryError, match="append-only"):
+        warehouse.export_history(small, hist, log=quiet)
+    assert warehouse._history_rows(hist) == 2  # existing file left untouched
+
+
+def test_history_null_version_is_not_reappended(tmp_path):
+    """35 real summary rows have no version; `=` never matches NULL, so they were
+    re-appended on every build — unbounded growth once history persists."""
+    src, wh = tmp_path / "scprs.db", tmp_path / "warehouse.db"
+    no_enrich = tmp_path / "no_enrich.db"
+    con = sqlite3.connect(src)
+    model._ensure_schema(con)
+    con.execute(
+        "INSERT INTO purchases (business_unit, purchase_document, version, grand_total, "
+        "department_name) VALUES ('8660','N',NULL,10.0,'PUC')"
+    )
+    con.commit()
+    con.close()
+    for _ in range(2):
+        warehouse.build_all(
+            wh_path=wh, source_path=src, enrichment_db=no_enrich, log=lambda *a: None
+        )
+    con = sqlite3.connect(wh)
+    assert con.execute("SELECT COUNT(*) FROM dw_document_history").fetchone()[0] == 1
+    con.close()
+
+
+def test_seed_history_rejects_a_file_without_the_table(tmp_path):
+    bogus = tmp_path / "warehouse-history.db"
+    sqlite3.connect(bogus).close()
+    con = sqlite3.connect(tmp_path / "wh.db")
+    with pytest.raises(warehouse.HistoryError):
+        warehouse.seed_history(con, bogus, log=lambda *a: None)
     con.close()
 
 

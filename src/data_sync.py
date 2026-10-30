@@ -32,6 +32,9 @@ from pathlib import Path
 from . import config  # noqa: F401 — imported for its load_dotenv() side-effect (.env in local dev)
 
 SERVE_FILENAME = "warehouse-serve.db"
+# dw_document_history alone, beside the serve DB: CI rebuilds warehouse.db from
+# nothing, so the append-only contract history is carried run to run in this file.
+HISTORY_FILENAME = "warehouse-history.db"
 OPERATIONAL_FILENAME = "scprs.db"
 SUPPLIER_FILENAME = "supplier_enrichment.db"
 CMAS_FILENAME = "cmas.db"  # CMAS side input, refreshed device-free by cmas-refresh.yml
@@ -170,20 +173,121 @@ def ensure_local_db(dest: Path) -> bool:
     return True
 
 
-def publish_serve_db(serve_path: Path, repo: str, token: str | None = None) -> str:
+def _history_blob(repo: str, token: str | None, revision: str = "main") -> str | None:
+    """Blob id of the persisted history file at ``revision``; None when absent.
+    Raises (never returns None) when the dataset itself can't be read."""
+    from huggingface_hub import HfApi
+
+    info = _with_retries(
+        lambda: HfApi().get_paths_info(
+            repo, [HISTORY_FILENAME], revision=revision, repo_type="dataset", token=token
+        ),
+        what=f"history lookup in {repo}",
+    )
+    return info[0].blob_id if info else None
+
+
+def fetch_history_db(dest: Path, repo: str, token: str | None = None) -> bool:
+    """Fetch the persisted contract history (``warehouse-history.db``) into ``dest``.
+
+    FAIL-CLOSED: if the dataset can't be read, or it HAS the history but the
+    download fails, this raises -- the run must stop rather than rebuild an empty
+    history and publish it over the real one. Only a confirmed absence (the first
+    run) returns False and leaves ``dest`` absent, so the build starts fresh.
+
+    The blob id seen here (or ``absent``) is recorded in a sidecar; the history
+    publish refuses if the dataset's copy changed since (a lost-update guard scoped
+    to this one file, so a serve-only publish from elsewhere doesn't conflict).
+    """
+    from huggingface_hub import HfApi
+
+    dest = Path(dest)
+    tok = token or _publish_token()
+    try:
+        sha = _with_retries(
+            lambda: HfApi().dataset_info(repo, token=tok).sha, what=f"HEAD lookup of {repo}"
+        )
+        blob = _history_blob(repo, tok, revision=sha)
+    except Exception as exc:  # noqa: BLE001 - re-raised as an actionable, fail-closed error
+        raise WarehouseFetchError(
+            f"cannot tell whether {repo!r} holds {HISTORY_FILENAME}: "
+            f"{type(exc).__name__}: {exc}. Refusing to start history fresh -- check the "
+            "token has READ access to the warehouse dataset."
+        ) from exc
+    sidecar = _rev_sidecar(dest)
+    sidecar.parent.mkdir(parents=True, exist_ok=True)
+    if blob is None:
+        dest.unlink(missing_ok=True)
+        sidecar.write_text("absent", encoding="utf-8")
+        return False
+    _download_db(repo, HISTORY_FILENAME, dest, tok, revision=sha)  # raises on failure
+    sidecar.write_text(blob, encoding="utf-8")
+    return True
+
+
+def _commit_serve_and_history(
+    serve_path: Path, history_path: Path, repo: str, token: str | None
+) -> str:
+    """One commit holding the serve DB AND the history file, so a run never leaves
+    the dataset with one updated and not the other. Refuses unless this run fetched
+    the history (sidecar) and the dataset's copy is still the one it fetched."""
+    from huggingface_hub import CommitOperationAdd, HfApi
+
+    history_path = Path(history_path)
+    if not history_path.exists():
+        raise FileNotFoundError(f"{history_path} not found -- run `warehouse export-history`")
+    sidecar = _rev_sidecar(history_path)
+    if not sidecar.exists():
+        raise WarehouseFetchError(
+            f"{history_path.name} was not fetched this run (no {sidecar.name}) -- refusing "
+            "to publish a history that may not include the dataset's"
+        )
+    expected = sidecar.read_text(encoding="utf-8").strip()
+    current = _history_blob(repo, token) or "absent"
+    if current != expected:
+        raise WarehouseFetchError(
+            f"lost-update guard: {repo}'s {HISTORY_FILENAME} changed since this run "
+            f"fetched it ({expected[:8]} -> {current[:8]}) -- NOT overwriting; re-run"
+        )
+    info = _with_retries(
+        lambda: HfApi(token=token).create_commit(
+            repo_id=repo,
+            repo_type="dataset",
+            operations=[
+                CommitOperationAdd(path_in_repo=SERVE_FILENAME, path_or_fileobj=str(serve_path)),
+                CommitOperationAdd(
+                    path_in_repo=HISTORY_FILENAME, path_or_fileobj=str(history_path)
+                ),
+            ],
+            commit_message="Publish serve DB + contract history",
+        ),
+        what=f"serve + history publish to {repo}",
+    )
+    sidecar.unlink(missing_ok=True)  # spent -- never reuse across runs
+    return getattr(info, "commit_url", str(info))
+
+
+def publish_serve_db(
+    serve_path: Path, repo: str, token: str | None = None, history_path: Path | None = None
+) -> str:
     """Upload the serve DB to the private HF Dataset ``repo`` (created if missing).
 
     Returns the commit URL. Called by the pipeline after a build; the token defaults
     to ``HF_TOKEN`` / the caller's cached HF login. When the sibling BI mart-CSV
     directory exists (``warehouse serve-export`` writes it), it is published too,
     under ``marts/`` — the Power BI Web-connector feed (docs/POWER_BI.md).
+
+    ``history_path`` (CI only) publishes the persisted contract history in the SAME
+    commit as the serve DB; ``_commit_serve_and_history`` holds its guards.
     """
     serve_path = Path(serve_path)
     if not serve_path.exists():
         raise FileNotFoundError(f"{serve_path} not found — run `warehouse serve-export` first")
-    url = _upload_db(
-        serve_path, repo, SERVE_FILENAME, token or os.environ.get("HF_TOKEN"), "Publish serve DB"
-    )
+    tok = token or os.environ.get("HF_TOKEN")
+    if history_path is not None:
+        url = _commit_serve_and_history(serve_path, history_path, repo, tok)
+    else:
+        url = _upload_db(serve_path, repo, SERVE_FILENAME, tok, "Publish serve DB")
     marts_dir = serve_path.parent / "marts"
     has_feed = marts_dir.is_dir() and (
         any(marts_dir.glob("*.csv")) or any(marts_dir.glob("star/*.parquet"))
@@ -484,7 +588,13 @@ def rollback_serve_db(repo: str, token: str | None = None) -> str:
     The last-good copy is the newest revision whose ``warehouse-serve.db`` blob
     DIFFERS from the current one -- not simply one commit back: a publish makes
     two commits (the DB, then ``marts/``), so ``commits[1]`` is usually the bad
-    DB itself. Raises if no earlier differing revision exists."""
+    DB itself. Raises if no earlier differing revision exists.
+
+    Only the serve DB is reverted; ``warehouse-history.db`` deliberately stays at
+    its newest copy. History is append-only observations of the source, and a
+    go-live failure is about what the Space serves, not about those observations
+    (the build already passed its DQ gate) -- reverting it would drop changes the
+    next build can never re-observe (an amended contract's prior values)."""
     from huggingface_hub import HfApi, hf_hub_download
 
     api = HfApi()
@@ -612,6 +722,19 @@ def _cli() -> None:
 
     pub = sub.add_parser("publish", help="Upload data/warehouse-serve.db to the dataset")
     pub.add_argument("--dataset", default=os.environ.get("WAREHOUSE_DATASET"))
+    pub.add_argument(
+        "--with-history",
+        action="store_true",
+        help="also publish data/warehouse-history.db in the same commit (CI only: needs "
+        "fetch-history earlier in the same run)",
+    )
+
+    fhi = sub.add_parser(
+        "fetch-history",
+        help="Download warehouse-history.db (persisted contract history); fails closed",
+    )
+    fhi.add_argument("--dataset", default=os.environ.get("WAREHOUSE_DATASET"))
+    fhi.add_argument("--dest", default=str(warehouse.HISTORY_DB))
 
     fsv = sub.add_parser(
         "fetch-serve",
@@ -698,8 +821,23 @@ def _cli() -> None:
     if args.cmd == "publish":
         if not args.dataset:
             raise SystemExit("set --dataset or the WAREHOUSE_DATASET env var")
-        url = publish_serve_db(warehouse.SERVE_DB, args.dataset, token=_publish_token())
+        if args.with_history:
+            url = publish_serve_db(
+                warehouse.SERVE_DB,
+                args.dataset,
+                token=_publish_token(),
+                history_path=warehouse.HISTORY_DB,
+            )
+        else:
+            url = publish_serve_db(warehouse.SERVE_DB, args.dataset, token=_publish_token())
         print(f"Published {warehouse.SERVE_DB.name} -> {args.dataset}: {url}")
+    elif args.cmd == "fetch-history":
+        if not args.dataset:
+            raise SystemExit("set --dataset or the WAREHOUSE_DATASET env var")
+        if fetch_history_db(Path(args.dest), args.dataset, token=_publish_token()):
+            print(f"Fetched {HISTORY_FILENAME} <- {args.dataset} into {args.dest}")
+        else:
+            print(f"Note: {HISTORY_FILENAME} not in {args.dataset} yet -- history starts fresh")
     elif args.cmd == "fetch-serve":
         if not ensure_local_db(Path(args.dest)):
             raise SystemExit("set the WAREHOUSE_DATASET env var")

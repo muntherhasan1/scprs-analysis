@@ -680,3 +680,133 @@ def test_publish_app_cli_prefers_app_token(monkeypatch, tmp_path):
     )
     data_sync._cli()
     assert captured == {"app_dir": tmp_path, "repo": "acme/app", "passed": "app-write"}
+
+
+# ------------------------------------------------------- persisted contract history
+
+
+def _fake_history_api(monkeypatch, *, blob="blob-h1", info_error=None, commits=None):
+    """Fake HfApi: dataset HEAD + the history file's blob id (None = absent)."""
+    import huggingface_hub
+
+    class FakeApi:
+        def __init__(self, token=None):
+            pass
+
+        def dataset_info(self, repo, token=None):
+            if info_error:
+                raise info_error
+
+            class Info:
+                sha = "headsha"
+
+            return Info()
+
+        def get_paths_info(self, repo, paths, revision=None, repo_type=None, token=None):
+            return [_PathInfo(blob)] if blob else []
+
+        def create_commit(self, **kw):
+            if commits is not None:
+                commits.append(kw)
+
+            class Info:
+                commit_url = "https://hf/commit/both"
+
+            return Info()
+
+    monkeypatch.setattr(huggingface_hub, "HfApi", FakeApi)
+
+
+def test_fetch_history_absent_starts_fresh(tmp_path, monkeypatch):
+    _fake_history_api(monkeypatch, blob=None)
+    dest = tmp_path / "warehouse-history.db"
+    dest.write_bytes(b"stale local copy")
+    assert data_sync.fetch_history_db(dest, "acme/wh", token="t") is False  # noqa: S106
+    assert not dest.exists()  # never seed from a stale local file
+    assert data_sync._rev_sidecar(dest).read_text() == "absent"
+
+
+def test_fetch_history_fails_closed_when_dataset_unreadable(tmp_path, monkeypatch):
+    _fake_history_api(monkeypatch, info_error=RuntimeError("401 Unauthorized"))
+    with pytest.raises(data_sync.WarehouseFetchError, match="Refusing to start history fresh"):
+        data_sync.fetch_history_db(tmp_path / "h.db", "acme/wh", token="t")  # noqa: S106
+
+
+def test_fetch_history_fails_closed_when_download_fails(tmp_path, monkeypatch):
+    import huggingface_hub
+
+    _fake_history_api(monkeypatch, blob="blob-h1")
+
+    def boom(**kw):
+        raise RuntimeError("403 Forbidden")
+
+    monkeypatch.setattr(huggingface_hub, "hf_hub_download", boom)
+    dest = tmp_path / "h.db"
+    with pytest.raises(data_sync.WarehouseFetchError):
+        data_sync.fetch_history_db(dest, "acme/wh", token="t")  # noqa: S106
+    assert not dest.exists()
+
+
+def test_fetch_history_downloads_at_head_and_records_blob(tmp_path, monkeypatch):
+    import huggingface_hub
+
+    remote = tmp_path / "remote.db"
+    remote.write_bytes(b"history")
+    seen = {}
+
+    def fake_download(**kw):
+        seen.update(kw)
+        return str(remote)
+
+    _fake_history_api(monkeypatch, blob="blob-h1")
+    monkeypatch.setattr(huggingface_hub, "hf_hub_download", fake_download)
+    dest = tmp_path / "h.db"
+    assert data_sync.fetch_history_db(dest, "acme/wh", token="t") is True  # noqa: S106
+    assert dest.read_bytes() == b"history"
+    assert seen["revision"] == "headsha"
+    assert data_sync._rev_sidecar(dest).read_text() == "blob-h1"
+
+
+def test_publish_with_history_is_one_commit_and_spends_sidecar(tmp_path, monkeypatch):
+    serve, hist = tmp_path / "warehouse-serve.db", tmp_path / "warehouse-history.db"
+    serve.write_bytes(b"s")
+    hist.write_bytes(b"h")
+    data_sync._rev_sidecar(hist).write_text("blob-h1")
+    commits = []
+    _fake_history_api(monkeypatch, blob="blob-h1", commits=commits)
+    url = data_sync.publish_serve_db(serve, "acme/wh", token="t", history_path=hist)  # noqa: S106
+    assert url == "https://hf/commit/both"
+    assert len(commits) == 1
+    paths = {op.path_in_repo for op in commits[0]["operations"]}
+    assert paths == {"warehouse-serve.db", "warehouse-history.db"}
+    assert not data_sync._rev_sidecar(hist).exists()
+
+
+def test_publish_with_history_refuses_without_fetch_or_on_change(tmp_path, monkeypatch):
+    serve, hist = tmp_path / "warehouse-serve.db", tmp_path / "warehouse-history.db"
+    serve.write_bytes(b"s")
+    hist.write_bytes(b"h")
+    commits = []
+    _fake_history_api(monkeypatch, blob="blob-h2", commits=commits)
+    with pytest.raises(data_sync.WarehouseFetchError, match="not fetched this run"):
+        data_sync.publish_serve_db(serve, "acme/wh", token="t", history_path=hist)  # noqa: S106
+    data_sync._rev_sidecar(hist).write_text("blob-h1")  # dataset moved on to h2 since
+    with pytest.raises(data_sync.WarehouseFetchError, match="lost-update guard"):
+        data_sync.publish_serve_db(serve, "acme/wh", token="t", history_path=hist)  # noqa: S106
+    assert commits == []
+
+
+def test_publish_cli_with_history_passes_history_path(monkeypatch):
+    monkeypatch.setenv("HF_WAREHOUSE_TOKEN", "dataset-write")
+    captured = {}
+
+    def recorder(serve_path, repo, token=None, history_path=None):
+        captured.update(history=history_path)
+        return "https://hf/commit/abc"
+
+    monkeypatch.setattr(data_sync, "publish_serve_db", recorder)
+    monkeypatch.setattr(
+        sys, "argv", ["data_sync", "publish", "--with-history", "--dataset", "acme/data"]
+    )
+    data_sync._cli()
+    assert captured["history"].name == "warehouse-history.db"

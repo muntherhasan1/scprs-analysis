@@ -150,7 +150,11 @@ contract changed. `capture_document_history` (run each build, after bronze) appe
 to the **append-only** `dw_document_history` (never dropped) a snapshot of each
 document/version's tracked attributes — but only when its signature changed, so
 rebuilds are idempotent. The first build backfills the versions present now; later
-builds accumulate real history. `gold_contract_change_log` and
+builds accumulate real history. CI rebuilds `warehouse.db` from nothing, so the
+table is persisted between runs as `warehouse-history.db` in the warehouse dataset
+(`data_sync fetch-history` → `warehouse build --seed-history` → `warehouse
+export-history` → `data_sync publish --with-history`; fail-closed, refuses to
+shrink — see docs/WAREHOUSE.md). `gold_contract_change_log` and
 `gold_contract_amendments` derive amendments/value-growth from it. When you need
 "how did this contract change," query the history / change-log, not silver (which
 keeps only the current version).
