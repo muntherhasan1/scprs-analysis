@@ -121,14 +121,101 @@ def test_capability_files_expire_and_are_pruned(tmp_path, monkeypatch):
     monkeypatch.setattr(mcp_server, "REPORT_TTL_S", 3600)
     fresh_url = mcp_server._save_capability_file(b"new", ".png")
     fresh = fresh_url.rsplit("/", 1)[1]
-    old = tmp_path / "old.png"
-    old.write_bytes(b"old")
+    old_name = "A" * 24 + ".png"  # the shape of a name the server writes
+    old, foreign = tmp_path / old_name, tmp_path / "notes.txt"
     stale = time.time() - 7200
-    os.utime(old, (stale, stale))
+    for path in (old, foreign):
+        path.write_bytes(b"old")
+        os.utime(path, (stale, stale))
 
     assert mcp_server._serve_file(_Req(fresh)).status_code == 200
-    assert mcp_server._serve_file(_Req("old.png")).status_code == 404
+    assert mcp_server._serve_file(_Req(old_name)).status_code == 404
 
     mcp_server._save_capability_file(b"another", ".png")  # writes prune expired files
     assert not old.exists()
     assert (tmp_path / fresh).exists()
+    # Pruning only touches files the server wrote, even in a shared directory.
+    assert foreign.exists()
+
+
+def test_serve_file_404s_on_foreign_names_and_vanished_files(tmp_path, monkeypatch):
+    monkeypatch.setattr(mcp_server, "REPORTS_DIR", tmp_path)
+    (tmp_path / "notes.txt").write_bytes(b"private")
+    for name in ("notes.txt", "..", "x/../notes.txt", "B" * 24 + ".exe"):
+        assert mcp_server._serve_file(_Req(name)).status_code == 404
+    # Pruned between the link being issued and fetched: a 404, never a 500.
+    assert mcp_server._serve_file(_Req("C" * 24 + ".html")).status_code == 404
+
+
+def test_non_positive_report_ttl_falls_back_to_the_default():
+    week = 7 * 86400
+    assert mcp_server._ttl_seconds(None) == week
+    assert mcp_server._ttl_seconds("0") == week  # 0 would 404 every new link
+    assert mcp_server._ttl_seconds("-3") == week
+    assert mcp_server._ttl_seconds("soon") == week
+    assert mcp_server._ttl_seconds("2") == 2 * 86400
+
+
+def test_one_principal_cannot_take_every_worker(monkeypatch):
+    # 2026-10 review: 40 heavy calls on one token made another user's `select 1`
+    # wait 115s. Each principal now holds at most MAX_CONCURRENT_PER_PRINCIPAL
+    # worker threads; the rest of its calls queue without taking one.
+    from concurrent.futures import ThreadPoolExecutor
+
+    monkeypatch.setattr(mcp_server, "MAX_CONCURRENT_PER_PRINCIPAL", 2)
+    monkeypatch.setattr(mcp_server, "_POOL", ThreadPoolExecutor(max_workers=4))
+    monkeypatch.setattr(query_log, "_append", lambda entry: None)
+    running, peak = {"hog": 0}, {"hog": 0}
+    lock = threading.Lock()
+
+    def select(query, max_rows=200):
+        if query == "SLOW":
+            with lock:
+                running["hog"] += 1
+                peak["hog"] = max(peak["hog"], running["hog"])
+            time.sleep(0.3)
+            with lock:
+                running["hog"] -= 1
+        return {"columns": [], "rows": [], "row_count": 0, "truncated": False}
+
+    monkeypatch.setattr(wq, "run_select", select)
+
+    async def call(principal, query):
+        auth.current_principal.set(principal)
+        t0 = time.monotonic()
+        await mcp_server.mcp.call_tool("run_sql", {"query": query})
+        return time.monotonic() - t0
+
+    async def main():
+        hogs = [asyncio.create_task(call("hog", "SLOW")) for _ in range(8)]
+        await asyncio.sleep(0.05)  # the hog's calls are all in flight
+        other = await call("other", "FAST")
+        await asyncio.gather(*hogs)
+        return other
+
+    other_wait = asyncio.run(main())
+    assert peak["hog"] == 2
+    # Without the cap the hog's 8 calls fill all 4 threads for two rounds and the
+    # other user waits ~0.3-0.6s.
+    assert other_wait < 0.15
+
+
+def test_report_stops_running_sections_at_its_deadline(tmp_path, monkeypatch):
+    monkeypatch.setattr(mcp_server, "REPORTS_DIR", tmp_path)
+    monkeypatch.setattr(mcp_server, "REPORT_TIMEOUT_S", 0.2)
+    monkeypatch.setattr(query_log, "_append", lambda entry: None)
+    ran = []
+
+    def select(query, max_rows=200):
+        ran.append(query)
+        time.sleep(0.15)
+        return {"columns": ["n"], "rows": [{"n": 1}], "row_count": 1, "truncated": False}
+
+    monkeypatch.setattr(wq, "run_select", select)
+    sections = "[" + ",".join(['{"heading":"h","sql":"SELECT 1"}'] * 6) + "]"
+    asyncio.run(
+        mcp_server.mcp.call_tool("generate_report", {"title": "t", "sections_json": sections})
+    )
+    assert len(ran) == 2  # only the sections started before the deadline ran…
+    html_doc = next(tmp_path.glob("*.html")).read_text(encoding="utf-8")
+    assert html_doc.count("report reached its time limit") == 4  # …the rest say so

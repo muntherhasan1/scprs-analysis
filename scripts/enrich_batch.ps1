@@ -10,8 +10,10 @@ day that errors retries later. The window defaults to the last 5 + next 2 fiscal
 years (California FY = Jul 1 - Jun 30), processed newest-first — the recent data
 most analysis cares about lands first.
 
-Build the summary first (scripts\build_batch.ps1) so each BU has active days to
-drill. Output appends to data/enrich_batch.log.
+Each BU needs summary rows first so it has active days to drill: first-load a
+NEW unit with scripts\build_batch.ps1 (one full-window `model build` per unit);
+units already loaded are kept current by `python -m src.model refresh` — never
+re-run `model build` on them over a narrower window (it replaces the summary). Output appends to data/enrich_batch.log.
 
 Run:
     powershell -NoProfile -ExecutionPolicy Bypass -File scripts\enrich_batch.ps1 -Days 200

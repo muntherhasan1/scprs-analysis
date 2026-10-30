@@ -1,5 +1,7 @@
 """Offline tests for the SQLite data model (download_range is monkeypatched)."""
 
+import sqlite3
+
 import pandas as pd
 
 from src import model
@@ -114,7 +116,8 @@ def test_refresh_gate_refuses_without_writing(tmp_path, monkeypatch):
     import pytest
 
     db = tmp_path / "g.db"
-    _seed_purchases(db, [("5180", f"D{i}", "2024-03-05", 1) for i in range(100)])
+    # Same document ids `_scraped` produces, so a re-scrape is the same documents.
+    _seed_purchases(db, [("5180", f"N{i}", "2024-03-05", 1) for i in range(100)])
 
     def count():
         return model.query("SELECT COUNT(*) c FROM purchases", db_path=db)["c"][0]
@@ -207,3 +210,161 @@ def test_refresh_units_rotation_budget_and_failures(tmp_path, monkeypatch):
     order.clear()
     r = model.refresh_units(db_path=db, budget_minutes=0, log=lambda *a: None)
     assert order == [] and len(r["remaining"]) == 4
+
+
+def test_refresh_gate_catches_lost_documents_masked_by_new_ones(tmp_path, monkeypatch):
+    """A scrape that loses stored documents while late-entered ones arrive
+    elsewhere nets out flat — the row count alone let it through."""
+    import pytest
+
+    db = tmp_path / "m.db"
+    _seed_purchases(db, [("5180", f"N{i}", "2024-03-05", 1) for i in range(1000)])
+    # Same row count, but 20 stored documents replaced by 20 new ones: 2% lost,
+    # over the 0.5% tolerance, with a net change of zero.
+    swapped = _scraped(1000, start="2024-03-05")
+    swapped.loc[:19, "Purchase Document #"] = [f"NEW{i}" for i in range(20)]
+    monkeypatch.setattr(model.scprs, "download_range", lambda *a, **k: (swapped, []))
+    with pytest.raises(model.RefreshRefused, match="would drop 20 stored document"):
+        model.refresh_db("5180", db_path=db, log=lambda *a: None)
+
+
+def test_refresh_gate_catches_a_lost_month_inside_the_unit_tolerance(tmp_path, monkeypatch):
+    """A big unit's 0.5% can hide a whole small month; the per-month check can't."""
+    import pytest
+
+    db = tmp_path / "mm.db"
+    big = [("3540", f"B{i}", "2024-01-10", 1) for i in range(4000)]
+    small = [("3540", f"S{i}", "2024-02-10", 1) for i in range(15)]
+    _seed_purchases(db, big + small)
+    # Lose all 15 February docs: 15 <= max(5, 0.5% of 4015 = 20) unit-wide.
+    jan = _scraped(4000, start="2024-01-10")
+    jan["Purchase Document #"] = [f"B{i}" for i in range(4000)]
+    monkeypatch.setattr(model.scprs, "download_range", lambda *a, **k: (jan, []))
+    with pytest.raises(model.RefreshRefused, match="15 of 15 stored document.*2024-02"):
+        model.refresh_db("3540", db_path=db, log=lambda *a: None)
+
+    # A few pruned documents in a month stay within the per-month allowance.
+    feb = _scraped(12, start="2024-02-10")
+    feb["Purchase Document #"] = [f"S{i}" for i in range(12)]
+    jan_feb = pd.concat([jan, feb], ignore_index=True)
+    monkeypatch.setattr(model.scprs, "download_range", lambda *a, **k: (jan_feb, []))
+    assert model.refresh_db("3540", db_path=db, log=lambda *a: None)["after"] == 4012
+
+
+def test_refused_unit_rotates_to_the_back_without_counting_as_refreshed(tmp_path, monkeypatch):
+    """The 2026-10-27..29 BU 3790 loop: a unit refused every run used to stay
+    first in the rotation forever and could spend the whole budget."""
+    db = tmp_path / "r.db"
+    _seed_purchases(db, [(bu, "D", "2024-01-01", 1) for bu in ("0820", "2720", "3790")])
+    con = model._connect(db)
+    con.executemany(
+        "INSERT INTO summary_refresh VALUES (?, '2021-07-01', 1, ?)",
+        [("0820", "2026-10-20T00:00:00"), ("2720", "2026-10-21T00:00:00")],
+    )
+    con.commit()
+    con.close()
+    order, refuse = [], {"3790"}
+
+    def fake_refresh(bu, **k):
+        order.append(bu)
+        if bu in refuse:
+            raise model.RefreshRefused("hit the row cap")
+        con = model._connect(db)
+        try:
+            model._replace_unit(con, bu, model._prepare_summary(_scraped(1), bu), "07/01/2021")
+        finally:
+            con.close()
+        return {"business_unit": bu, "before": 1, "after": 1, "reopened_days": 0}
+
+    monkeypatch.setattr(model, "refresh_db", fake_refresh)
+    # Run 1: never-refreshed 3790 goes first and is refused.
+    model.refresh_units(db_path=db, business_units=["3790"], log=lambda *a: None)
+    fail = model.query("SELECT * FROM summary_refresh_failure", db_path=db)
+    assert fail["business_unit"].tolist() == ["3790"] and "row cap" in fail["error"][0]
+    stamped = model.query("SELECT business_unit FROM summary_refresh", db_path=db)
+    assert "3790" not in stamped["business_unit"].tolist()  # not recorded as refreshed
+
+    # Run 2: the others go first now; 3790 waits its turn at the back.
+    order.clear()
+    model.refresh_units(db_path=db, log=lambda *a: None)
+    assert order == ["0820", "2720", "3790"]
+
+    # A later success clears the failure stamp.
+    refuse.clear()
+    model.refresh_units(db_path=db, business_units=["3790"], log=lambda *a: None)
+    assert model.query("SELECT COUNT(*) c FROM summary_refresh_failure", db_path=db)["c"][0] == 0
+
+
+class _FailOnReopen:
+    """sqlite3 connection proxy that raises on the reopen-marker INSERT — the
+    last write in `_replace_unit`, after the summary rows are in."""
+
+    def __init__(self, con):
+        self._con = con
+
+    def __getattr__(self, name):
+        return getattr(self._con, name)
+
+    def execute(self, sql, *args):
+        if "INTO details_reopen" in sql:
+            raise sqlite3.OperationalError("disk I/O error")
+        return self._con.execute(sql, *args)
+
+
+def test_replace_unit_is_all_or_nothing(tmp_path):
+    """`to_sql` committed the DELETE+INSERT on its own, so a failure after it
+    left the unit's summary replaced with no reopen markers — amended days
+    stayed "done" forever, and #162 publishes failure-only runs."""
+    import pytest
+
+    db = tmp_path / "t.db"
+    _seed_purchases(db, [("5180", "OLD", "2025-01-05", 1)])
+    con = model._connect(db)
+    model._ensure_details_schema(con)  # enriched unit: the reopen step runs
+    con.commit()
+    proxy = _FailOnReopen(con)
+    with pytest.raises(sqlite3.OperationalError):
+        model._replace_unit(
+            proxy, "5180", model._prepare_summary(_scraped(3), "5180"), "01/01/2025"
+        )
+    con.close()  # closing without commit rolls the open transaction back
+    docs = model.query("SELECT purchase_document FROM purchases", db_path=db)
+    assert docs["purchase_document"].tolist() == ["OLD"]
+    assert model.query("SELECT COUNT(*) c FROM summary_refresh", db_path=db)["c"][0] == 0
+
+
+class _Killed(BaseException):
+    """Stands in for the job timeout killing the process mid-unit."""
+
+
+def test_unit_killed_mid_refresh_goes_to_the_back_next_run(tmp_path, monkeypatch):
+    """A unit the job timeout kills recorded nothing, so it was first again
+    every run — and every run's kill lost the units refreshed before it."""
+    import pytest
+
+    db = tmp_path / "k.db"
+    _seed_purchases(db, [(bu, "D", "2024-01-01", 1) for bu in ("0820", "2720", "3790")])
+    order, kill = [], {"2720"}
+
+    def fake_refresh(bu, **k):
+        order.append(bu)
+        if bu in kill:
+            kill.clear()
+            raise _Killed
+        con = model._connect(db)
+        try:
+            model._replace_unit(con, bu, model._prepare_summary(_scraped(1), bu), "07/01/2021")
+        finally:
+            con.close()
+        return {"business_unit": bu, "before": 1, "after": 1, "reopened_days": 0}
+
+    monkeypatch.setattr(model, "refresh_db", fake_refresh)
+    with pytest.raises(_Killed):
+        model.refresh_units(db_path=db, log=lambda *a: None)
+    assert order == ["0820", "2720"]
+    fail = model.query("SELECT business_unit, error FROM summary_refresh_failure", db_path=db)
+    assert fail.values.tolist() == [["2720", model.ATTEMPT_UNFINISHED]]
+
+    order.clear()
+    model.refresh_units(db_path=db, log=lambda *a: None)
+    assert order == ["3790", "0820", "2720"]  # the killed unit waits its turn

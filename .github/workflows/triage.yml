@@ -42,6 +42,7 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
       WF: ${{ github.event.workflow_run.name }}
+      WF_PATH: ${{ github.event.workflow_run.path }}
       CONCLUSION: ${{ github.event.workflow_run.conclusion }}
       RUN_URL: ${{ github.event.workflow_run.html_url }}
       RUN_ID: ${{ github.event.workflow_run.id }}
@@ -62,19 +63,23 @@ jobs:
       - name: Triage
         run: |
           set -euo pipefail
-          # Benign-cancel filter: not every `cancelled` is a timeout kill. A
-          # superseded deploy (cancel-in-progress) or a run dropped from the
-          # concurrency queue is cancelled young or before it starts; a
-          # timeout kill by definition ran its full timeout-minutes (>=40 min
-          # on every pipeline workflow). Only triage cancels that ran 30+ min.
+          # Not every `cancelled` is a timeout kill. src/triage.py classifies
+          # it from JOB timing (a run's own startedAt includes time spent
+          # waiting in the writer queue): a job that ran to its workflow's
+          # timeout-minutes -> triage as a timeout; a run whose jobs never
+          # started -> dropped from the concurrency queue, alerted only for
+          # the rare writers that can't afford to lose a slot; anything else
+          # (superseded by cancel-in-progress, manual cancel) -> skip.
           if [ "$CONCLUSION" = "cancelled" ]; then
-            SECS=$(gh run view "$RUN_ID" --json startedAt,updatedAt \
-                     --jq 'if .startedAt == null then 0
-                           else ((.updatedAt|fromdate) - (.startedAt|fromdate)) end')
-            if [ "${SECS:-0}" -lt 1800 ]; then
-              echo "cancelled after ${SECS:-0}s (<30 min): superseded/queued cancel, not a timeout — skipping"
+            gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RUN_ID/jobs" > jobs.json
+            KIND=$(python -m src.triage classify-cancel --workflow "$WF" \
+                     --workflow-file "$WF_PATH" --jobs-json jobs.json)
+            echo "cancelled run classified as: $KIND"
+            if [ "$KIND" = "skip" ]; then
+              echo "superseded/manual cancel, or a routine queue drop — not a pipeline incident"
               exit 0
             fi
+            if [ "$KIND" = "dropped" ]; then CONCLUSION=dropped; fi
           fi
 
           MARKER="<!-- pipeline-failure:${WF} -->"

@@ -37,6 +37,7 @@ import argparse
 import datetime
 import fnmatch
 import hashlib
+import hmac
 import json
 import os
 import re
@@ -107,8 +108,21 @@ def select_questions(
 
 def question_id(question: str) -> str:
     """Stable short id for a question (case-insensitive, like the dedupe), so the
-    public report can point at a finding without repeating what the user typed."""
-    return "q:" + hashlib.sha256(question.strip().lower().encode("utf-8")).hexdigest()[:10]
+    public report can point at a finding without repeating what the user typed.
+
+    Keyed (HMAC) so the public id can't confirm a guess: an unkeyed hash lets
+    anyone hash "how much did <x> get?" and check whether it appears. The key is
+    ``QUERY_REVIEW_ID_KEY`` if set, else ``GEMINI_API_KEY`` — already present
+    wherever a review runs (the replay needs it), so a local ``--details`` run with
+    the same key prints the same ids and needs no new secret. With neither set
+    (tests, offline use) the id falls back to an unkeyed hash, which IS guessable.
+    """
+    text = question.strip().lower().encode("utf-8")
+    key = os.environ.get("QUERY_REVIEW_ID_KEY") or os.environ.get("GEMINI_API_KEY")
+    if key:
+        digest = hmac.new(key.encode("utf-8"), b"query-review-id:" + text, hashlib.sha256)
+        return "q:" + digest.hexdigest()[:12]
+    return "q:" + hashlib.sha256(text).hexdigest()[:10]
 
 
 def classify(out: dict) -> str:

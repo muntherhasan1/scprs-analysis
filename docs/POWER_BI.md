@@ -8,6 +8,8 @@ the built-in Web connector — no gateway, no ODBC, no server.
 ```
 warehouse serve-export           # writes data/warehouse-serve.db + data/marts/*.csv
 data_sync publish                # uploads both; CSVs land under marts/ in the dataset
+                                 # (mirrored: a mart dropped from the export is deleted
+                                 #  from marts/ too, so a query on it fails loudly)
 ```
 
 The export list lives in `warehouse._MART_CSV_EXPORTS`: dashboard-shaped gold
@@ -181,7 +183,11 @@ expiry, amendment growth, eProcure event counts). Three facts that came from
 profiling, not the spec draft: `competitive_flag` values are
 `Competitive`/`Non-Competitive`/`Other` (title case);
 `gold_market_concentration.top_supplier_pct` is 0–100 (the `[Top Supplier %]`
-measure divides by 100 so it formats as a percentage); and none of the star's
+measure divides by 100 so it formats as a percentage) — and since 2026-10 that
+mart and `gold_supplier_acquisition_profile` are per **canonical** supplier
+(same columns; `supplier_id` holds the canonical id), so HHI no longer splits a
+company across its registrations (20 of 183 cells moved by at most 20
+points on the 2026-10 snapshot; none crossed a threshold); and none of the star's
 string document/department identifiers can key a relationship —
 `purchase_document` and `department_name` are not unique, and even
 `document_bk` collides under the VertiPaq engine's case-insensitive string

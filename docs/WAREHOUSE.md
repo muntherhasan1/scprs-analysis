@@ -21,7 +21,16 @@ Bronze is the immutable landing zone — nothing is cleaned here.
 - **Grain resolution.** The source is at *(document, version)* grain; silver
   collapses to the **current version** so `silver_document` is one row per
   document. Line/PO rows are filtered to the current version too (a document can
-  be drilled at several versions), then de-duplicated.
+  be drilled at several versions), then de-duplicated. Lines dedupe on
+  **structure, not content**: a document drilled twice into one load appends
+  its whole line set again (rows = one block repeated k times, in load order)
+  and collapses to the first block, while a line PO Details genuinely lists on
+  several schedules keeps every row. The header's `merchandise_amount` breaks
+  the rare tie (one line repeated k times looks the same both ways): the first
+  of structural / all rows / distinct rows that reconciles within $1 wins. The
+  old content `DISTINCT` dropped 234 docs / $8.46M of real lines on the
+  2026-10 snapshot (removing it outright would have re-added $2.50B of
+  repeat-drill duplicates across 4,719 docs).
 - **Merge precedence.** The PO Details drill-down overrides the summary only
   while its version is at least the summary's; a document amended after it was
   drilled takes the (daily-refreshed) summary for every shared field and is
@@ -88,12 +97,18 @@ kept on the fact rather than modeled as a `dim_item`).
 
 **Competitive-intelligence marts:**
 - `gold_supplier_profile` — vendor scorecard (value, reach, % won non-competitively).
-- `gold_supplier_share` — supplier share of each department's spend.
-- `gold_market_concentration` — HHI + top-supplier share per dept × acquisition type.
+- `gold_supplier_share` — supplier share of each department's spend, per
+  **canonical** supplier (`supplier_id`/`supplier_name` carry the canonical
+  id/name).
+- `gold_market_concentration` — HHI + top-supplier share per dept × acquisition
+  type, over **canonical** suppliers (`supplier_count` counts companies). Until
+  2026-10 both grouped by registration, which understates concentration (on the
+  2026-10 snapshot 20 of 183 cells moved, by at most 20 points).
 - `gold_price_benchmark` — unit-price spread per UNSPSC where 2+ suppliers compete.
 - `gold_supplier_unspsc_profile` / `gold_supplier_specialization` — what each
   vendor supplies and how specialized.
-- `gold_supplier_acquisition_profile` — broad (all-document) category footprint.
+- `gold_supplier_acquisition_profile` — broad (all-document) category footprint,
+  per canonical supplier like `gold_supplier_share`.
 
 **Canonical vendor (master data):** SCPRS issues a `supplier_id` per *registration*,
 so one company can appear under several ids (NORTH RIDGE CONSULTING has two; BETA
@@ -127,6 +142,18 @@ roughly triples the match rate over the plain `UPPER()` join. It exposes
 **`gold_supplier_cmas`** (our canonical suppliers that also hold a CMAS agreement —
 SCPRS spend beside CMAS terms / SB-DVBE / product reach). Absent `data/cmas.db`,
 the build is a clean no-op. See `docs/CMAS.md`.
+A normalized name shared by **2+ canonical ids** (an uncurated duplicate
+registration) is left **unmatched** rather than pinned to one arbitrary id and
+its partial spend; those names are listed in `dw_supplier_name_collision`
+(warn checks `canonical_crosswalk_gaps` and `side_input_ambiguous_names`).
+Unifying the ids in `references/supplier_master.csv` restores the match.
+Only company ids are candidates: the `UNKNOWN` bucket (summary rows with no
+supplier id keep the vendor's name, e.g. WW GRAINGER) and government /
+placeholder ids (`DEPT…`, `UNIV…`, `…CFD`, `…SGP`) never count as a rival.
+The rule also runs from the other side: 2+ distinct eProcure firms
+(`cert_id`) whose names normalize alike stay unmatched too, listed in
+`dw_side_input_name_collision` and counted by `side_input_ambiguous_names`.
+The `UNKNOWN` bucket's `canonical_name` is always `Unknown supplier`.
 
 **eProcure SB/DVBE certification integration:** a third optional side input,
 Cal eProcure's certified-supplier registry (`data/eprocure.db`,
@@ -154,10 +181,11 @@ superior courts stay NULL — ~2% of events). On top sit
 **`gold_eprocure_posted_opportunity`** (solicitations open for bid as of the
 last extraction, with bid close dates) and **`gold_eprocure_event_demand`**
 (per department × bid-close year: solicitation volume and SB-only/DVBE-only
-set-aside counts — the demand-side companion to
-`gold_supplier_certification`). Caveats the marts carry in their definitions:
-the set-aside flags are title-derived ("SB ONLY"/"DVBE ONLY" in the event
-name), so counts are a floor, not a census; coverage is Posted + recent
+set-aside counts, plus `sb_or_dvbe_count` for set-asides open to either — the
+demand-side companion to `gold_supplier_certification`). Caveats the marts
+carry in their definitions: the set-aside flags are title-derived (re-derived
+at ingest by `eprocure.set_aside_flags` from the "... ONLY" clause of the
+event name), so counts are a floor, not a census; coverage is Posted + recent
 Historical years, not the full archive; Posted rows have no published date by
 source design. A pre-events `eprocure.db` (registry only) still builds cleanly.
 
@@ -175,6 +203,43 @@ document/version's signature is new, so:
 - later builds append a row whenever a value, status, term, supplier, or version
   changes — building true change-over-time history as the daily job runs.
 
+**Persistence across CI rebuilds.** The scheduled `warehouse-refresh.yml` rebuilds
+`warehouse.db` from nothing every run, and `serve-export` drops the history from
+the serve DB. So the table is carried run to run as its own file,
+`warehouse-history.db`, in the warehouse dataset beside `warehouse-serve.db`:
+1. `data_sync fetch-history` downloads it. **Fail-closed:** if the dataset can't be
+   read, or holds the file but the download fails, the run stops; only a confirmed
+   absence (first run) starts history fresh.
+2. `warehouse build --seed-history data/warehouse-history.db` merges it in before
+   capture, keeping the original `history_sk` / `observed_at` values, so the
+   signature gate appends only what changed since the last run.
+3. `warehouse export-history` writes the table alone back out — and **refuses** if
+   the new history has fewer rows than the copy it was seeded from.
+4. `data_sync publish --with-history` puts the serve DB and the history in **one**
+   commit, refusing if this run didn't fetch the history or the dataset's copy
+   changed since (blob-id check scoped to the history file, pinned to the checked
+   HEAD as `parent_commit` so nothing can land in between). **When the build
+   appended no history rows** (exported rows = rows fetched), the ~0.6 GB history
+   upload is **skipped** and only the serve DB is published — every dataset
+   revision is kept, so re-uploading an identical file each refresh is pure
+   storage growth.
+
+**One-time seed of older local history.** A laptop `warehouse.db` may hold
+snapshots CI never saw (the July 2026 batches). `python -m src.data_sync
+merge-history --dataset <warehouse dataset>` fetches the dataset copy (fail-closed),
+merges the local rows in (local first, so their earlier observations keep the lower
+keys; rows already present by document/version/signature are skipped), refuses if
+the result would be smaller than the dataset copy, and prints the counts — a **dry
+run**. Add `--apply` to publish the merged history alone as one compare-and-swap
+commit; the next refresh seeds from it. Run it right after a refresh finishes: a
+refresh that fetched the old copy refuses to overwrite the merged one (and the next
+refresh then picks it up).
+
+A serve rollback (`rollback-serve`) reverts only the serve DB; the history stays at
+its newest copy — it is append-only observations, and a go-live failure says nothing
+about them. Local builds keep using their own `warehouse.db`'s history (no seed), and
+`warehouse-diff.yml` still deliberately builds from a clean `warehouse.db`.
+
 Two marts derive from it:
 - **`gold_contract_change_log`** — one row per observed transition (`v1 -> v3`,
   value delta + %, status change, term extension) with a readable `change_summary`.
@@ -185,9 +250,13 @@ Two marts derive from it:
 - **`dw_batch`** — one row per build (batch id, start/finish, status, row counts).
 - **`dw_dq_results`** — every check's outcome per batch, with a **severity**:
   - `error` (gates the build): no null document keys, unique document grain,
-    document-grain parity vs bronze, and fact→dimension referential integrity.
-  - `warn` (informational): line-item reconciliation, and negative grand totals
-    (real credits/deobligations in the source data).
+    document-grain parity (distinct bronze documents = `fact_document` rows,
+    end to end), and fact→dimension referential integrity.
+  - `warn` (informational): line-item reconciliation, negative grand totals
+    (real credits/deobligations in the source data), `orphan_drill_rows`
+    (drill lines/POs whose document left the summary — dropped from both
+    facts), `summary_rows_without_attributes` (blank rows SCPRS lists with no
+    version/date/value; kept), and the crosswalk / side-input name checks.
 
 ## PR output diff (`src/warehouse_diff.py`)
 A change to `warehouse.py` (a mart, a grain, a join, an abbreviation) can shift the

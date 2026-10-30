@@ -20,6 +20,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
+from datetime import datetime
+from pathlib import Path
 
 # Per-workflow triage hints. `_default` frames the failure; the other keys are
 # substrings matched against the failed step name(s) to add specific guidance.
@@ -253,6 +256,64 @@ _HINTS: dict[str, dict[str, str]] = {
 }
 
 
+# Writers on the `scprs-operational-writer` concurrency group whose runs are
+# rare enough (daily/weekly/manual) that losing one matters. GitHub keeps at
+# most ONE pending run per group: a newer arrival cancels the older pending
+# run before it ever starts, whatever `cancel-in-progress` says. Enrich is left
+# out on purpose — it fires several times a day and its next slot covers a
+# dropped one; the pipeline monitor watches its success age.
+QUEUE_DROP_ALERTS = frozenset(
+    {
+        "Summary refresh",
+        "Summary build",
+        "CMAS refresh (Wave 2)",
+        "eProcure registry refresh",
+    }
+)
+
+# A job that ran to within this many seconds of its timeout-minutes was killed
+# by it (GitHub stops the job at the limit, plus a little cleanup).
+_TIMEOUT_SLACK_S = 120
+
+
+def workflow_timeout_minutes(workflow_yaml: str) -> int | None:
+    """The largest job-level `timeout-minutes` in a workflow file, or None."""
+    found = re.findall(r"(?m)^ {4}timeout-minutes:\s*(\d+)\s*$", workflow_yaml)
+    return max(map(int, found)) if found else None
+
+
+def classify_cancel(jobs: list[dict], timeout_minutes: int | None) -> str:
+    """Why a `cancelled` run was cancelled, from its jobs (the REST
+    `actions/runs/{id}/jobs` objects).
+
+    - `dropped`: no job ever started — the run was cancelled while queued
+      (replaced as the group's pending run, or cancelled by hand).
+    - `timeout`: a job ran to its `timeout-minutes`.
+    - `interrupted`: a job started and was stopped early — a superseded run
+      (`cancel-in-progress`) or a manual cancel.
+
+    Job timing, not the run's: a run's `startedAt` equals its `createdAt`
+    even when it waited in the writer queue (CMAS run 40331142677 queued 46
+    min and ran 1), so run-level age both hid short timeout kills (CMAS's
+    20-min limit is under any 30-min rule) and flagged long queue waits."""
+    ran = [j for j in jobs if j.get("started_at") and (j.get("steps") or [])]
+    if not ran:
+        return "dropped"
+    if timeout_minutes is None:
+        timeout_minutes = 30  # unknown limit: the old rule of thumb
+    for j in ran:
+        end = j.get("completed_at")
+        if not end:
+            continue
+        secs = (
+            datetime.fromisoformat(end.replace("Z", "+00:00"))
+            - datetime.fromisoformat(j["started_at"].replace("Z", "+00:00"))
+        ).total_seconds()
+        if secs >= timeout_minutes * 60 - _TIMEOUT_SLACK_S:
+            return "timeout"
+    return "interrupted"
+
+
 def build_report(
     workflow: str, failed_steps: list[str], run_url: str, conclusion: str = "failure"
 ) -> dict[str, str]:
@@ -261,7 +322,18 @@ def build_report(
     steps = [s.strip() for s in failed_steps if s.strip()]
 
     specific: list[str] = []
-    if conclusion == "cancelled":
+    if conclusion == "dropped":
+        specific.append(
+            "The run **never started: it was cancelled while queued** on the "
+            "`scprs-operational-writer` concurrency group. GitHub keeps only ONE pending "
+            "run per group, so a newer writer arriving while another runs replaces it "
+            "(`cancel-in-progress: false` does not prevent this). Nothing ran, so nothing "
+            "was written or lost — but this slot's work did not happen. Re-dispatch the "
+            "workflow if the next scheduled run is far off; repeated drops mean the "
+            "writers' schedules overlap too much (GitHub fires crons hours late, so "
+            "schedule gaps on paper don't hold)."
+        )
+    elif conclusion == "cancelled":
         # A `timeout-minutes` kill concludes `cancelled`, not `failure` — the
         # signature of a hung or over-budget step (the 2026-07 enrich livelock:
         # 12 straight 90-min kills, silently untriaged). Frame it first.
@@ -286,7 +358,10 @@ def build_report(
     if not specific:
         specific.append("No triage hint for this workflow — inspect the run logs.")
 
-    verb = "was cancelled (timeout?)" if conclusion == "cancelled" else "failed"
+    verb = {
+        "cancelled": "was cancelled (timeout?)",
+        "dropped": "was dropped from the writer queue",
+    }.get(conclusion, "failed")
     marker = f"<!-- pipeline-failure:{workflow} -->"
     steps_line = ", ".join(f"`{s}`" for s in steps) if steps else "_unknown — see the run_"
     body = (
@@ -311,12 +386,31 @@ def _cli() -> None:
     rep.add_argument(
         "--conclusion",
         default="failure",
-        help="workflow_run conclusion (`failure` or `cancelled` — a timeout kill)",
+        help="`failure`, `cancelled` (a timeout kill) or `dropped` (cancelled while queued)",
     )
+    cls = sub.add_parser(
+        "classify-cancel",
+        help="Print what to do with a cancelled run: timeout | dropped | skip",
+    )
+    cls.add_argument("--workflow", required=True)
+    cls.add_argument("--workflow-file", required=True, help="the run's workflow YAML path")
+    cls.add_argument("--jobs-json", required=True, help="file holding the REST jobs response")
     args = ap.parse_args()
     if args.cmd == "report":
         report = build_report(args.workflow, args.steps.split(","), args.run_url, args.conclusion)
         print(json.dumps(report))
+    elif args.cmd == "classify-cancel":
+        try:
+            limit = workflow_timeout_minutes(Path(args.workflow_file).read_text(encoding="utf-8"))
+        except OSError:
+            limit = None
+        jobs = json.loads(Path(args.jobs_json).read_text(encoding="utf-8")).get("jobs", [])
+        kind = classify_cancel(jobs, limit)
+        if kind == "dropped" and args.workflow not in QUEUE_DROP_ALERTS:
+            kind = "skip"
+        elif kind == "interrupted":
+            kind = "skip"
+        print(kind)
 
 
 if __name__ == "__main__":

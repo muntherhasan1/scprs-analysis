@@ -20,6 +20,11 @@ stale serving, zero alerts) and the audit that followed (issues #43–#56).
    run cannot half-publish. Rollback fires ONLY on verified marker mismatch.
 5. Verify serving with `python -m src.golive_check` (never the local stdio MCP
    tools — those hit the local DB, not the Space).
+6. Enrich blocked by the **contracts** gate: re-drills are self-explaining
+   (`redrill_log`), so an error means rows changed OUTSIDE any logged load —
+   investigate it. Only once it's understood and acceptable, dispatch Enrich
+   with `contracts_ack: "<reason>"`; that run publishes and becomes the new
+   baseline. Never ack blind — it is the integrity gate.
 
 ## Change-impact checklist (run BEFORE any change to data volume, cadence, or surfaces)
 
@@ -81,14 +86,18 @@ mentioned it. Answer these five in the plan, in writing:
 - **triage.yml**: failed/cancelled main-branch runs → idempotent issue,
   auto-closes on recovery.
 - **pipeline-monitor.yml** (6h): watches from OUTSIDE — last successful enrich
-  age (9h; enrich runs every 3h) + serve-dataset commit age (12h;
-  warehouse-refresh.yml rebuilds/publishes every 6h since the 2026-08-14
-  decoupling) + last successful summary refresh age (53h; daily) + cron
+  age (12h) + serve-dataset commit age (12h; warehouse-refresh.yml every 6h
+  nominal) + last successful summary refresh age (53h; daily) + cron
   keep-alive (GitHub disables schedules after 60 idle days).
+- **GitHub cron reality (measured 2026-10-15..29):** every schedule fires
+  ~3-7h late and slots are silently skipped — enrich's 8 nominal runs/day
+  arrive as 3-5, with fire gaps up to 9h. Size every age threshold and
+  "quiet gap between writers" from `gh run list --event schedule` fire times,
+  never from the cron spacing; GitHub guarantees neither timing nor delivery.
 - **healthchecks.io dead-man's switch** (`HEALTHCHECK_PING_URL`): the one alarm
   outside GitHub — pinged by healthy enrich runs and clean monitor passes;
   grace ≈14h pages by email even if GitHub's schedulers are the thing that died
-  (can be tightened to ~8h in the healthchecks.io UI now that pings are 3-hourly).
+  (do NOT tighten below ~11h: measured enrich fire gaps reach 9h + ~72m run).
   Deliberately NOT pinged by warehouse-refresh.yml: a broken serve refresh
   alone keeps enrich pings flowing, so it pages via the monitor's alert issue
   and red runs, not the external switch.

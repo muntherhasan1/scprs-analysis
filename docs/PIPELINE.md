@@ -34,17 +34,19 @@ python -m src.data_sync publish --dataset munther-hasan/scprs-warehouse-data
 # then factory-reboot the Spaces (Space UI -> Settings) so they re-fetch the new DB
 ```
 
-Or the whole build → export → publish chain in one script:
+Prefer letting CI publish the serve DB. The script does that by default:
 
 ```powershell
-powershell -File scripts\refresh_pipeline.ps1            # build → export → publish
-powershell -File scripts\refresh_pipeline.ps1 -Enrich    # also drill newest-first line items first
+powershell -File scripts\refresh_pipeline.ps1                     # dispatch CI's warehouse refresh
+powershell -File scripts\refresh_pipeline.ps1 -Enrich             # drill + publish scprs.db (CAS), then dispatch
+powershell -File scripts\refresh_pipeline.ps1 -LocalServePublish  # build → export → publish from this machine
 ```
 
-The script publishes, then logs a `MANUAL STEP` reminder — it does **not**
-auto-restart the Spaces (that needs a Spaces-management token; intentionally out of
-scope). Reboot each Space once via the UI (Settings → Factory reboot) to serve the
-new data.
+CI's `warehouse-refresh.yml` is the single serve publisher: it holds the
+`warehouse-serve-publisher` lock and verifies go-live (with rollback). The manual
+commands above and `-LocalServePublish` have neither — a local publish can
+overwrite a newer CI publish with an older build — so use them only when CI is
+unavailable, and check no warehouse refresh is running first.
 
 ## Scheduling (intermittent machine)
 
