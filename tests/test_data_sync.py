@@ -315,8 +315,15 @@ def test_publish_supplier_db_missing_file(tmp_path):
         data_sync.publish_supplier_db(tmp_path / "nope.db", "acme/scprs-operational-db")
 
 
+class _PathInfo:
+    def __init__(self, blob_id):
+        self.blob_id = blob_id
+
+
 def test_rollback_serve_db_reverts_to_previous_commit(tmp_path, monkeypatch):
-    """Rollback re-publishes the serve DB from the PRIOR revision as a new commit."""
+    """Rollback re-publishes the previous DISTINCT serve DB as a new commit. A
+    publish makes two commits (DB, then marts/), so the commit right before the
+    marts commit still holds the bad DB and must be skipped."""
     import huggingface_hub
 
     prev_db = tmp_path / "good.db"
@@ -329,8 +336,17 @@ def test_rollback_serve_db_reverts_to_previous_commit(tmp_path, monkeypatch):
 
     class FakeApi:
         def list_repo_commits(self, repo, repo_type=None, token=None):
-            # commits[0] = the just-published (bad) revision; [1] = last good.
-            return [Commit("badbadbad"), Commit("goodgood1234")]
+            # newest first: marts commit, bad DB commit, prior marts, last-good DB
+            return [
+                Commit("martsbad"),
+                Commit("badbadbad"),
+                Commit("goodmarts"),
+                Commit("goodgood1234"),
+            ]
+
+        def get_paths_info(self, repo, paths, revision=None, repo_type=None, token=None):
+            bad = revision in ("martsbad", "badbadbad")
+            return [_PathInfo("blob-bad" if bad else "blob-good")]
 
     def fake_download(**kw):
         dl.update(kw)
@@ -348,10 +364,10 @@ def test_rollback_serve_db_reverts_to_previous_commit(tmp_path, monkeypatch):
 
     url = data_sync.rollback_serve_db("acme/warehouse-data", token="wh-token")  # noqa: S106
     assert url == "https://hf/commit/rollback"
-    assert dl["revision"] == "goodgood1234"  # fetched the PRIOR revision
+    assert dl["revision"] == "goodmarts"  # newest revision holding the PRIOR DB
     assert dl["filename"] == "warehouse-serve.db"
     assert up["filename"] == "warehouse-serve.db"
-    assert "goodgood" in up["message"]  # rollback commit names the target
+    assert "goodmart" in up["message"]  # rollback commit names the target
 
 
 def test_rollback_serve_db_raises_without_prior_revision(monkeypatch):
@@ -362,10 +378,13 @@ def test_rollback_serve_db_raises_without_prior_revision(monkeypatch):
 
     class FakeApi:
         def list_repo_commits(self, repo, repo_type=None, token=None):
-            return [Commit()]  # a single commit — nothing to roll back to
+            return [Commit(), Commit()]  # two commits, same DB: nothing to roll back to
+
+        def get_paths_info(self, repo, paths, revision=None, repo_type=None, token=None):
+            return [_PathInfo("same-blob")]
 
     monkeypatch.setattr(huggingface_hub, "HfApi", FakeApi)
-    with pytest.raises(data_sync.WarehouseFetchError, match="no prior revision"):
+    with pytest.raises(data_sync.WarehouseFetchError, match="no earlier revision"):
         data_sync.rollback_serve_db("acme/warehouse-data")
 
 

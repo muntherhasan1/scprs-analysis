@@ -80,7 +80,7 @@ jobs:
             args="--bu $BU --month $MONTH"
           fi
           python -m src.recon $args 2>&1 | tee recon.log
-          rc=$?
+          rc=${PIPESTATUS[0]}  # recon's exit code, not tee's (else a crash reads "clean")
           set -e
           if [ "$rc" -ge 2 ]; then
             echo "::error::recon itself failed (rc=$rc) — site unreachable or store missing"
