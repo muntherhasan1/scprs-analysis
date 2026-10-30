@@ -83,6 +83,13 @@ jobs:
             echo "::error::no successful Operational backup on record -- refusing to squash the operational history"
             exit 1
           fi
+          # Backups before #159 merged reported success while crashing on a
+          # missing package (no backup was written), so only a success after
+          # that fix counts as evidence a cold copy exists.
+          if [[ "$last" < "2026-10-30T00:33:19Z" ]]; then
+            echo "::error::last 'successful' backup ($last) predates the #159 fix -- those runs wrote nothing; run Operational backup first"
+            exit 1
+          fi
           age=$(( ( $(date -u +%s) - $(date -u -d "$last" +%s) ) / 86400 ))
           echo "last successful backup: $last (${age}d ago)"
           if [ "$age" -gt 8 ]; then
