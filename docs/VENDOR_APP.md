@@ -39,8 +39,9 @@ Insight vectors:
 Rules the export enforces (don't move them into the front end):
 
 - **Canonical suppliers only.** Shares and HHI are recomputed from `gold_document`
-  by `canonical_id`; `gold_supplier_share` / `gold_market_concentration` group by
-  registration and split re-registered companies.
+  by `canonical_id` (the export's own computation; `gold_supplier_share` /
+  `gold_market_concentration` are canonical too since 2026-10, but the app
+  doesn't depend on them).
 - **Null, not zero.** Unloaded departments still get a page (eProcure history and
   open solicitations cover every department) with `loaded: false` and null spend blocks.
 - **`supplier_kind`** labels interagency counterparties (`DEPT…`/`UNIV…` →
