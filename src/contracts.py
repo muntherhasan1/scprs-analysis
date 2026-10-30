@@ -6,14 +6,21 @@ stop?" and `canary.py` asks "did collection go wrong?". This one is about
 newest snapshot to the previous one, so an anomalous movement between runs is
 caught even when each snapshot, on its own, looks fine.
 
-The core contract is monotonicity. The enrichment tables are append-only in
-normal operation — a drill only ever *inserts* line items, POs, and progress
-rows — so those metrics must never decrease. A decrease means data was lost or
-overwritten (a bad re-scrape, a truncated table, a botched migration), which no
-internal-consistency check would catch because the smaller dataset is still
-self-consistent. A decrease is therefore an `error`. A very large jump in one
-step is flagged `warn` — usually just a big backfill, occasionally a duplicate
-bulk insert worth a look.
+The core contract is monotonicity. The set of drilled documents and the
+finished-day log only ever grow, so those metrics must never decrease. A
+decrease means data was lost or overwritten (a truncated table, a botched
+migration), which no internal-consistency check would catch because the
+smaller dataset is still self-consistent. A decrease is therefore an `error`.
+
+Row-level counts (detail rows, line items, POs, line dollars) are NOT strictly
+monotonic: re-drilling a reopened day replaces each document's rows, so an
+amendment with fewer lines, or one copy replacing a duplicated drill, shrinks
+them a little. Treating that as an error blocked the publish, and the next run
+fetched the same unpublished state, re-drilled the same day and failed again —
+a livelock. Those metrics get a small per-step tolerance instead: a re-drill
+moves them by a fraction of a percent, a lost table by far more. A very large
+jump in one step is flagged `warn` — usually just a big backfill, occasionally
+a duplicate bulk insert worth a look.
 
 Snapshots are appended to `metric_snapshots` in scprs.db (they travel with the
 store), so the history is available wherever the DB goes.
@@ -34,20 +41,34 @@ from pathlib import Path
 
 from .model import DB_PATH
 
-# (metric, SQL returning one number, monotonic?). Monotonic metrics must never
-# decrease; a decrease is an error. Non-monotonic ones (e.g. the summary, which a
-# re-build can legitimately reshape) are watched only for large swings.
-_METRICS: list[tuple[str, str, bool]] = [
-    ("detail_docs", "SELECT COUNT(*) FROM document_details", True),
-    ("line_items", "SELECT COUNT(*) FROM document_lines", True),
-    ("assoc_pos", "SELECT COUNT(*) FROM document_pos", True),
-    ("progress_days", "SELECT COUNT(*) FROM details_progress", True),
+# Largest one-step decrease tolerated for metrics a legitimate re-drill can
+# shrink. Basis (prod store, 2026-10-29): the worst re-drill sheds ~130
+# duplicate detail rows (BU 8570, 2024-07-01) against 355,847 rows (0.04%);
+# 1% (~18k line items, ~$1.7B of line dollars) leaves room for big amendments
+# while a truncated or wiped table still trips it.
+REDRILL_SHRINK_FRAC = 0.01
+
+# (metric, SQL returning one number, largest tolerated one-step decrease as a
+# fraction of the previous value). 0.0 = strictly monotonic: any decrease is
+# an error. None = unconstrained (e.g. the summary, which a refresh can
+# legitimately reshape) — watched only for large swings.
+_METRICS: list[tuple[str, str, float | None]] = [
+    (
+        "drilled_docs",
+        "SELECT COUNT(*) FROM (SELECT DISTINCT business_unit, purchase_document "
+        "FROM document_details)",
+        0.0,
+    ),
+    ("progress_days", "SELECT COUNT(*) FROM details_progress", 0.0),
+    ("detail_docs", "SELECT COUNT(*) FROM document_details", REDRILL_SHRINK_FRAC),
+    ("line_items", "SELECT COUNT(*) FROM document_lines", REDRILL_SHRINK_FRAC),
+    ("assoc_pos", "SELECT COUNT(*) FROM document_pos", REDRILL_SHRINK_FRAC),
     (
         "line_amount_total",
         "SELECT COALESCE(SUM(unit_price * quantity), 0) FROM document_lines",
-        True,
+        REDRILL_SHRINK_FRAC,
     ),
-    ("summary_rows", "SELECT COUNT(*) FROM purchases", False),
+    ("summary_rows", "SELECT COUNT(*) FROM purchases", None),
 ]
 
 DEFAULT_JUMP_FRAC = 0.5  # a >50% one-step increase is worth a warn, not an error.
@@ -71,7 +92,7 @@ def _ensure_snapshot_schema(con: sqlite3.Connection) -> None:
 def capture_metrics(con: sqlite3.Connection) -> dict[str, float]:
     """Compute the tracked metrics from the operational store."""
     out: dict[str, float] = {}
-    for name, sql, _mono in _METRICS:
+    for name, sql, _max_drop in _METRICS:
         try:
             out[name] = con.execute(sql).fetchone()[0] or 0
         except sqlite3.OperationalError:
@@ -114,22 +135,26 @@ def diff(
 ) -> list[Finding]:
     """Compare two metric snapshots and return findings, most-severe first.
 
-    A monotonic metric that decreased is an `error`; any metric that grew by more
-    than `jump_frac` in one step is a `warn`."""
-    monotonic = {name: mono for name, _sql, mono in _METRICS}
+    A metric that decreased by more than its tolerated drop is an `error`; any
+    metric that grew by more than `jump_frac` in one step is a `warn`."""
+    max_drop = {name: drop for name, _sql, drop in _METRICS}
     findings: list[Finding] = []
     for name, now in curr.items():
         before = prev.get(name)
         if before is None:
             continue
         delta = now - before
-        if monotonic.get(name) and delta < 0:
+        drop = max_drop.get(name)
+        if drop is not None and delta < 0 and -delta > abs(before) * drop:
+            allowed = (
+                "must not shrink" if drop == 0 else f"more than the {drop:.0%} re-drill allowance"
+            )
             findings.append(
                 Finding(
                     "metric_decreased",
                     "error",
                     name,
-                    f"{name} fell {before:g} -> {now:g} ({delta:g}); append-only must not shrink.",
+                    f"{name} fell {before:g} -> {now:g} ({delta:g}); {allowed}.",
                 )
             )
         elif before > 0 and delta / before > jump_frac:

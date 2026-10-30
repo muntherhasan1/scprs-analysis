@@ -50,6 +50,42 @@ def test_non_monotonic_decrease_is_not_an_error():
     assert "metric_decreased" not in _by_check(findings)
 
 
+def test_small_redrill_shrink_is_tolerated_but_lost_documents_are_not():
+    """Re-drilling a reopened day replaces each document's rows: one copy for a
+    duplicated drill, or an amendment with fewer lines, shrinks the row counts a
+    little. Erroring on that blocked the publish, and the next run re-drilled the
+    same unpublished day — a livelock. The drilled-document set never shrinks."""
+    prev = {
+        "drilled_docs": 350_789,
+        "detail_docs": 355_847,
+        "line_items": 1_820_319,
+        "line_amount_total": 1.67e11,
+    }
+    redrill = {
+        **prev,
+        "detail_docs": 355_847 - 127,  # BU 8570 2024-07-01: 127 duplicate drills collapse
+        "line_items": 1_820_319 - 600,
+        "line_amount_total": 1.67e11 - 2.5e8,  # an amendment cut a contract's lines
+    }
+    assert "metric_decreased" not in _by_check(contracts.diff(prev, redrill))
+
+    lost_doc = {**prev, "drilled_docs": 350_788}
+    dec = _by_check(contracts.diff(prev, lost_doc))["metric_decreased"]
+    assert [f.metric for f in dec] == ["drilled_docs"]
+
+    wiped = {**prev, "line_items": 1_700_000}  # ~6.6% of lines gone in one step
+    dec = _by_check(contracts.diff(prev, wiped))["metric_decreased"]
+    assert [f.metric for f in dec] == ["line_items"] and "1% re-drill allowance" in dec[0].detail
+
+
+def test_redrill_metric_change_does_not_false_alarm_on_upgrade():
+    """The first snapshot after this change has `drilled_docs` but the previous
+    one doesn't — it must be skipped, not compared against nothing."""
+    prev = {"detail_docs": 355_847, "line_items": 1_820_319}
+    curr = {"drilled_docs": 350_789, "detail_docs": 355_800, "line_items": 1_820_319}
+    assert [f for f in contracts.diff(prev, curr) if f.severity != "ok"] == []
+
+
 def test_new_metric_absent_from_prev_is_skipped():
     prev = {"line_items": 100}
     curr = {"line_items": 100, "assoc_pos": 5}  # assoc_pos brand new

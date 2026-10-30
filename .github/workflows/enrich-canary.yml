@@ -15,13 +15,18 @@ name: Enrich (Wave 2)
 # still accept explicit inputs and default to a small 8660 canary slice.
 on:
   schedule:
-    # Every 3 hours, offset from the top of the hour. 8 runs/day x limit 50
-    # ≈ 400 day-slices/day. Safe at this density: the 95-min timeout-minutes
-    # backstop is well under the 180-min slot gap, and the
-    # scprs-operational-writer concurrency group QUEUES (never cancels) any
-    # overlap, so back-to-back slots serialize rather than collide.
-    # warehouse-refresh.yml runs 90 min behind every other slot to pick up
-    # the freshly published scprs.db.
+    # Every 3 hours, offset from the top of the hour. GitHub does NOT deliver
+    # this: 2026-10-15..29 it produced 3-5 runs/day (not 8), each ~1.5-5h
+    # late, with gaps up to 9h — schedule delivery is best-effort and nothing
+    # in this repo can make it reliable. So each run that DOES fire must use
+    # its whole budget: the scheduled day limit is 150 (was 50), leaving the
+    # 70-min budget as the real bound. At 50, small-day units finished their
+    # slice in 17-40 min (e.g. run 40691802100: 50 days in 17m, 126 left) and
+    # the dropped slots were throughput simply lost. Worst-case wall clock is
+    # unchanged (the budget caps it under the 95-min backstop); the writer
+    # lock is just held for the full budget more often.
+    # The scprs-operational-writer group queues an overlap, but keeps only
+    # ONE pending run — see triage's queue-drop alert (src/triage.py).
     - cron: "17 */3 * * *"
   workflow_dispatch:
     inputs:
@@ -127,7 +132,7 @@ jobs:
             echo "auto-picked business unit: $bu"
           fi
           echo "bu=$bu" >> "$GITHUB_OUTPUT"
-          echo "limit=${IN_LIMIT:-50}" >> "$GITHUB_OUTPUT"
+          echo "limit=${IN_LIMIT:-150}" >> "$GITHUB_OUTPUT"
           echo "from=${IN_FROM:-07/01/2016}" >> "$GITHUB_OUTPUT"
           echo "to=${IN_TO:-06/30/2028}" >> "$GITHUB_OUTPUT"
           echo "budget=${IN_BUDGET:-70}" >> "$GITHUB_OUTPUT"

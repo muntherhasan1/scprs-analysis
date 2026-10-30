@@ -152,3 +152,72 @@ def test_every_hinted_workflow_is_watched_by_triage():
     watched = wf.split("workflows:", 1)[1].split("types:", 1)[0]
     missing = [name for name in triage._HINTS if f'"{name}"' not in watched]
     assert missing == []
+
+
+def _job(start, end, steps=1):
+    return {"started_at": start, "completed_at": end, "steps": [{}] * steps}
+
+
+def test_classify_cancel_uses_job_time_not_queue_time():
+    # CMAS run 40331142677: queued 46 min behind the writer lock, job ran 1 min.
+    # The old run-level rule (startedAt == createdAt) counted the queue wait.
+    short = [_job("2026-10-26T14:16:20Z", "2026-10-26T14:17:20Z")]
+    assert triage.classify_cancel(short, 20) == "interrupted"
+    # A CMAS timeout kill at its 20-min limit — under the old 30-min rule, so
+    # it used to be skipped as "superseded".
+    killed = [_job("2026-10-26T14:16:20Z", "2026-10-26T14:36:21Z")]
+    assert triage.classify_cancel(killed, 20) == "timeout"
+    # Never started: replaced as the group's single pending run.
+    assert triage.classify_cancel([], 150) == "dropped"
+    assert triage.classify_cancel([_job(None, None, steps=0)], 150) == "dropped"
+
+
+def test_every_writer_alert_and_timeout_is_parseable_from_its_workflow():
+    from pathlib import Path
+
+    wfdir = Path(__file__).resolve().parent.parent / ".github/workflows"
+    limits = {}
+    for path in wfdir.glob("*.yml"):
+        text = path.read_text(encoding="utf-8")
+        name = text.split("name:", 1)[1].splitlines()[0].strip()
+        limits[name] = triage.workflow_timeout_minutes(text)
+    for name in triage.QUEUE_DROP_ALERTS:
+        assert limits.get(name), f"{name}: queue-drop alert for a workflow with no timeout"
+    assert limits["CMAS refresh (Wave 2)"] == 20
+
+
+def test_dropped_run_report_explains_the_one_pending_rule():
+    r = triage.build_report("Summary refresh", [], "https://run/9", conclusion="dropped")
+    assert "was dropped from the writer queue" in r["body"]
+    assert "ONE pending" in r["body"]
+    assert r["marker"] == "<!-- pipeline-failure:Summary refresh -->"  # same issue key
+
+
+def test_cli_classify_cancel_skips_routine_drops(tmp_path, capsys, monkeypatch):
+    import sys
+
+    wf = tmp_path / "wf.yml"
+    wf.write_text("jobs:\n  x:\n    timeout-minutes: 95\n", encoding="utf-8")
+    jobs = tmp_path / "jobs.json"
+    jobs.write_text(json.dumps({"jobs": []}), encoding="utf-8")
+
+    def run(workflow):
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            [
+                "triage",
+                "classify-cancel",
+                "--workflow",
+                workflow,
+                "--workflow-file",
+                str(wf),
+                "--jobs-json",
+                str(jobs),
+            ],
+        )
+        triage._cli()
+        return capsys.readouterr().out.strip()
+
+    assert run("Summary refresh") == "dropped"
+    assert run("Enrich (Wave 2)") == "skip"  # fires several times a day

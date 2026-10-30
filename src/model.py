@@ -29,6 +29,7 @@ import re
 import sqlite3
 import sys
 import time
+from collections import Counter
 from datetime import datetime
 from pathlib import Path
 
@@ -45,9 +46,14 @@ POLICY_END = "06/30/2028"
 
 # Refresh shrink gate: a re-scrape may legitimately lose a few documents the
 # site pruned (recon has seen 1-row `store_ahead`), but losing more than this
-# means the scrape came back short — refuse to write it.
+# means the scrape came back short — refuse to write it. The gate counts stored
+# documents MISSING from the scrape, not the net row change: late-entered
+# documents elsewhere in the window would otherwise mask a lost slice.
 REFRESH_SHRINK_MIN_ROWS = 5
 REFRESH_SHRINK_PCT = 0.5
+# ...and per start-date month, so a whole lost week of a big unit (3540's
+# 0.5% is ~3,400 rows) can't hide under the unit-wide tolerance.
+REFRESH_MONTH_SHRINK_PCT = 5.0
 
 # Column order for the purchases table (snake_case of the summary extract).
 _PURCHASE_COLUMNS = [
@@ -120,6 +126,14 @@ def _ensure_schema(con: sqlite3.Connection) -> None:
         "CREATE TABLE IF NOT EXISTS summary_refresh ("
         "business_unit TEXT PRIMARY KEY, window_from TEXT, rows INTEGER, refreshed_at TEXT)"
     )
+    # The last refused/errored attempt per unit, cleared on success. It moves
+    # a failing unit to the back of the rotation without marking it refreshed:
+    # before this, a unit refused every run stayed first forever and could
+    # spend the whole budget (BU 3790, 2026-10-27..29: 0 units refreshed).
+    con.execute(
+        "CREATE TABLE IF NOT EXISTS summary_refresh_failure ("
+        "business_unit TEXT PRIMARY KEY, failed_at TEXT, error TEXT)"
+    )
     for name, sql in _VIEWS.items():
         con.execute(f"DROP VIEW IF EXISTS {name}")
         con.execute(f"CREATE VIEW {name} AS {sql}")
@@ -177,6 +191,7 @@ def _replace_unit(con: sqlite3.Connection, business_unit: str, df, from_date: st
         "INSERT OR REPLACE INTO summary_refresh VALUES (?, ?, ?, ?)",
         (business_unit, _iso(from_date), len(df), now),
     )
+    con.execute("DELETE FROM summary_refresh_failure WHERE business_unit = ?", (business_unit,))
     has_details = con.execute(
         "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'document_details'"
     ).fetchone()
@@ -199,6 +214,12 @@ def _replace_unit(con: sqlite3.Connection, business_unit: str, df, from_date: st
     )
     con.commit()
     return cur.rowcount
+
+
+def _lost_documents(stored: list[tuple[str, str]], df) -> dict[str, str]:
+    """Stored documents (-> their stored start month) absent from a scrape."""
+    scraped = set(df["purchase_document"].dropna().astype(str))
+    return {str(doc): month for doc, month in stored if str(doc) not in scraped}
 
 
 class RefreshRefused(Exception):
@@ -227,6 +248,11 @@ def refresh_db(
             "SELECT COUNT(*), MIN(start_date) FROM purchases WHERE business_unit = ?",
             (business_unit,),
         ).fetchone()
+        stored = con.execute(
+            "SELECT purchase_document, COALESCE(substr(start_date, 1, 7), '?') "
+            "FROM purchases WHERE business_unit = ?",
+            (business_unit,),
+        ).fetchall()
     finally:
         con.close()
     start = POLICY_START
@@ -247,10 +273,27 @@ def refresh_db(
         raise RefreshRefused(
             f"would shrink {before} -> {after} rows (more than {allowed:g} allowed)"
         )
+    df = _prepare_summary(df, business_unit)
+    lost = _lost_documents(stored, df)
+    if len(lost) > allowed:
+        raise RefreshRefused(
+            f"would drop {len(lost)} stored document(s) (more than {allowed:g} allowed; "
+            f"{before} -> {after} rows net)"
+        )
+    month_size = Counter(month for _doc, month in stored)
+    for month, n_lost in sorted(Counter(lost.values()).items()):
+        month_allowed = max(
+            REFRESH_SHRINK_MIN_ROWS, month_size[month] * REFRESH_MONTH_SHRINK_PCT / 100
+        )
+        if n_lost > month_allowed:
+            raise RefreshRefused(
+                f"would drop {n_lost} of {month_size[month]} stored document(s) in {month} "
+                f"(more than {month_allowed:g} allowed)"
+            )
 
     con = _connect(db_path)
     try:
-        reopened = _replace_unit(con, business_unit, _prepare_summary(df, business_unit), from_date)
+        reopened = _replace_unit(con, business_unit, df, from_date)
     finally:
         con.close()
     return {
@@ -260,6 +303,19 @@ def refresh_db(
         "after": after,
         "reopened_days": reopened,
     }
+
+
+def _record_refresh_failure(db_path: Path, business_unit: str, error: str) -> None:
+    con = _connect(db_path)
+    try:
+        _ensure_schema(con)
+        con.execute(
+            "INSERT OR REPLACE INTO summary_refresh_failure VALUES (?, ?, ?)",
+            (business_unit, datetime.now().isoformat(timespec="seconds"), error),
+        )
+        con.commit()
+    finally:
+        con.close()
 
 
 def refresh_units(
@@ -274,16 +330,23 @@ def refresh_units(
     The budget is checked before each unit starts (a unit is never cut
     mid-scrape), so worst-case wall clock = budget + the slowest unit. Units
     left over are simply oldest next run — the rotation is self-curing. One
-    unit failing doesn't stop the others; it's reported and retried next run."""
+    unit failing doesn't stop the others; it's reported, stamped in
+    `summary_refresh_failure` (NOT as refreshed), and goes to the back of the
+    rotation — retried once the others have had their turn, so a unit that is
+    refused every run can't monopolize the budget."""
     con = _connect(db_path)
     try:
         _ensure_schema(con)
+        # Rotation key = the latest attempt, successful or not; '' (never
+        # attempted) sorts first. ISO strings compare chronologically.
         order = [
             r[0]
             for r in con.execute(
                 "SELECT p.business_unit FROM (SELECT DISTINCT business_unit FROM purchases) p "
                 "LEFT JOIN summary_refresh s ON s.business_unit = p.business_unit "
-                "ORDER BY s.refreshed_at IS NOT NULL, s.refreshed_at, p.business_unit"
+                "LEFT JOIN summary_refresh_failure f ON f.business_unit = p.business_unit "
+                "ORDER BY MAX(COALESCE(s.refreshed_at, ''), COALESCE(f.failed_at, '')), "
+                "p.business_unit"
             )
         ]
     finally:
@@ -303,10 +366,12 @@ def refresh_units(
         except RefreshRefused as e:
             log(f"  REFUSED {bu}: {e}")
             failed.append({"business_unit": bu, "error": f"refused: {e}"})
+            _record_refresh_failure(db_path, bu, failed[-1]["error"])
             continue
         except Exception as e:  # noqa: BLE001 - one unit's scrape error must not stop the rest
-            log(f"  ERROR {bu}: {repr(e)[:160]} (retries next run)")
+            log(f"  ERROR {bu}: {repr(e)[:160]} (retried after the rest of the rotation)")
             failed.append({"business_unit": bu, "error": repr(e)[:160]})
+            _record_refresh_failure(db_path, bu, failed[-1]["error"])
             continue
         r["minutes"] = round((time.monotonic() - t0) / 60, 1)
         log(
