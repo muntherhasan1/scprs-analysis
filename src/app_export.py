@@ -134,7 +134,18 @@ def _opportunities(con, today: str, loaded: set[str]) -> list[dict]:
     ]
 
 
-def _supplier_flags(con) -> dict[str, dict]:
+def _fy_partial(fiscal_year: int, coverage_from: str, coverage_to: str, today: str) -> bool:
+    """True when the data window doesn't span the whole Jul-Jun fiscal year.
+
+    Coverage ends at today at the latest: future-dated start dates (contracts
+    entered ahead of their term) must not make a year still in progress -- or
+    one that hasn't started -- look complete."""
+    return coverage_from > f"{fiscal_year - 1}-07-01" or min(coverage_to, today) < (
+        f"{fiscal_year}-06-30"
+    )
+
+
+def _supplier_flags(con, today: str) -> dict[str, dict]:
     flags: dict[str, dict] = defaultdict(
         lambda: {"sb_certified": False, "dvbe_certified": False, "cmas_holder": False}
     )
@@ -146,8 +157,13 @@ def _supplier_flags(con) -> dict[str, dict]:
         f = flags[r["canonical_id"]]
         f["sb_certified"] = bool(r["cert_small_business"] or r["cert_micro_business"])
         f["dvbe_certified"] = bool(r["cert_dvbe"])
+    # A CMAS holder needs an agreement still in term: 21 of 558 matched
+    # suppliers held only expired ones (2026-10) and read as current holders.
     for r in _rows(
-        con, "SELECT canonical_id FROM gold_supplier_cmas WHERE cmas_agreement_count > 0"
+        con,
+        "SELECT canonical_id FROM gold_supplier_cmas "
+        "WHERE cmas_agreement_count > 0 AND latest_term_end >= ?",
+        (today,),
     ):
         flags[r["canonical_id"]]["cmas_holder"] = True
     return flags
@@ -254,12 +270,9 @@ def _departments(
                     "fiscal_year": r["fiscal_year"],
                     "document_count": r["document_count"],
                     "total_value": _money(r["total_value"]),
-                    # The window doesn't span the whole Jul-Jun year. Coverage
-                    # ends at today at the latest: future-dated start dates
-                    # (contracts entered ahead of their term) must not make a
-                    # year still in progress look complete.
-                    "partial": h["coverage_from"] > f"{r['fiscal_year'] - 1}-07-01"
-                    or min(h["coverage_to"], today) < f"{r['fiscal_year']}-06-30",
+                    "partial": _fy_partial(
+                        r["fiscal_year"], h["coverage_from"], h["coverage_to"], today
+                    ),
                 }
                 for r in by_fy[bu]
             ]
@@ -315,8 +328,14 @@ def _departments(
     return index, pages
 
 
-def _suppliers(con, flags: dict[str, dict]) -> tuple[list[dict], dict[str, dict]]:
+def _coverage(con) -> tuple[str, str]:
+    """The whole warehouse's start-date window (first, last)."""
+    return con.execute("SELECT MIN(start_date), MAX(start_date) FROM gold_document").fetchone()
+
+
+def _suppliers(con, flags: dict[str, dict], today: str) -> tuple[list[dict], dict[str, dict]]:
     """(index rows, {shard: {canonical_id: page payload}})."""
+    cov_from, cov_to = _coverage(con)
     master = _rows(
         con,
         "SELECT canonical_id, canonical_name, parent_name, registration_count, "
@@ -331,7 +350,15 @@ def _suppliers(con, flags: dict[str, dict]) -> tuple[list[dict], dict[str, dict]
         "SUM(grand_total) AS total_value FROM gold_document WHERE fiscal_year IS NOT NULL "
         "GROUP BY 1, 2 ORDER BY 2",
     ):
-        by_fy[r.pop("canonical_id")].append({**r, "total_value": _money(r["total_value"])})
+        by_fy[r.pop("canonical_id")].append(
+            {
+                **r,
+                "total_value": _money(r["total_value"]),
+                # Against the warehouse window (a supplier has no window of its
+                # own): flags the in-progress and not-yet-started years.
+                "partial": _fy_partial(r["fiscal_year"], cov_from, cov_to, today),
+            }
+        )
     for r in _rows(
         con,
         "SELECT canonical_id, business_unit, MAX(department_name) AS department_name, "
@@ -715,6 +742,7 @@ def _insights(con, flags, dept_index, sup_index, opps, today, categories):
         "COUNT(DISTINCT business_unit) AS department_count FROM gold_document "
         "WHERE fiscal_year IS NOT NULL GROUP BY 1 ORDER BY 1",
     )
+    cov = _coverage(con)
     week = (date.fromisoformat(today) + timedelta(days=7)).isoformat()
     companies = [s for s in sup_index if s["supplier_kind"] == "company"]
     overview = {
@@ -732,7 +760,17 @@ def _insights(con, flags, dept_index, sup_index, opps, today, categories):
         },
         # department_count: how many departments report in that year — coverage
         # varies by year, so a dip can be fewer departments, not less buying.
-        "spend_by_fiscal_year": [{**r, "total_value": _money(r["total_value"])} for r in fy],
+        # partial: the year isn't fully inside the data window -- the current
+        # year is in progress and later ones carry only contracts entered ahead
+        # of their start date (FY2027 at $53.2B four months in, 2026-10).
+        "spend_by_fiscal_year": [
+            {
+                **r,
+                "total_value": _money(r["total_value"]),
+                "partial": _fy_partial(r["fiscal_year"], *cov, today),
+            }
+            for r in fy
+        ],
         "top_departments": [
             {k: d[k] for k in ("business_unit", "department_name", "document_count", "total_value")}
             for d in dept_index[:10]
@@ -802,9 +840,9 @@ def export_app(
     try:
         loaded = {r[0] for r in con.execute("SELECT DISTINCT business_unit FROM gold_document")}
         opps = _opportunities(con, today, loaded)
-        flags = _supplier_flags(con)
+        flags = _supplier_flags(con, today)
         dept_index, dept_pages = _departments(con, opps, flags, load_aliases(), today)
-        sup_index, sup_shards = _suppliers(con, flags)
+        sup_index, sup_shards = _suppliers(con, flags, today)
         overview, insight_pages, search = _insights(
             con, flags, dept_index, sup_index, opps, today, load_categories()
         )

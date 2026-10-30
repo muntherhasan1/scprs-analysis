@@ -245,3 +245,39 @@ def test_partial_fiscal_year_ignores_future_start_dates(tmp_path):
         "spend_by_fiscal_year"
     ]}  # fmt: skip
     assert fy == {2021: False, 2027: True, 2028: True}
+    # Same rule on the overview trend and every supplier's series (both used
+    # to emit FY rows with no partial marker at all).
+    ov = {y["fiscal_year"]: y["partial"] for y in _load(out / "insights" / "overview.json")[
+        "spend_by_fiscal_year"
+    ]}  # fmt: skip
+    assert ov == {2021: False, 2027: True, 2028: True}
+    acme = next(
+        p
+        for f in (out / "suppliers").glob("shard-*.json")
+        for p in _load(f)["suppliers"].values()
+        if p["profile"]["canonical_name"].upper().startswith("ACME")
+    )
+    assert {y["fiscal_year"]: y["partial"] for y in acme["spend_by_fiscal_year"]} == {
+        2021: False,
+        2027: True,
+        2028: True,
+    }
+
+
+def test_cmas_holder_requires_an_agreement_in_term(tmp_path):
+    serve = tmp_path / "s.db"
+    con = sqlite3.connect(serve)
+    for t in ("gold_supplier_certification", "gold_supplier_cmas"):
+        cols = (
+            "canonical_id, cert_small_business, cert_micro_business, cert_dvbe, cert_record_count"
+            if t == "gold_supplier_certification"
+            else "canonical_id, cmas_agreement_count, latest_term_end"
+        )
+        con.execute(f"CREATE TABLE {t} ({cols})")
+    con.executemany(
+        "INSERT INTO gold_supplier_cmas VALUES (?, 1, ?)",
+        [("LIVE", "2027-01-01"), ("EXPIRED", "2026-01-01")],
+    )
+    flags = app_export._supplier_flags(con, "2026-07-25")
+    assert flags["LIVE"]["cmas_holder"] is True
+    assert flags["EXPIRED"]["cmas_holder"] is False

@@ -47,6 +47,13 @@ Rules the export enforces (don't move them into the front end):
 - **`supplier_kind`** labels interagency counterparties (`DEPT…`/`UNIV…` →
   `government`) and redacted/pooled payees (`…CFD`, `…SGP`, `UNKNOWN` →
   `placeholder`) so the UI doesn't present them as competitors; totals still include them.
+- **`partial` on every fiscal-year row** (department pages, the overview trend,
+  supplier pages): true when the data window doesn't span the whole Jul–Jun
+  year, with coverage ending at the export date — so the year in progress and
+  later years (contracts entered ahead of their start date) are always partial.
+  Department rows use the department's own window; overview and supplier rows
+  use the warehouse's.
+- **`cmas_holder`** needs a CMAS agreement still in term on the export date.
 - **Public slice.** CMAS contact name/email/website are never selected.
 - The output directory is rebuilt via a staging dir and swapped in, so a department
   or supplier that leaves the warehouse can't leave a stale page behind.

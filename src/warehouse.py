@@ -383,6 +383,16 @@ def _ingest_eprocure_events(con: sqlite3.Connection, eprocure_db: Path, batch: s
 # canonical-supplier stamp after gold is built.
 _SIDE_INPUT_TABLES = ("bronze_cmas", "bronze_eprocure")
 
+# Supplier ids that are not companies: the UNKNOWN bucket, interagency
+# departments/campuses (DEPT518000, DEPT7300W0, UNIV678000) and pooled or
+# redacted payees (0820CFD, 4500SGP). Same families as app_export's kinds.
+_NON_COMPANY_ID = re.compile(r"^(UNKNOWN|(DEPT|UNIV)\w+|\d+(CFD|SGP))$")
+
+# The canonical name of the UNKNOWN bucket. Its rows keep whatever vendor name
+# the summary carried (4 names in 2026-10), so MAX(canonical_name) labelled
+# PINNACLE PETROLEUM's spend "WW GRAINGER INC"; one fixed label instead.
+UNKNOWN_SUPPLIER_NAME = "Unknown supplier"
+
 
 def _resolve_side_input_suppliers(con: sqlite3.Connection) -> None:
     """Stamp each side-input row (CMAS agreement, eProcure certification) with the
@@ -399,13 +409,17 @@ def _resolve_side_input_suppliers(con: sqlite3.Connection) -> None:
     # partial spend), so it stays unmatched until references/supplier_master.csv
     # unifies the ids. Ambiguous names land in dw_supplier_name_collision, which
     # the canonical_crosswalk_gaps / side_input_ambiguous_names checks count.
+    # Only company suppliers are match candidates: the UNKNOWN bucket (summary
+    # rows with no supplier id keep their vendor's NAME, e.g. WW GRAINGER) and
+    # government/placeholder ids would otherwise read as a rival canonical and
+    # make the real company's name ambiguous.
     by_key: dict[str, dict[str, str]] = {}
     for cid, cname in con.execute(
         "SELECT DISTINCT canonical_id, canonical_name FROM lv_dim_supplier "
         "WHERE canonical_name IS NOT NULL ORDER BY canonical_id"
     ):
         key = supplier_master.normalize_name(cname)
-        if key:
+        if key and not _NON_COMPANY_ID.match(cid):
             by_key.setdefault(key, {}).setdefault(cid, cname)
     lookup = {k: next(iter(v.items())) for k, v in by_key.items() if len(v) == 1}
     con.execute("DROP TABLE IF EXISTS dw_supplier_name_collision")
@@ -417,6 +431,25 @@ def _resolve_side_input_suppliers(con: sqlite3.Connection) -> None:
         "INSERT INTO dw_supplier_name_collision VALUES (?, ?, ?)",
         [(k, len(v), ",".join(sorted(v))) for k, v in by_key.items() if len(v) > 1],
     )
+    # The same rule from the other side: 2+ distinct eProcure firms (cert_id)
+    # whose names normalize alike (INC/LLC stripped: BLACKBIRD INDUSTRIES Inc.
+    # in Fresno vs BlackBird Industries LLC in Elk Grove) can't all be our
+    # supplier; OR-ing their flags onto one canonical would claim a DVBE status
+    # only one of them holds. Left unmatched and listed for curation.
+    con.execute("DROP TABLE IF EXISTS dw_side_input_name_collision")
+    con.execute(
+        "CREATE TABLE dw_side_input_name_collision (source TEXT, name_norm TEXT, "
+        "firm_count INTEGER, PRIMARY KEY (source, name_norm))"
+    )
+    if _src_has_local(con, "bronze_eprocure"):
+        con.execute(
+            "INSERT INTO dw_side_input_name_collision "
+            "SELECT 'eprocure', supplier_norm, COUNT(DISTINCT cert_id) FROM bronze_eprocure "
+            "WHERE supplier_norm <> '' GROUP BY supplier_norm HAVING COUNT(DISTINCT cert_id) > 1"
+        )
+    side_ambiguous = {
+        r[0] for r in con.execute("SELECT name_norm FROM dw_side_input_name_collision")
+    }
     for table in _SIDE_INPUT_TABLES:
         if not _src_has_local(con, table):
             continue
@@ -425,7 +458,7 @@ def _resolve_side_input_suppliers(con: sqlite3.Connection) -> None:
             for rowid, norm in con.execute(
                 f"SELECT rowid, supplier_norm FROM {table}"  # noqa: S608 - internal constant
             )
-            if norm in lookup
+            if norm in lookup and not (table == "bronze_eprocure" and norm in side_ambiguous)
         ]
         con.executemany(
             f"UPDATE {table} SET matched_canonical_id = ?, "  # noqa: S608 - internal constant
@@ -1048,7 +1081,9 @@ def _apply_supplier_master(con, master: dict | None = None) -> None:
     for col in ("canonical_id", "canonical_name", "parent_name"):
         con.execute(f"ALTER TABLE dim_supplier ADD COLUMN {col} TEXT")  # noqa: S608 - constants
     con.execute(
-        "UPDATE dim_supplier SET canonical_id = supplier_id, canonical_name = supplier_name"
+        "UPDATE dim_supplier SET canonical_id = supplier_id, canonical_name = "
+        "CASE WHEN supplier_id = 'UNKNOWN' THEN ? ELSE supplier_name END",
+        (UNKNOWN_SUPPLIER_NAME,),
     )
     if not master:
         return
@@ -1076,12 +1111,14 @@ def _apply_supplier_master(con, master: dict | None = None) -> None:
         "    (SELECT x.parent_name FROM _xref x WHERE x.supplier_id = dim_supplier.supplier_id) "
         "WHERE supplier_id IN (SELECT supplier_id FROM _xref)"
     )
-    # Propagate a parent to every sibling registration of the same canonical entity.
+    # Propagate a parent to every sibling registration of the same canonical
+    # entity. Aggregated once and joined: the per-row correlated MAX over an
+    # unindexed canonical_id was quadratic (95s at 62.6K suppliers, 2026-10).
     con.execute(
-        "UPDATE dim_supplier SET parent_name = "
-        "  (SELECT MAX(d2.parent_name) FROM dim_supplier d2 "
-        "   WHERE d2.canonical_id = dim_supplier.canonical_id) "
-        "WHERE parent_name IS NULL"
+        "UPDATE dim_supplier SET parent_name = p.parent_name "
+        "FROM (SELECT canonical_id, MAX(parent_name) AS parent_name FROM dim_supplier "
+        "      WHERE parent_name IS NOT NULL GROUP BY canonical_id) AS p "
+        "WHERE dim_supplier.canonical_id = p.canonical_id AND dim_supplier.parent_name IS NULL"
     )
     con.execute("DROP TABLE _xref")
 
@@ -1873,7 +1910,8 @@ _DQ_CHECKS = [
         "SELECT (SELECT COUNT(*) FROM bronze_cmas WHERE supplier_norm IN "
         "(SELECT name_norm FROM dw_supplier_name_collision)) + "
         "(SELECT COUNT(*) FROM bronze_eprocure WHERE supplier_norm IN "
-        "(SELECT name_norm FROM dw_supplier_name_collision))",
+        "(SELECT name_norm FROM dw_supplier_name_collision) OR supplier_norm IN "
+        "(SELECT name_norm FROM dw_side_input_name_collision WHERE source = 'eprocure'))",
     ),
 ]
 

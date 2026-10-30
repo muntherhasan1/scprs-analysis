@@ -147,6 +147,13 @@ registration) is left **unmatched** rather than pinned to one arbitrary id and
 its partial spend; those names are listed in `dw_supplier_name_collision`
 (warn checks `canonical_crosswalk_gaps` and `side_input_ambiguous_names`).
 Unifying the ids in `references/supplier_master.csv` restores the match.
+Only company ids are candidates: the `UNKNOWN` bucket (summary rows with no
+supplier id keep the vendor's name, e.g. WW GRAINGER) and government /
+placeholder ids (`DEPT…`, `UNIV…`, `…CFD`, `…SGP`) never count as a rival.
+The rule also runs from the other side: 2+ distinct eProcure firms
+(`cert_id`) whose names normalize alike stay unmatched too, listed in
+`dw_side_input_name_collision` and counted by `side_input_ambiguous_names`.
+The `UNKNOWN` bucket's `canonical_name` is always `Unknown supplier`.
 
 **eProcure SB/DVBE certification integration:** a third optional side input,
 Cal eProcure's certified-supplier registry (`data/eprocure.db`,

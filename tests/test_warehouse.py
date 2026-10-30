@@ -1167,6 +1167,64 @@ def test_side_input_name_collision_is_left_unmatched(tmp_path):
         con.close()
 
 
+def test_unknown_bucket_is_not_a_rival_and_side_input_duplicates_stay_unmatched(tmp_path):
+    """The UNKNOWN bucket (summary rows without a supplier id keep the vendor's
+    name: WW GRAINGER INC under UNKNOWN in 2026-10) must not make the real
+    company's name ambiguous, and carries one fixed label. From the other side,
+    two distinct eProcure firms normalizing alike can't both be our supplier."""
+    src, wh = tmp_path / "scprs.db", tmp_path / "warehouse.db"
+    cmas, epr = tmp_path / "cmas.db", tmp_path / "eprocure.db"
+    _seed_source(src)  # "Acme" (S1), "Beta" (S2)
+    con = sqlite3.connect(src)
+    con.execute(
+        "INSERT INTO purchases (business_unit, purchase_document, version, grand_total, "
+        "start_date, acquisition_type_sub_type, acquisition_method, supplier_id, "
+        "supplier_name, status, department_name) VALUES ('8660', 'U', '1', 7.0, "
+        "'2021-02-18', 'IT Goods', 'Formal - COMPETITIVE', NULL, 'Acme', 'Active', 'PUC')"
+    )
+    con.commit()
+    con.close()
+    _seed_cmas(cmas, [("3-01-01-1001", "Acme Inc", "SB", "2030-01-01")])
+    _seed_eprocure(
+        epr,
+        [
+            ("100", "Beta, Inc.", "DVBE", "2025-01-01", "2030-01-31"),
+            ("200", "Beta LLC", "SB", "2025-01-01", "2030-01-31"),  # a different firm
+        ],
+    )
+    result = warehouse.build_all(
+        wh_path=wh,
+        source_path=src,
+        enrichment_db=tmp_path / "no_enrich.db",
+        cmas_db=cmas,
+        eprocure_db=epr,
+        log=lambda *a: None,
+    )
+    checks = {d["check"]: d for d in result["dq"]}
+    assert checks["canonical_crosswalk_gaps"]["failed"] == 0
+    assert checks["side_input_ambiguous_names"]["failed"] == 2  # both Beta records
+    con = sqlite3.connect(wh)
+    try:
+        assert con.execute("SELECT matched_canonical_id FROM bronze_cmas").fetchall() == [("S1",)]
+        assert con.execute(
+            "SELECT DISTINCT matched_canonical_id FROM bronze_eprocure"
+        ).fetchall() == [(None,)]
+        assert con.execute(
+            "SELECT source, name_norm, firm_count FROM dw_side_input_name_collision"
+        ).fetchall() == [("eprocure", "BETA", 2)]
+        assert con.execute(
+            "SELECT DISTINCT canonical_name FROM gold_document WHERE canonical_id = 'UNKNOWN'"
+        ).fetchall() == [(warehouse.UNKNOWN_SUPPLIER_NAME,)]
+        assert con.execute(
+            "SELECT supplier_name FROM gold_supplier_share WHERE supplier_id = 'UNKNOWN'"
+        ).fetchall() == [(warehouse.UNKNOWN_SUPPLIER_NAME,)]
+        assert con.execute(
+            "SELECT COUNT(*) FROM gold_supplier_master WHERE canonical_id = 'UNKNOWN'"
+        ).fetchone() == (1,)
+    finally:
+        con.close()
+
+
 def test_share_and_hhi_marts_group_by_canonical_supplier(tmp_path, monkeypatch):
     """Two registrations of one company are ONE competitor in the share / HHI /
     acquisition-profile marts (they feed Power BI and MCP)."""
