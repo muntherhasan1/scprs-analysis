@@ -45,6 +45,12 @@ on:
       budget_minutes:
         description: Enrich wall-clock budget in minutes (must stay under timeout-minutes)
         default: "70"
+      contracts_ack:
+        description: >-
+          ONLY after investigating a contracts gate failure: the reason it is
+          acceptable. Reports its errors as acknowledged warnings so this run
+          publishes and becomes the new baseline. Leave blank otherwise.
+        default: ""
 
 permissions:
   contents: read
@@ -172,14 +178,25 @@ jobs:
       # stale unit would block the very action that cures it.
       - name: Wave-1 checks (gate the publish)
         id: wave1
+        env:
+          CONTRACTS_ACK: ${{ inputs.contracts_ack }}
         run: |
           set +e
           echo "::group::health"
           python -m src.health; H=$?
           echo "::endgroup::"
           echo "::group::contracts"
-          python -m src.contracts capture
-          python -m src.contracts check; C=$?
+          # A failed capture must fail the gate: `check` would otherwise diff
+          # the two PREVIOUS snapshots (both already passed) and wave the
+          # publish through unchecked.
+          python -m src.contracts capture; CAP=$?
+          ack=()
+          if [ -n "$CONTRACTS_ACK" ]; then
+            ack=(--acknowledge "$CONTRACTS_ACK")
+            echo "::warning::contracts errors acknowledged for this run: $CONTRACTS_ACK"
+          fi
+          python -m src.contracts check "${ack[@]}"; C=$?
+          if [ "$CAP" -ne 0 ]; then echo "::error::contracts capture failed (exit $CAP) — no fresh snapshot to check"; C=1; fi
           echo "::endgroup::"
           echo "::group::canary (live parse-drift probe)"
           python -m src.canary; K=$?

@@ -95,8 +95,22 @@ jobs:
           args=(--budget-minutes "${IN_BUDGET:-60}")
           for bu in $(echo "$IN_BUS" | tr ',' ' '); do args+=(--bu "$bu"); done
           start=$SECONDS
-          python -m src.model refresh "${args[@]}" 2>&1 | tee refresh.log
+          # Hard stop INSIDE the step, well before the job's timeout-minutes:
+          # a job-level kill skips the publish, losing every unit refreshed so
+          # far and the unfinished unit's attempt stamp — so the same slow unit
+          # was first again next run. Killed here (rc 124/137), the run still
+          # publishes: refreshed units keep their rows and the unit that was
+          # mid-scrape carries its "attempt started" stamp to the back of the
+          # rotation. SQLite rolls the interrupted unit's transaction back.
+          # Basis: 200m job - 13m worst setup - ~3m publish - margin = 175m.
+          timeout -k 60 175m python -m src.model refresh "${args[@]}" 2>&1 | tee refresh.log
           rc=${PIPESTATUS[0]}
+          timed_out=0
+          if [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; then
+            timed_out=1
+            echo "::error::refresh hit its 175m hard stop (exit $rc) — publishing what finished; the unit in progress goes to the back of the rotation"
+          fi
+          echo "timed_out=$timed_out" >> "$GITHUB_OUTPUT"
           result=$(grep -E '^RESULT ' refresh.log | tail -1)
           refreshed=$(echo "$result" | sed -nE 's/.*refreshed=([0-9]+).*/\1/p')
           failed=$(echo "$result" | sed -nE 's/.*failed=([0-9]+).*/\1/p')
@@ -123,9 +137,13 @@ jobs:
       # `summary_refresh_failure`, which moves the unit to the back of the
       # rotation. Unpublished, that stamp is lost and the same failing unit is
       # first again next run (the 2026-10-27..29 BU 3790 loop: 0 refreshed).
-      # A failed unit's `purchases` rows are untouched by its gate.
+      # A failed unit's `purchases` rows are untouched by its gate. A run cut
+      # by the hard stop has no RESULT line (counts read 0) but must publish
+      # too, for the same reason.
       - name: Publish scprs.db back to the dataset
-        if: steps.refresh.outputs.refreshed != '0' || steps.refresh.outputs.failed != '0'
+        if: >-
+          steps.refresh.outputs.refreshed != '0' || steps.refresh.outputs.failed != '0'
+          || steps.refresh.outputs.timed_out == '1'
         run: python -m src.data_sync publish-operational
 
       - name: Fail on refused or errored units

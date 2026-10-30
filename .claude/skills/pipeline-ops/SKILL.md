@@ -20,6 +20,11 @@ stale serving, zero alerts) and the audit that followed (issues #43–#56).
    run cannot half-publish. Rollback fires ONLY on verified marker mismatch.
 5. Verify serving with `python -m src.golive_check` (never the local stdio MCP
    tools — those hit the local DB, not the Space).
+6. Enrich blocked by the **contracts** gate: re-drills are self-explaining
+   (`redrill_log`), so an error means rows changed OUTSIDE any logged load —
+   investigate it. Only once it's understood and acceptable, dispatch Enrich
+   with `contracts_ack: "<reason>"`; that run publishes and becomes the new
+   baseline. Never ack blind — it is the integrity gate.
 
 ## Change-impact checklist (run BEFORE any change to data volume, cadence, or surfaces)
 

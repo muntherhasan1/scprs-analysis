@@ -1,5 +1,7 @@
 """Offline tests for the SQLite data model (download_range is monkeypatched)."""
 
+import sqlite3
+
 import pandas as pd
 
 from src import model
@@ -291,3 +293,78 @@ def test_refused_unit_rotates_to_the_back_without_counting_as_refreshed(tmp_path
     refuse.clear()
     model.refresh_units(db_path=db, business_units=["3790"], log=lambda *a: None)
     assert model.query("SELECT COUNT(*) c FROM summary_refresh_failure", db_path=db)["c"][0] == 0
+
+
+class _FailOnReopen:
+    """sqlite3 connection proxy that raises on the reopen-marker INSERT — the
+    last write in `_replace_unit`, after the summary rows are in."""
+
+    def __init__(self, con):
+        self._con = con
+
+    def __getattr__(self, name):
+        return getattr(self._con, name)
+
+    def execute(self, sql, *args):
+        if "INTO details_reopen" in sql:
+            raise sqlite3.OperationalError("disk I/O error")
+        return self._con.execute(sql, *args)
+
+
+def test_replace_unit_is_all_or_nothing(tmp_path):
+    """`to_sql` committed the DELETE+INSERT on its own, so a failure after it
+    left the unit's summary replaced with no reopen markers — amended days
+    stayed "done" forever, and #162 publishes failure-only runs."""
+    import pytest
+
+    db = tmp_path / "t.db"
+    _seed_purchases(db, [("5180", "OLD", "2025-01-05", 1)])
+    con = model._connect(db)
+    model._ensure_details_schema(con)  # enriched unit: the reopen step runs
+    con.commit()
+    proxy = _FailOnReopen(con)
+    with pytest.raises(sqlite3.OperationalError):
+        model._replace_unit(
+            proxy, "5180", model._prepare_summary(_scraped(3), "5180"), "01/01/2025"
+        )
+    con.close()  # closing without commit rolls the open transaction back
+    docs = model.query("SELECT purchase_document FROM purchases", db_path=db)
+    assert docs["purchase_document"].tolist() == ["OLD"]
+    assert model.query("SELECT COUNT(*) c FROM summary_refresh", db_path=db)["c"][0] == 0
+
+
+class _Killed(BaseException):
+    """Stands in for the job timeout killing the process mid-unit."""
+
+
+def test_unit_killed_mid_refresh_goes_to_the_back_next_run(tmp_path, monkeypatch):
+    """A unit the job timeout kills recorded nothing, so it was first again
+    every run — and every run's kill lost the units refreshed before it."""
+    import pytest
+
+    db = tmp_path / "k.db"
+    _seed_purchases(db, [(bu, "D", "2024-01-01", 1) for bu in ("0820", "2720", "3790")])
+    order, kill = [], {"2720"}
+
+    def fake_refresh(bu, **k):
+        order.append(bu)
+        if bu in kill:
+            kill.clear()
+            raise _Killed
+        con = model._connect(db)
+        try:
+            model._replace_unit(con, bu, model._prepare_summary(_scraped(1), bu), "07/01/2021")
+        finally:
+            con.close()
+        return {"business_unit": bu, "before": 1, "after": 1, "reopened_days": 0}
+
+    monkeypatch.setattr(model, "refresh_db", fake_refresh)
+    with pytest.raises(_Killed):
+        model.refresh_units(db_path=db, log=lambda *a: None)
+    assert order == ["0820", "2720"]
+    fail = model.query("SELECT business_unit, error FROM summary_refresh_failure", db_path=db)
+    assert fail.values.tolist() == [["2720", model.ATTEMPT_UNFINISHED]]
+
+    order.clear()
+    model.refresh_units(db_path=db, log=lambda *a: None)
+    assert order == ["3790", "0820", "2720"]  # the killed unit waits its turn

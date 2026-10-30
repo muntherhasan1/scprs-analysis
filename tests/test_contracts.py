@@ -143,3 +143,100 @@ def test_main_check_exits_zero_without_baseline(tmp_path):
     db = tmp_path / "scprs.db"
     _seed(db).close()
     assert contracts.main(["check", "--db", str(db)]) == 0
+
+
+# --- explained re-drill deltas (redrill_log) ---------------------------------
+
+
+def _drill(monkeypatch, db, bu, doc, amounts):
+    """Load one document's drill with one line per amount (unit_price, qty 1)."""
+    fixture = [
+        {
+            "document": doc,
+            "header": {"purchase_document": doc, "version": "1", "grand_total": "$1"},
+            "lines": [
+                {"line_number": str(i), "unit_price": f"${a:,.2f}", "quantity": "1"}
+                for i, a in enumerate(amounts, 1)
+            ],
+            "pos": [],
+        }
+    ]
+    monkeypatch.setattr(model.scprs, "collect_po_details", lambda *a, **k: fixture)
+    model.build_details_db(bu, "01/01/2025", "01/01/2025", db_path=db, log=lambda *a: None)
+
+
+def _snap(db, at=None):
+    con = sqlite3.connect(db)
+    try:
+        contracts.record(con, contracts.capture_metrics(con), at=at)
+    finally:
+        con.close()
+
+
+def _check(db, **k):
+    con = sqlite3.connect(db)
+    try:
+        return contracts.check(con, **k)
+    finally:
+        con.close()
+
+
+def test_logged_redrill_explains_any_shrink_but_unlogged_loss_trips(tmp_path, monkeypatch):
+    """One huge document (4260 16-93286 is $22.9B, ~14% of all line dollars)
+    amended down by more than the old 1% global allowance must NOT block the
+    publish — the load logged exactly what it changed. A single line deleted
+    outside any logged load still must."""
+    db = tmp_path / "scprs.db"
+    _drill(monkeypatch, db, "4260", "BIG", [22.9e9, 1.0e9])
+    _drill(monkeypatch, db, "4260", "SMALL", [100.0, 50.0])
+    _snap(db)
+
+    _drill(monkeypatch, db, "4260", "BIG", [5.0e9])  # amendment: -$18.9B, one line fewer
+    _snap(db)
+    assert [f for f in _check(db) if f.severity == "error"] == []
+
+    con = sqlite3.connect(db)
+    con.execute("DELETE FROM document_lines WHERE purchase_document = 'SMALL' AND line_number='2'")
+    con.commit()
+    con.close()
+    _snap(db)
+    errs = {f.metric for f in _check(db) if f.severity == "error"}
+    # 1 line / $50 of 2 lines / ~$5B: far under any percentage, still caught.
+    assert errs == {"line_items", "line_amount_total"}
+
+
+def test_window_before_the_log_falls_back_to_the_percentage():
+    prev = {"line_items": 1000}  # no LOG_MARKER: predates redrill_log
+    curr = {"line_items": 995, contracts.LOG_MARKER: 1}
+    assert "metric_decreased" not in _by_check(contracts.diff(prev, curr, explained={}))
+    marked = {**prev, contracts.LOG_MARKER: 1}
+    dec = _by_check(contracts.diff(marked, curr, explained={}))["metric_decreased"]
+    assert [f.metric for f in dec] == ["line_items"]
+
+
+def test_acknowledge_downgrades_errors_so_an_investigated_state_publishes(tmp_path):
+    db = tmp_path / "scprs.db"
+    con = _seed(db)
+    con.execute(
+        "INSERT INTO document_lines (business_unit, purchase_document, line_number, "
+        "unit_price, quantity) VALUES ('8660','D1','1',100,1)"
+    )
+    con.commit()
+    contracts.record(con, contracts.capture_metrics(con), at="2026-07-16T00:00:00+00:00")
+    con.execute("DELETE FROM document_lines")
+    con.commit()
+    contracts.record(con, contracts.capture_metrics(con), at="2026-07-16T01:00:00+00:00")
+    con.close()
+    assert contracts.main(["check", "--db", str(db)]) == 1
+    assert contracts.main(["check", "--db", str(db), "--acknowledge", "dedupe #999"]) == 0
+    acked = [f for f in _check(db, acknowledge="dedupe #999") if "ACKNOWLEDGED" in f.detail]
+    assert acked and all(f.severity == "warn" for f in acked)
+
+
+def test_drill_metrics_match_the_contracts_metrics():
+    """model logs deltas with the SAME SQL the check captures, or the
+    subtraction is meaningless."""
+    sql = {name: q for name, q, _drop in contracts._METRICS}
+    assert {k: sql[k] for k in model._DRILL_METRICS} == model._DRILL_METRICS
+    redrill = {n for n, _q, d in contracts._METRICS if d not in (None, 0.0)}
+    assert redrill == set(model._DRILL_METRICS)

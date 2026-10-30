@@ -175,17 +175,36 @@ def _prepare_summary(df, business_unit: str):
     return df.reindex(columns=_PURCHASE_COLUMNS)
 
 
+def _insert_frame(con: sqlite3.Connection, table: str, frame, columns: list[str]) -> None:
+    """Insert a frame's rows WITHOUT committing, so the caller's DELETE, these
+    rows and any bookkeeping land in one transaction. `DataFrame.to_sql`
+    commits on its own (pandas 3 `run_transaction`), which let a failure after
+    it leave a half-applied unit: rows replaced but no reopen markers."""
+    if frame.empty:
+        return
+    cols = ", ".join(columns)
+    marks = ", ".join("?" * len(columns))
+    rows = frame.reindex(columns=columns).astype(object)
+    con.executemany(
+        f"INSERT INTO {table} ({cols}) VALUES ({marks})",  # noqa: S608 - internal constants
+        rows.where(rows.notna(), None).itertuples(index=False, name=None),
+    )
+
+
 def _replace_unit(con: sqlite3.Connection, business_unit: str, df, from_date: str) -> int:
     """Replace one unit's summary rows; return the enriched days reopened.
 
     Also stamps `summary_refresh` (the refresh rotation order) and reopens
     every enriched day that now holds a document not drilled at its summary
     version — a late-entered document or an amendment. Without the reopen,
-    enrich would skip those days forever: `details_progress` says done."""
+    enrich would skip those days forever: `details_progress` says done.
+
+    All of it is ONE transaction: the summary rows, the rotation stamp and the
+    reopen markers commit together or not at all."""
     _ensure_schema(con)
     _ensure_progress_schema(con)
     con.execute("DELETE FROM purchases WHERE business_unit = ?", (business_unit,))
-    df.to_sql("purchases", con, if_exists="append", index=False)
+    _insert_frame(con, "purchases", df, _PURCHASE_COLUMNS)
     now = datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
     con.execute(
         "INSERT OR REPLACE INTO summary_refresh VALUES (?, ?, ?, ?)",
@@ -220,6 +239,11 @@ def _lost_documents(stored: list[tuple[str, str]], df) -> dict[str, str]:
     """Stored documents (-> their stored start month) absent from a scrape."""
     scraped = set(df["purchase_document"].dropna().astype(str))
     return {str(doc): month for doc, month in stored if str(doc) not in scraped}
+
+
+# `summary_refresh_failure.error` for a unit whose refresh started but never
+# finished — the run was killed mid-scrape.
+ATTEMPT_UNFINISHED = "attempt started; the run ended before this unit finished (killed?)"
 
 
 class RefreshRefused(Exception):
@@ -311,7 +335,11 @@ def _record_refresh_failure(db_path: Path, business_unit: str, error: str) -> No
         _ensure_schema(con)
         con.execute(
             "INSERT OR REPLACE INTO summary_refresh_failure VALUES (?, ?, ?)",
-            (business_unit, datetime.now().isoformat(timespec="seconds"), error),
+            (
+                business_unit,
+                datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
+                error,
+            ),
         )
         con.commit()
     finally:
@@ -361,6 +389,12 @@ def refresh_units(
             log(f"time budget ({budget_minutes:g} min) spent; {len(order) - idx} unit(s) left")
             break
         t0 = time.monotonic()
+        # Stamp the attempt BEFORE scraping: if the process is killed mid-unit
+        # (the workflow's hard `timeout` on the refresh command), this stamp is
+        # what publishes, so the unit goes to the back of the rotation instead
+        # of being first again forever. Success clears it (`_replace_unit`);
+        # a refusal or error overwrites it with the real reason.
+        _record_refresh_failure(db_path, bu, ATTEMPT_UNFINISHED)
         try:
             r = refresh_db(bu, db_path=db_path, log=log)
         except RefreshRefused as e:
@@ -462,6 +496,31 @@ def _iso(v):
         return v
 
 
+# The `contracts` row-level metrics a detail load can move, as (name -> SQL);
+# restricted to one unit's loaded documents. Kept in step with
+# `contracts._METRICS` (a test pins the two together).
+_DRILL_METRICS = {
+    "detail_docs": "SELECT COUNT(*) FROM document_details",
+    "line_items": "SELECT COUNT(*) FROM document_lines",
+    "assoc_pos": "SELECT COUNT(*) FROM document_pos",
+    "line_amount_total": "SELECT COALESCE(SUM(unit_price * quantity), 0) FROM document_lines",
+}
+
+
+def _drill_aggregates(con: sqlite3.Connection, business_unit: str, docs: list[str]) -> dict:
+    """The `_DRILL_METRICS` over one unit's `docs`, plus how many of those
+    documents already had a drill (i.e. are being re-drilled)."""
+    # Placeholders only: the SQL is internal constants, values parameterized.
+    where = f" WHERE business_unit = ? AND purchase_document IN ({','.join('?' * len(docs))})"
+    args = [business_unit, *docs]
+    out = {k: con.execute(q + where, args).fetchone()[0] or 0 for k, q in _DRILL_METRICS.items()}
+    out["replaced"] = con.execute(
+        "SELECT COUNT(DISTINCT purchase_document) FROM document_details" + where,  # noqa: S608
+        args,
+    ).fetchone()[0]
+    return out
+
+
 def _ensure_details_schema(con: sqlite3.Connection) -> None:
     for table, cols in _DETAILS_SCHEMA.items():
         defs = ",\n  ".join(f"{c} {'REAL' if c in _REAL_COLUMNS else 'TEXT'}" for c in cols)
@@ -476,6 +535,13 @@ def _ensure_details_schema(con: sqlite3.Connection) -> None:
                 )
         for col in ("business_unit", "purchase_document"):
             con.execute(f"CREATE INDEX IF NOT EXISTS ix_{table}_{col} ON {table}({col})")
+    # One row per detail load: the change it made to each `_DRILL_METRICS`
+    # (after - before, over the loaded documents). Read by `contracts check`.
+    con.execute(
+        "CREATE TABLE IF NOT EXISTS redrill_log ("
+        "logged_at TEXT, business_unit TEXT, documents INTEGER, replaced INTEGER, "
+        "detail_docs REAL, line_items REAL, assoc_pos REAL, line_amount_total REAL)"
+    )
 
 
 def build_details_db(
@@ -577,6 +643,7 @@ def build_details_db(
         _ensure_details_schema(con)
         loaded = [r["purchase_document"] for r in det]
         ph = ",".join("?" * len(loaded))
+        before = _drill_aggregates(con, business_unit, loaded)
         for table, rows in (
             ("document_details", det),
             ("document_lines", lines),
@@ -588,8 +655,24 @@ def build_details_db(
             # two BUs must not have one BU's reload wipe the other's rows.
             q = f"DELETE FROM {table} WHERE business_unit = ? AND purchase_document IN ({ph})"  # noqa: S608 # nosec
             con.execute(q, [business_unit, *loaded])
-            frame = pd.DataFrame(rows).reindex(columns=_DETAILS_SCHEMA[table])
-            frame.to_sql(table, con, if_exists="append", index=False)
+            frame = pd.DataFrame(rows, columns=_DETAILS_SCHEMA[table])
+            _insert_frame(con, table, frame, _DETAILS_SCHEMA[table])
+        # Log what this load changed in the `contracts` row-level metrics, in
+        # the same transaction as the load: `contracts check` subtracts these
+        # explained deltas, so a re-drill that legitimately sheds lines (an
+        # amendment, one copy replacing a duplicated drill) never trips the
+        # publish gate, while a loss nothing logged still does.
+        after = _drill_aggregates(con, business_unit, loaded)
+        con.execute(
+            "INSERT INTO redrill_log VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                datetime.now(dt.timezone.utc).isoformat(),
+                business_unit,
+                len(set(loaded)),
+                before["replaced"],
+                *(after[k] - before[k] for k in _DRILL_METRICS),
+            ),
+        )
         con.commit()
     finally:
         con.close()
