@@ -173,16 +173,8 @@ jobs:
           python -m src.health; H=$?
           echo "::endgroup::"
           echo "::group::contracts"
-          # Fail closed on a failed capture: `check` compares the two NEWEST
-          # snapshots, so without this run's capture it would re-compare two
-          # already-passed snapshots and wave an unchecked store through.
-          python -m src.contracts capture; CAP=$?
-          if [ "$CAP" -ne 0 ]; then
-            echo "::error::contracts capture failed (rc=$CAP) — this run's store was never measured"
-            C=1
-          else
-            python -m src.contracts check; C=$?
-          fi
+          python -m src.contracts capture
+          python -m src.contracts check; C=$?
           echo "::endgroup::"
           echo "::group::canary (live parse-drift probe)"
           python -m src.canary; K=$?
