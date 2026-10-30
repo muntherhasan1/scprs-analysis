@@ -189,8 +189,23 @@ the serve DB. So the table is carried run to run as its own file,
    the new history has fewer rows than the copy it was seeded from.
 4. `data_sync publish --with-history` puts the serve DB and the history in **one**
    commit, refusing if this run didn't fetch the history or the dataset's copy
-   changed since (blob-id check scoped to the history file, so a serve-only publish
-   from the laptop script doesn't conflict).
+   changed since (blob-id check scoped to the history file, pinned to the checked
+   HEAD as `parent_commit` so nothing can land in between). **When the build
+   appended no history rows** (exported rows = rows fetched), the ~0.6 GB history
+   upload is **skipped** and only the serve DB is published — every dataset
+   revision is kept, so re-uploading an identical file each refresh is pure
+   storage growth.
+
+**One-time seed of older local history.** A laptop `warehouse.db` may hold
+snapshots CI never saw (the July 2026 batches). `python -m src.data_sync
+merge-history --dataset <warehouse dataset>` fetches the dataset copy (fail-closed),
+merges the local rows in (local first, so their earlier observations keep the lower
+keys; rows already present by document/version/signature are skipped), refuses if
+the result would be smaller than the dataset copy, and prints the counts — a **dry
+run**. Add `--apply` to publish the merged history alone as one compare-and-swap
+commit; the next refresh seeds from it. Run it right after a refresh finishes: a
+refresh that fetched the old copy refuses to overwrite the merged one (and the next
+refresh then picks it up).
 
 A serve rollback (`rollback-serve`) reverts only the serve DB; the history stays at
 its newest copy — it is append-only observations, and a go-live failure says nothing

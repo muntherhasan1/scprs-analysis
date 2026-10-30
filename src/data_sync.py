@@ -35,6 +35,8 @@ SERVE_FILENAME = "warehouse-serve.db"
 # dw_document_history alone, beside the serve DB: CI rebuilds warehouse.db from
 # nothing, so the append-only contract history is carried run to run in this file.
 HISTORY_FILENAME = "warehouse-history.db"
+# The BI feed under marts/ (published AND mirrored -- see publish_serve_db).
+_MART_PATTERNS = ["*.csv", "star/*.parquet"]
 OPERATIONAL_FILENAME = "scprs.db"
 SUPPLIER_FILENAME = "supplier_enrichment.db"
 CMAS_FILENAME = "cmas.db"  # CMAS side input, refreshed device-free by cmas-refresh.yml
@@ -187,6 +189,33 @@ def _history_blob(repo: str, token: str | None, revision: str = "main") -> str |
     return info[0].blob_id if info else None
 
 
+def _history_rows(path: Path) -> int:
+    """Rows in ``dw_document_history`` of the SQLite file ``path`` (0 when absent).
+    Stdlib-only on purpose: this module ships to the Spaces, warehouse.py doesn't."""
+    import sqlite3
+
+    path = Path(path)
+    if not path.exists():
+        return 0
+    con = sqlite3.connect(f"file:{path.as_posix()}?mode=ro", uri=True)
+    try:
+        return con.execute("SELECT COUNT(*) FROM dw_document_history").fetchone()[0]
+    finally:
+        con.close()
+
+
+def _read_history_sidecar(history_path: Path) -> tuple[str, int]:
+    """(blob id or ``absent``, rows fetched) recorded by ``fetch_history_db``."""
+    sidecar = _rev_sidecar(history_path)
+    if not sidecar.exists():
+        raise WarehouseFetchError(
+            f"{Path(history_path).name} was not fetched this run (no {sidecar.name}) -- "
+            "refusing to publish a history that may not include the dataset's"
+        )
+    parts = sidecar.read_text(encoding="utf-8").split()
+    return parts[0], int(parts[1]) if len(parts) > 1 else 0
+
+
 def fetch_history_db(dest: Path, repo: str, token: str | None = None) -> bool:
     """Fetch the persisted contract history (``warehouse-history.db``) into ``dest``.
 
@@ -195,9 +224,10 @@ def fetch_history_db(dest: Path, repo: str, token: str | None = None) -> bool:
     history and publish it over the real one. Only a confirmed absence (the first
     run) returns False and leaves ``dest`` absent, so the build starts fresh.
 
-    The blob id seen here (or ``absent``) is recorded in a sidecar; the history
-    publish refuses if the dataset's copy changed since (a lost-update guard scoped
-    to this one file, so a serve-only publish from elsewhere doesn't conflict).
+    The blob id seen here (or ``absent``) and the row count fetched are recorded in
+    a sidecar: the history publish refuses if the dataset's copy changed since (a
+    lost-update guard scoped to this one file), and skips the upload entirely when
+    the build appended nothing (the file is ~0.6 GB; most refreshes add no rows).
     """
     from huggingface_hub import HfApi
 
@@ -218,53 +248,155 @@ def fetch_history_db(dest: Path, repo: str, token: str | None = None) -> bool:
     sidecar.parent.mkdir(parents=True, exist_ok=True)
     if blob is None:
         dest.unlink(missing_ok=True)
-        sidecar.write_text("absent", encoding="utf-8")
+        sidecar.write_text("absent 0", encoding="utf-8")
         return False
     _download_db(repo, HISTORY_FILENAME, dest, tok, revision=sha)  # raises on failure
-    sidecar.write_text(blob, encoding="utf-8")
+    sidecar.write_text(f"{blob} {_history_rows(dest)}", encoding="utf-8")
     return True
 
 
-def _commit_serve_and_history(
-    serve_path: Path, history_path: Path, repo: str, token: str | None
+def _commit_with_history(
+    repo: str,
+    token: str | None,
+    history_path: Path,
+    extra_ops: list,
+    message: str,
 ) -> str:
-    """One commit holding the serve DB AND the history file, so a run never leaves
-    the dataset with one updated and not the other. Refuses unless this run fetched
-    the history (sidecar) and the dataset's copy is still the one it fetched."""
+    """Commit ``history_path`` (plus ``extra_ops``) as ONE compare-and-swap commit.
+
+    Refuses unless this run fetched the history (sidecar) and the dataset's copy is
+    still the one it fetched. The check pins the HEAD it read and passes it as
+    ``parent_commit``, so a commit landing between the check and this one makes the
+    Hub reject ours (412) instead of silently overwriting it."""
     from huggingface_hub import CommitOperationAdd, HfApi
 
-    history_path = Path(history_path)
-    if not history_path.exists():
-        raise FileNotFoundError(f"{history_path} not found -- run `warehouse export-history`")
-    sidecar = _rev_sidecar(history_path)
-    if not sidecar.exists():
-        raise WarehouseFetchError(
-            f"{history_path.name} was not fetched this run (no {sidecar.name}) -- refusing "
-            "to publish a history that may not include the dataset's"
-        )
-    expected = sidecar.read_text(encoding="utf-8").strip()
-    current = _history_blob(repo, token) or "absent"
+    expected, _ = _read_history_sidecar(history_path)
+    head = _with_retries(
+        lambda: HfApi().dataset_info(repo, token=token).sha, what=f"HEAD lookup of {repo}"
+    )
+    current = _history_blob(repo, token, revision=head) or "absent"
     if current != expected:
         raise WarehouseFetchError(
             f"lost-update guard: {repo}'s {HISTORY_FILENAME} changed since this run "
             f"fetched it ({expected[:8]} -> {current[:8]}) -- NOT overwriting; re-run"
         )
+    ops = [
+        *extra_ops,
+        CommitOperationAdd(path_in_repo=HISTORY_FILENAME, path_or_fileobj=str(history_path)),
+    ]
     info = _with_retries(
         lambda: HfApi(token=token).create_commit(
             repo_id=repo,
             repo_type="dataset",
-            operations=[
-                CommitOperationAdd(path_in_repo=SERVE_FILENAME, path_or_fileobj=str(serve_path)),
-                CommitOperationAdd(
-                    path_in_repo=HISTORY_FILENAME, path_or_fileobj=str(history_path)
-                ),
-            ],
-            commit_message="Publish serve DB + contract history",
+            operations=ops,
+            commit_message=message,
+            parent_commit=head,
         ),
-        what=f"serve + history publish to {repo}",
+        what=f"history publish to {repo}",
     )
-    sidecar.unlink(missing_ok=True)  # spent -- never reuse across runs
+    _rev_sidecar(history_path).unlink(missing_ok=True)  # spent -- never reuse across runs
     return getattr(info, "commit_url", str(info))
+
+
+def _commit_serve_and_history(
+    serve_path: Path, history_path: Path, repo: str, token: str | None, log=print
+) -> str:
+    """Publish the serve DB, with the history in the SAME commit when it grew.
+
+    A run never leaves the dataset with one updated and not the other. When the
+    build appended no history rows (exported rows == rows fetched -- history is
+    append-only and the export refuses to shrink), the ~0.6 GB history upload is
+    skipped and only the serve DB is published: re-uploading an identical file
+    four times a day is pure storage growth (every revision is kept)."""
+    from huggingface_hub import CommitOperationAdd
+
+    history_path = Path(history_path)
+    if not history_path.exists():
+        raise FileNotFoundError(f"{history_path} not found -- run `warehouse export-history`")
+    _, fetched_rows = _read_history_sidecar(history_path)
+    rows = _history_rows(history_path)
+    if rows <= fetched_rows:
+        log(f"history unchanged ({rows:,} rows) -- publishing the serve DB alone")
+        _rev_sidecar(history_path).unlink(missing_ok=True)
+        return _upload_db(serve_path, repo, SERVE_FILENAME, token, "Publish serve DB")
+    log(f"history grew {fetched_rows:,} -> {rows:,} rows -- publishing it with the serve DB")
+    return _commit_with_history(
+        repo,
+        token,
+        history_path,
+        [CommitOperationAdd(path_in_repo=SERVE_FILENAME, path_or_fileobj=str(serve_path))],
+        "Publish serve DB + contract history",
+    )
+
+
+def merge_history(
+    local_db: Path,
+    repo: str,
+    token: str | None = None,
+    work_dir: Path | None = None,
+    apply: bool = False,
+    log=print,
+) -> dict:
+    """One-time merge of a LOCAL ``dw_document_history`` (e.g. the laptop's
+    ``data/warehouse.db``, which holds the July 2026 snapshots CI never saw) into
+    the dataset's persisted history.
+
+    Fetches the dataset copy (fail-closed), builds a merged file -- local rows
+    first so their earlier observations keep the lower keys, then the dataset's
+    rows not already present by (document, version, signature) -- and refuses if
+    the result has fewer rows than the dataset copy. Dry run unless ``apply``;
+    with ``apply`` it publishes the history ALONE as one compare-and-swap commit
+    (the next refresh seeds from it). Returns the counts."""
+    import sqlite3
+
+    from . import warehouse
+
+    work = Path(work_dir or warehouse.HISTORY_DB.parent / "history-merge")
+    work.mkdir(parents=True, exist_ok=True)
+    fetched, merged_wh, out = (
+        work / "fetched-history.db",
+        work / "merge.db",
+        work / HISTORY_FILENAME,
+    )
+    tok = token or _publish_token()
+    fetch_history_db(fetched, repo, token=tok)
+    for p in (merged_wh, out):
+        p.unlink(missing_ok=True)
+    con = sqlite3.connect(merged_wh)
+    try:
+        added_local = warehouse.seed_history(con, Path(local_db), log=log)
+        added_remote = warehouse.seed_history(con, fetched, log=log)
+    finally:
+        con.close()
+    rows = warehouse.export_history(merged_wh, out, log=log)
+    _rev_sidecar(out).write_text(_rev_sidecar(fetched).read_text(encoding="utf-8"), "utf-8")
+    remote_rows = _history_rows(fetched)
+    counts = {
+        "dataset_rows": remote_rows,
+        "local_rows": added_local,
+        "merged_rows": rows,
+        "added_to_dataset": rows - remote_rows,
+    }
+    if rows < remote_rows:
+        raise WarehouseFetchError(
+            f"merged history has {rows:,} rows, fewer than the dataset's {remote_rows:,} -- "
+            "refusing (history is append-only)"
+        )
+    log(
+        f"merge: dataset {remote_rows:,} + local {added_local:,} -> {rows:,} rows "
+        f"(+{rows - remote_rows:,} new to the dataset; {added_remote:,} dataset rows kept)"
+    )
+    if not apply:
+        log("dry run -- nothing published; re-run with --apply to publish")
+        return counts
+    if rows == remote_rows:
+        log("nothing new to publish")
+        return counts
+    counts["commit"] = _commit_with_history(
+        repo, tok, out, [], "Merge local contract history (one-time seed)"
+    )
+    log(f"published merged history -> {repo}: {counts['commit']}")
+    return counts
 
 
 def publish_serve_db(
@@ -275,7 +407,10 @@ def publish_serve_db(
     Returns the commit URL. Called by the pipeline after a build; the token defaults
     to ``HF_TOKEN`` / the caller's cached HF login. When the sibling BI mart-CSV
     directory exists (``warehouse serve-export`` writes it), it is published too,
-    under ``marts/`` — the Power BI Web-connector feed (docs/POWER_BI.md).
+    under ``marts/`` — the Power BI Web-connector feed (docs/POWER_BI.md). The feed
+    is mirrored, not just added to: a mart file no longer exported locally is
+    deleted from ``marts/`` in the same commit, so Power BI never keeps reading a
+    removed or renamed mart's last (frozen) file without an error.
 
     ``history_path`` (CI only) publishes the persisted contract history in the SAME
     commit as the serve DB; ``_commit_serve_and_history`` holds its guards.
@@ -301,7 +436,9 @@ def publish_serve_db(
                 repo_id=repo,
                 repo_type="dataset",
                 path_in_repo="marts",
-                allow_patterns=["*.csv", "star/*.parquet"],
+                allow_patterns=_MART_PATTERNS,
+                # relative to path_in_repo; files being uploaded are never deleted
+                delete_patterns=_MART_PATTERNS,
                 commit_message="Publish BI mart CSVs + star parquet",
             ),
             what=f"BI feed publish to {repo}",
@@ -736,6 +873,15 @@ def _cli() -> None:
     fhi.add_argument("--dataset", default=os.environ.get("WAREHOUSE_DATASET"))
     fhi.add_argument("--dest", default=str(warehouse.HISTORY_DB))
 
+    mhi = sub.add_parser(
+        "merge-history",
+        help="One-time: merge a local warehouse.db's dw_document_history into the dataset's "
+        "persisted history (dry run unless --apply)",
+    )
+    mhi.add_argument("--dataset", default=os.environ.get("WAREHOUSE_DATASET"))
+    mhi.add_argument("--local", default=str(warehouse.WAREHOUSE_DB))
+    mhi.add_argument("--apply", action="store_true", help="publish (default: dry run)")
+
     fsv = sub.add_parser(
         "fetch-serve",
         help="Download warehouse-serve.db from WAREHOUSE_DATASET (read-only review/replay jobs)",
@@ -838,6 +984,10 @@ def _cli() -> None:
             print(f"Fetched {HISTORY_FILENAME} <- {args.dataset} into {args.dest}")
         else:
             print(f"Note: {HISTORY_FILENAME} not in {args.dataset} yet -- history starts fresh")
+    elif args.cmd == "merge-history":
+        if not args.dataset:
+            raise SystemExit("set --dataset or the WAREHOUSE_DATASET env var")
+        merge_history(Path(args.local), args.dataset, token=_publish_token(), apply=args.apply)
     elif args.cmd == "fetch-serve":
         if not ensure_local_db(Path(args.dest)):
             raise SystemExit("set the WAREHOUSE_DATASET env var")
