@@ -110,3 +110,37 @@ def test_write_csv(tmp_path):
     assert path.name == "cmas_Some_Entity.csv"
     text = path.read_text(encoding="utf-8")
     assert "a,b" in text and "1,2" in text
+
+
+def test_extract_refuses_to_empty_a_stored_entity(tmp_path, monkeypatch):
+    """An entity that has rows in the store but comes back empty (expired embed,
+    renamed report) aborts the whole extract before anything is written."""
+    import pytest
+
+    db = tmp_path / "cmas.db"
+    con = sqlite3.connect(db)
+    cmas._write_sqlite(con, "Approved_Applications", ["a"], [{"a": "1"}])
+    cmas._write_sqlite(con, "SB", ["b"], [{"b": "x"}])
+    con.close()
+
+    class _Sess:
+        def entities(self):
+            return [{"name": "SB", "columns": ["b"]},
+                    {"name": "Approved_Applications", "columns": ["a"]}]  # fmt: skip
+
+    fetched = {"SB": [{"b": "y"}, {"b": "z"}], "Approved_Applications": []}
+    monkeypatch.setattr(cmas, "_Session", _Sess)
+    monkeypatch.setattr(cmas, "fetch_entity", lambda sess, name, cols: fetched[name])
+    with pytest.raises(cmas.CmasError, match="Approved_Applications"):
+        cmas.extract_all(db, tmp_path)
+    con = sqlite3.connect(db)
+    # nothing replaced: not even the entity that came back fine
+    assert con.execute('SELECT COUNT(*) FROM "SB"').fetchone()[0] == 1
+    assert con.execute('SELECT COUNT(*) FROM "Approved_Applications"').fetchone()[0] == 1
+    con.close()
+
+    fetched["Approved_Applications"] = [{"a": "2"}]  # a healthy run still writes
+    cmas.extract_all(db, tmp_path)
+    con = sqlite3.connect(db)
+    assert con.execute('SELECT COUNT(*) FROM "SB"').fetchone()[0] == 2
+    con.close()

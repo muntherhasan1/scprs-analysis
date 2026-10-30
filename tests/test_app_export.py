@@ -13,22 +13,33 @@ def _load(path):
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def _build(tmp_path):
+def _build(tmp_path, extra_purchases=()):
     src, wh = tmp_path / "scprs.db", tmp_path / "warehouse.db"
     serve, epr = tmp_path / "warehouse-serve.db", tmp_path / "eprocure.db"
     _seed_source(src)  # BU 8660: doc A (v1 100 -> v2 150, Acme/S1), doc B (5000, Beta/S2)
+    if extra_purchases:  # (purchase_document, start_date, grand_total)
+        con = sqlite3.connect(src)
+        con.executemany(
+            "INSERT INTO purchases (business_unit, purchase_document, version, grand_total, "
+            "start_date, acquisition_type_sub_type, acquisition_method, supplier_id, "
+            "supplier_name, status, department_name) VALUES ('8660', ?, '1', ?, ?, "
+            "'IT Goods', 'Formal - COMPETITIVE', 'S1', 'Acme', 'Active', 'PUC')",
+            [(doc, total, start) for doc, start, total in extra_purchases],
+        )
+        con.commit()
+        con.close()
     _seed_eprocure(
         epr,
         [("100", "Acme, Inc.", "SB", "2025-01-01", "2027-01-31")],
         events=[
             # open, SB-only, loaded department
-            ("26-001", "Rate Case Support", "Public Utilities Commission", None,
+            ("26-001", "Rate Case Support **SB Only**", "Public Utilities Commission", None,
              "2026-08-01", "Posted", 1, 0, "posted", None),
             # already closed on the export date -> dropped
             ("26-000", "Old Notice", "Public Utilities Commission", None,
              "2026-07-01", "Posted", 0, 0, "posted", None),
             # department name matches no business unit
-            ("26-002", "Fair Services", "22nd DAA", None,
+            ("26-002", "Fair Services *DVBE Only*", "22nd DAA", None,
              "2026-07-30", "Posted", 0, 1, "posted", None),
             # history for an UNLOADED department
             ("25-009", "Audit", "Department of Justice", "2025-01-05",
@@ -77,7 +88,7 @@ def test_app_export_follows_the_data_contract(tmp_path):
     assert [o["event_id"] for o in opps] == ["26-002", "26-001"]
     daa, puc = opps
     assert daa["business_unit"] is None and daa["department_loaded"] is False
-    assert daa["dvbe_only"] is True
+    assert daa["dvbe_only"] is True and daa["sb_or_dvbe"] is False
     assert puc["business_unit"] == "8660" and puc["department_loaded"] is True
     assert puc["sb_only"] is True and puc["dvbe_only"] is False
 
@@ -217,3 +228,56 @@ def test_reference_files_are_consistent():
     valid = {r.split(",")[0] for r in warehouse.DEPARTMENTS_CSV.read_text().splitlines()[1:]}
     aliases = app_export.load_aliases()
     assert aliases and set(aliases) <= valid, set(aliases) - valid
+
+
+def test_partial_fiscal_year_ignores_future_start_dates(tmp_path):
+    """Contracts entered ahead of their term carry future start dates; they must
+    not make a fiscal year still in progress (or not begun) look complete."""
+    out, _ = _build(
+        tmp_path,
+        extra_purchases=[
+            ("F0", "2020-07-01", 1.0),  # FY2021 fully covered from its first day
+            ("F1", "2027-06-30", 1.0),  # last day of FY2027 -- a year still running
+            ("F2", "2028-06-30", 1.0),  # FY2028 has not started yet
+        ],
+    )
+    fy = {y["fiscal_year"]: y["partial"] for y in _load(out / "departments" / "8660.json")[
+        "spend_by_fiscal_year"
+    ]}  # fmt: skip
+    assert fy == {2021: False, 2027: True, 2028: True}
+    # Same rule on the overview trend and every supplier's series (both used
+    # to emit FY rows with no partial marker at all).
+    ov = {y["fiscal_year"]: y["partial"] for y in _load(out / "insights" / "overview.json")[
+        "spend_by_fiscal_year"
+    ]}  # fmt: skip
+    assert ov == {2021: False, 2027: True, 2028: True}
+    acme = next(
+        p
+        for f in (out / "suppliers").glob("shard-*.json")
+        for p in _load(f)["suppliers"].values()
+        if p["profile"]["canonical_name"].upper().startswith("ACME")
+    )
+    assert {y["fiscal_year"]: y["partial"] for y in acme["spend_by_fiscal_year"]} == {
+        2021: False,
+        2027: True,
+        2028: True,
+    }
+
+
+def test_cmas_holder_requires_an_agreement_in_term(tmp_path):
+    serve = tmp_path / "s.db"
+    con = sqlite3.connect(serve)
+    for t in ("gold_supplier_certification", "gold_supplier_cmas"):
+        cols = (
+            "canonical_id, cert_small_business, cert_micro_business, cert_dvbe, cert_record_count"
+            if t == "gold_supplier_certification"
+            else "canonical_id, cmas_agreement_count, latest_term_end"
+        )
+        con.execute(f"CREATE TABLE {t} ({cols})")
+    con.executemany(
+        "INSERT INTO gold_supplier_cmas VALUES (?, 1, ?)",
+        [("LIVE", "2027-01-01"), ("EXPIRED", "2026-01-01")],
+    )
+    flags = app_export._supplier_flags(con, "2026-07-25")
+    assert flags["LIVE"]["cmas_holder"] is True
+    assert flags["EXPIRED"]["cmas_holder"] is False

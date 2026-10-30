@@ -326,6 +326,31 @@ def default_event_years(today: datetime | None = None) -> tuple[int, ...]:
     return (year - 2, year - 1, year)
 
 
+# Set-aside clause = the text before an "ONLY", back to the nearest
+# punctuation delimiter (departments wrap it in asterisks or quotes:
+# "**Certified SB, including MB, SB-PW, or a DVBE Only**", "*SB/DVBE ONLY*",
+# "**SMALL BUSINESS BIDDERS ONLY**"). "-" is not a delimiter (SB-PW).
+_SET_ASIDE_CLAUSE = re.compile(r"([^*()\"\[\]:;]{0,80}?)\bONLY")
+_SB_GROUP = re.compile(r"\b(SB|SBS|SB-PW|MB|SMALL BUSINESS(ES)?|MICRO ?BUSINESS(ES)?)\b")
+_DVBE_GROUP = re.compile(r"\b(DVBE|DISABLED VETERAN)")
+
+
+def set_aside_flags(event_name: str | None) -> tuple[int, int, int]:
+    """(sb_only, dvbe_only, sb_or_dvbe) from an event title's "... ONLY" clauses.
+
+    A clause naming only small-business groups (SB, MB, SB-PW) is SB-only; only
+    DVBE is DVBE-only; both ("SB/DVBE ONLY", "SB ... or a DVBE Only") is a set
+    aside open to either, which is neither SB-only nor DVBE-only. A floor: an
+    untitled set-aside is invisible here.
+    """
+    name = " ".join((event_name or "").upper().split())
+    sb = dvbe = False
+    for clause in _SET_ASIDE_CLAUSE.findall(name):
+        sb = sb or bool(_SB_GROUP.search(clause))
+        dvbe = dvbe or bool(_DVBE_GROUP.search(clause))
+    return int(sb and not dvbe), int(dvbe and not sb), int(sb and dvbe)
+
+
 def _tidy_event(raw: dict, search_status: str, search_year: int | None) -> dict:
     """Normalize one scraped grid row: collapse whitespace, derive ISO dates and
     the SB/DVBE set-aside flags departments encode in event names
@@ -334,9 +359,7 @@ def _tidy_event(raw: dict, search_status: str, search_year: int | None) -> dict:
     for src, dest in (("published_raw", "published_date"), ("end_raw", "end_date")):
         m = _EVENT_DT.search(row[src])
         row[dest] = f"{m.group(3)}-{m.group(1)}-{m.group(2)}" if m else None
-    name = row["event_name"].upper()
-    row["sb_only"] = 1 if "SB ONLY" in name else 0
-    row["dvbe_only"] = 1 if "DVBE ONLY" in name else 0
+    row["sb_only"], row["dvbe_only"], _ = set_aside_flags(row["event_name"])
     row["search_status"] = search_status
     row["search_year"] = search_year
     return row
