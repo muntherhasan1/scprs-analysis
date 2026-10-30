@@ -8,6 +8,8 @@ the built-in Web connector — no gateway, no ODBC, no server.
 ```
 warehouse serve-export           # writes data/warehouse-serve.db + data/marts/*.csv
 data_sync publish                # uploads both; CSVs land under marts/ in the dataset
+                                 # (mirrored: a mart dropped from the export is deleted
+                                 #  from marts/ too, so a query on it fails loudly)
 ```
 
 The export list lives in `warehouse._MART_CSV_EXPORTS`: dashboard-shaped gold

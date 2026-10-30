@@ -203,6 +203,43 @@ document/version's signature is new, so:
 - later builds append a row whenever a value, status, term, supplier, or version
   changes — building true change-over-time history as the daily job runs.
 
+**Persistence across CI rebuilds.** The scheduled `warehouse-refresh.yml` rebuilds
+`warehouse.db` from nothing every run, and `serve-export` drops the history from
+the serve DB. So the table is carried run to run as its own file,
+`warehouse-history.db`, in the warehouse dataset beside `warehouse-serve.db`:
+1. `data_sync fetch-history` downloads it. **Fail-closed:** if the dataset can't be
+   read, or holds the file but the download fails, the run stops; only a confirmed
+   absence (first run) starts history fresh.
+2. `warehouse build --seed-history data/warehouse-history.db` merges it in before
+   capture, keeping the original `history_sk` / `observed_at` values, so the
+   signature gate appends only what changed since the last run.
+3. `warehouse export-history` writes the table alone back out — and **refuses** if
+   the new history has fewer rows than the copy it was seeded from.
+4. `data_sync publish --with-history` puts the serve DB and the history in **one**
+   commit, refusing if this run didn't fetch the history or the dataset's copy
+   changed since (blob-id check scoped to the history file, pinned to the checked
+   HEAD as `parent_commit` so nothing can land in between). **When the build
+   appended no history rows** (exported rows = rows fetched), the ~0.6 GB history
+   upload is **skipped** and only the serve DB is published — every dataset
+   revision is kept, so re-uploading an identical file each refresh is pure
+   storage growth.
+
+**One-time seed of older local history.** A laptop `warehouse.db` may hold
+snapshots CI never saw (the July 2026 batches). `python -m src.data_sync
+merge-history --dataset <warehouse dataset>` fetches the dataset copy (fail-closed),
+merges the local rows in (local first, so their earlier observations keep the lower
+keys; rows already present by document/version/signature are skipped), refuses if
+the result would be smaller than the dataset copy, and prints the counts — a **dry
+run**. Add `--apply` to publish the merged history alone as one compare-and-swap
+commit; the next refresh seeds from it. Run it right after a refresh finishes: a
+refresh that fetched the old copy refuses to overwrite the merged one (and the next
+refresh then picks it up).
+
+A serve rollback (`rollback-serve`) reverts only the serve DB; the history stays at
+its newest copy — it is append-only observations, and a go-live failure says nothing
+about them. Local builds keep using their own `warehouse.db`'s history (no seed), and
+`warehouse-diff.yml` still deliberately builds from a clean `warehouse.db`.
+
 Two marts derive from it:
 - **`gold_contract_change_log`** — one row per observed transition (`v1 -> v3`,
   value delta + %, status change, term extension) with a readable `change_summary`.
