@@ -15,10 +15,9 @@ front end never sums, dedupes or joins. Reads the slim serve DB (run
   search.json                    small index over departments (+ aliases) and the vectors
 
 Grain rules (the contract's): documents are current-version (``gold_document``);
-every supplier figure is per CANONICAL supplier computed from ``gold_document``
--- the per-registration marts (``gold_supplier_share``,
-``gold_market_concentration``, ``gold_supplier_acquisition_profile``) split a
-re-registered company into several smaller vendors and are not used. Unloaded
+every supplier figure is per CANONICAL supplier computed here from
+``gold_document`` (the share / HHI marts are canonical too since 2026-10, but
+the export keeps its own computation so it doesn't depend on them). Unloaded
 departments get ``loaded: false`` and null spend blocks, never zeros.
 
     python -m src.app_export [--out DIR]
@@ -113,7 +112,7 @@ def _opportunities(con, today: str, loaded: set[str]) -> list[dict]:
     rows = _rows(
         con,
         "SELECT event_id, event_name, department_name, business_unit, bid_close_date, "
-        "sb_only, dvbe_only FROM gold_eprocure_posted_opportunity "
+        "sb_only, dvbe_only, sb_or_dvbe FROM gold_eprocure_posted_opportunity "
         "WHERE bid_close_date >= ? ORDER BY bid_close_date, event_name",
         (today,),
     )
@@ -127,6 +126,8 @@ def _opportunities(con, today: str, loaded: set[str]) -> list[dict]:
             "bid_close_date": r["bid_close_date"],
             "sb_only": bool(r["sb_only"]),
             "dvbe_only": bool(r["dvbe_only"]),
+            # Set aside for SB *or* DVBE bidders ("SB/DVBE ONLY") — neither flag above.
+            "sb_or_dvbe": bool(r["sb_or_dvbe"]),
             "eprocure_url": None,  # no stable per-event link known yet (contract open question)
         }
         for r in rows
@@ -153,7 +154,11 @@ def _supplier_flags(con) -> dict[str, dict]:
 
 
 def _departments(
-    con, opps: list[dict], flags: dict[str, dict], aliases: dict[str, list[str]] | None = None
+    con,
+    opps: list[dict],
+    flags: dict[str, dict],
+    aliases: dict[str, list[str]] | None = None,
+    today: str | None = None,
 ) -> tuple[list[dict], dict]:
     """(index rows, {bu: page payload}) for every business unit in dim_department."""
     names = {
@@ -210,8 +215,8 @@ def _departments(
     for r in _rows(
         con,
         "SELECT business_unit, event_year, event_count, sb_only_count, dvbe_only_count, "
-        "set_aside_pct FROM gold_eprocure_event_demand WHERE business_unit IS NOT NULL "
-        "ORDER BY event_year",
+        "set_aside_pct, sb_or_dvbe_count FROM gold_eprocure_event_demand "
+        "WHERE business_unit IS NOT NULL ORDER BY event_year",
     ):
         demand[r.pop("business_unit")].append(r)
     opps_by_bu = defaultdict(list)
@@ -219,6 +224,7 @@ def _departments(
         if o["business_unit"]:
             opps_by_bu[o["business_unit"]].append(o)
 
+    today = today or date.today().isoformat()
     index, pages = [], {}
     for bu, name in names.items():
         h = head.get(bu)
@@ -248,9 +254,12 @@ def _departments(
                     "fiscal_year": r["fiscal_year"],
                     "document_count": r["document_count"],
                     "total_value": _money(r["total_value"]),
-                    # The window doesn't span the whole Jul-Jun year.
+                    # The window doesn't span the whole Jul-Jun year. Coverage
+                    # ends at today at the latest: future-dated start dates
+                    # (contracts entered ahead of their term) must not make a
+                    # year still in progress look complete.
                     "partial": h["coverage_from"] > f"{r['fiscal_year'] - 1}-07-01"
-                    or h["coverage_to"] < f"{r['fiscal_year']}-06-30",
+                    or min(h["coverage_to"], today) < f"{r['fiscal_year']}-06-30",
                 }
                 for r in by_fy[bu]
             ]
@@ -719,6 +728,7 @@ def _insights(con, flags, dept_index, sup_index, opps, today, categories):
             "closing_within_7_days": sum(o["bid_close_date"] <= week for o in opps),
             "open_sb_only": sum(o["sb_only"] for o in opps),
             "open_dvbe_only": sum(o["dvbe_only"] for o in opps),
+            "open_sb_or_dvbe": sum(o["sb_or_dvbe"] for o in opps),
         },
         # department_count: how many departments report in that year — coverage
         # varies by year, so a dip can be fewer departments, not less buying.
@@ -793,7 +803,7 @@ def export_app(
         loaded = {r[0] for r in con.execute("SELECT DISTINCT business_unit FROM gold_document")}
         opps = _opportunities(con, today, loaded)
         flags = _supplier_flags(con)
-        dept_index, dept_pages = _departments(con, opps, flags, load_aliases())
+        dept_index, dept_pages = _departments(con, opps, flags, load_aliases(), today)
         sup_index, sup_shards = _suppliers(con, flags)
         overview, insight_pages, search = _insights(
             con, flags, dept_index, sup_index, opps, today, load_categories()

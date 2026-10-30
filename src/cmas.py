@@ -99,7 +99,7 @@ class _Session:
 
         # Open the read-only session: yields the MWCToken + capacity query endpoint.
         me = self._get(
-            f"/explore/reports/{self.report_id}/modelsAndExploration" "?preferReadOnlySession=true",
+            f"/explore/reports/{self.report_id}/modelsAndExploration?preferReadOnlySession=true",
             embed_token,
         ).json()
         expl = me["exploration"]
@@ -326,6 +326,28 @@ def _write_sqlite(con: sqlite3.Connection, entity: str, columns: list[str], rows
     con.commit()
 
 
+def _check_not_emptied(con: sqlite3.Connection, fetched: list[tuple[str, list, list]]) -> None:
+    """Refuse the whole extract when any entity that has rows in the store came
+    back with none — the drop-and-reload would silently empty the CMAS marts.
+    (The CI publish has its own shrink gate; this protects the local store.)"""
+    emptied = []
+    for name, _cols, rows in fetched:
+        table = _safe_table(name)
+        if (
+            rows
+            or not con.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)
+            ).fetchone()
+        ):
+            continue
+        if con.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0]:  # noqa: S608 - internal
+            emptied.append(name)
+    if emptied:
+        raise CmasError(
+            f"extract returned 0 rows for {', '.join(emptied)} (stored copy has rows) — not writing"
+        )
+
+
 def _write_csv(out_dir: Path, entity: str, columns: list[str], rows: list[dict]) -> Path:
     path = out_dir / f"cmas_{_safe_table(entity)}.csv"
     with path.open("w", newline="", encoding="utf-8") as fh:
@@ -361,12 +383,17 @@ def extract_all(db_path: Path = DB_PATH, out_dir: Path = DATA_DIR, only: str | N
         if not entities:
             raise CmasError(f"entity {only!r} not found in the model schema")
 
+    # Fetch everything before touching the store: a mid-run failure or an empty
+    # answer (expired embed, renamed report) must not leave a half-replaced db.
+    fetched = [
+        (ent["name"], ent["columns"], fetch_entity(sess, ent["name"], ent["columns"]))
+        for ent in entities
+    ]
     summary = []
     con = sqlite3.connect(db_path)
     try:
-        for ent in entities:
-            name, cols = ent["name"], ent["columns"]
-            rows = fetch_entity(sess, name, cols)
+        _check_not_emptied(con, fetched)
+        for name, cols, rows in fetched:
             _write_sqlite(con, name, cols, rows)
             csv_path = _write_csv(out_dir, name, cols, rows)
             summary.append({"entity": name, "rows": len(rows), "csv": csv_path.name})
