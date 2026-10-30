@@ -105,6 +105,9 @@ def test_refresh_derives_full_window_and_never_narrows(tmp_path, monkeypatch):
     stamped = model.query("SELECT * FROM summary_refresh ORDER BY business_unit", db_path=db)
     assert stamped["window_from"].tolist() == ["2021-07-01", "2016-01-01"]
     assert stamped["rows"].tolist() == [2, 2]
+    # Stamped in UTC with an explicit offset: health reads a bare timestamp as
+    # UTC, so a naive local-time stamp from a laptop run looked hours stale.
+    assert all(ts.endswith("+00:00") for ts in stamped["refreshed_at"])
 
 
 def test_refresh_gate_refuses_without_writing(tmp_path, monkeypatch):

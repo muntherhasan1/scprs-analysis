@@ -13,13 +13,21 @@ Only ``source: "web"`` records replay — MCP audit entries (``record_tool``)
 carry raw SQL from the client and no natural-language question, so they fall
 out of the question filter naturally.
 
+Privacy: the questions come from the PUBLIC web app and the log is private, but
+the workflow's issue, step summary and run log are public. So everything this
+module prints and the ``--report`` file name each question only by a short hash
+(``q:1a2b3c4d5e``) and carry no SQL or error text (both can echo what the user
+typed). ``--details`` writes the full report with question text and SQL — for a
+maintainer's local run against the private log, never for CI output.
+
 Exit contract (mirrors ``src.health``): 0 = clean or warn-only findings
 (empties/smells alert via the workflow's issue, not a red run); 1 = at least
 one replay ERRORED — real user questions are failing against the current
 warehouse; 2 = the reviewer itself could not run (log fetch, serve DB, or
 GEMINI key), so the workflow can tell content findings from infrastructure.
 
-    python -m src.query_review --limit 10 --report review.md
+    python -m src.query_review --limit 10 --report review.md --status status.json
+    python -m src.query_review --details review-full.md   # local: full text, keep private
     python -m src.query_review --file query_logs/queries.jsonl   # offline
 """
 
@@ -28,6 +36,7 @@ from __future__ import annotations
 import argparse
 import datetime
 import fnmatch
+import hashlib
 import json
 import os
 import re
@@ -96,6 +105,12 @@ def select_questions(
     return questions
 
 
+def question_id(question: str) -> str:
+    """Stable short id for a question (case-insensitive, like the dedupe), so the
+    public report can point at a finding without repeating what the user typed."""
+    return "q:" + hashlib.sha256(question.strip().lower().encode("utf-8")).hexdigest()[:10]
+
+
 def classify(out: dict) -> str:
     """Tag one ``nl_query.answer`` output: ERROR / NO_QUERY / EMPTY / ok."""
     result = out.get("result") or {}
@@ -147,12 +162,14 @@ def replay(questions: list[str]) -> list[dict]:
         tag = classify(out)
         smell = smells(q, out.get("sql"))
         rows = (out.get("result") or {}).get("row_count")
+        # Public run log: the id only, never the question text.
         print(
             f"[{i}/{len(questions)}] {tag}{' SMELL' if smell else ''}"
-            f"{f' ({rows} rows)' if tag == 'ok' else ''}: {q}"
+            f"{f' ({rows} rows)' if tag == 'ok' else ''}: {question_id(q)}"
         )
         results.append(
             {
+                "id": question_id(q),
                 "question": q,
                 "tag": tag,
                 "smells": smell,
@@ -164,8 +181,17 @@ def replay(questions: list[str]) -> list[dict]:
     return results
 
 
-def render_markdown(results: list[dict]) -> str:
-    """The review report: counts up top, then one section per finding class."""
+def finding_count(results: list[dict]) -> int:
+    """Questions needing attention: any non-ok tag or a wrong-mart smell."""
+    return sum(1 for r in results if r["tag"] != "ok" or r["smells"])
+
+
+def render_markdown(results: list[dict], *, details: bool = False) -> str:
+    """The review report: counts up top, then one section per finding class.
+
+    By default it is safe to publish: each question appears as its id, with no
+    SQL or error text. ``details=True`` adds the question, SQL and error — the
+    private, local-only version."""
     by_tag: dict[str, list[dict]] = {}
     for r in results:
         by_tag.setdefault(r["tag"], []).append(r)
@@ -196,21 +222,32 @@ def render_markdown(results: list[dict]) -> str:
         if by_tag.get(tag):
             lines += ["", f"### {heading}", ""]
             for r in by_tag[tag]:
-                lines.append(f"- **{r['question']}**")
-                d = detail(r)
+                lines.append(_label(r, details))
+                d = detail(r) if details else None
                 if d:
                     lines.append(f"  - `{d}`")
     if smelly:
         lines += ["", "### Wrong-mart smells", ""]
         for r in smelly:
-            lines.append(f"- **{r['question']}**")
-            for s in r["smells"]:
+            lines.append(_label(r, details))
+            for s in r["smells"]:  # fixed heuristic text, never user input
                 lines.append(f"  - {s}")
-            if r["sql"]:
+            if details and r["sql"]:
                 lines.append(f"  - `{r['sql']}`")
-    if not any(by_tag.get(t) for t, _, _ in sections) and not smelly:
+    if not finding_count(results):
         lines += ["", "No findings — every replayed question answered cleanly. ✅"]
+    elif not details:
+        lines += [
+            "",
+            "Questions are listed by id only — the text is user input from the public app. "
+            "To see them, run `python -m src.query_review --details review-full.md` locally "
+            "with the query-log token and match the ids.",
+        ]
     return "\n".join(lines) + "\n"
+
+
+def _label(r: dict, details: bool) -> str:
+    return f"- **{r['question']}** (`{r['id']}`)" if details else f"- `{r['id']}`"
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -229,7 +266,17 @@ def main(argv: list[str] | None = None) -> int:
         default=150,
         help="max unique questions per run — the free-tier LLM budget (0 = all)",
     )
-    ap.add_argument("--report", help="write the Markdown report to this path")
+    ap.add_argument(
+        "--report", help="write the publishable report (question ids, no user text) here"
+    )
+    ap.add_argument(
+        "--details",
+        help="write the FULL report (question text + SQL) here — local use only, keep private",
+    )
+    ap.add_argument(
+        "--status",
+        help='write {"findings": n, "errors": n} JSON here (what CI branches on)',
+    )
     args = ap.parse_args(argv)
 
     try:
@@ -262,6 +309,14 @@ def main(argv: list[str] | None = None) -> int:
     print("\n" + report)
     if args.report:
         Path(args.report).write_text(report, encoding="utf-8")
+    if args.details:
+        Path(args.details).write_text(render_markdown(results, details=True), encoding="utf-8")
+    if args.status:
+        status = {
+            "findings": finding_count(results),
+            "errors": sum(1 for r in results if r["tag"] == "ERROR"),
+        }
+        Path(args.status).write_text(json.dumps(status), encoding="utf-8")
     return 1 if any(r["tag"] == "ERROR" for r in results) else 0
 
 

@@ -172,7 +172,7 @@ def _replace_unit(con: sqlite3.Connection, business_unit: str, df, from_date: st
     _ensure_progress_schema(con)
     con.execute("DELETE FROM purchases WHERE business_unit = ?", (business_unit,))
     df.to_sql("purchases", con, if_exists="append", index=False)
-    now = datetime.now().isoformat(timespec="seconds")
+    now = datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
     con.execute(
         "INSERT OR REPLACE INTO summary_refresh VALUES (?, ?, ?, ?)",
         (business_unit, _iso(from_date), len(df), now),
@@ -715,7 +715,7 @@ def enrich_details(
                     counts["documents"] + counts.get("skipped", 0),
                     counts["lines"],
                     counts["pos"],
-                    datetime.now().isoformat(timespec="seconds"),
+                    datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
                 ),
             )
             # One complete revisit clears a reopen even if a document still

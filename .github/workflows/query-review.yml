@@ -3,7 +3,7 @@ name: Query review
 # Weekly replay of real user questions (the private query-log dataset) through
 # the app's NL->SQL path against a freshly fetched serve DB. Errors, empties,
 # NO_QUERY declines, and wrong-mart smells become a step summary + an
-# idempotent issue — the loop that caught the 2026-07-27 SB/DVBE wrong-answer
+# idempotent issue (question ids only; the text stays in the private log) — the loop that caught the 2026-07-27 SB/DVBE wrong-answer
 # by hand, made scheduled. Read-only: fetches the serve DB, publishes nothing,
 # so it needs no writer lock and nothing here can corrupt data.
 on:
@@ -78,8 +78,12 @@ jobs:
           SINCE_DAYS: ${{ inputs.since_days }}
         run: |
           set +e
+          # review.md is the PUBLISHABLE report: questions by id only, no user
+          # text/SQL (this repo, its issues and run logs are public; the query
+          # log is not). Clean/dirty comes from the structured status file — a
+          # grep of the report could be steered by text a user typed.
           python -m src.query_review --limit "${LIMIT:-150}" \
-            --since-days "${SINCE_DAYS:-8}" --report review.md
+            --since-days "${SINCE_DAYS:-8}" --report review.md --status status.json
           rc=$?
           set -e
           if [ "$rc" -ge 2 ]; then
@@ -88,7 +92,7 @@ jobs:
           fi
           cat review.md >> "$GITHUB_STEP_SUMMARY"
           echo "errors=$rc" >> "$GITHUB_OUTPUT"
-          if grep -q "No findings" review.md; then
+          if [ "$(jq -r .findings status.json)" = "0" ]; then
             echo "clean=1" >> "$GITHUB_OUTPUT"
           else
             echo "clean=0" >> "$GITHUB_OUTPUT"

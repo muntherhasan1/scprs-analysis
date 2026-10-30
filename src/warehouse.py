@@ -1915,6 +1915,15 @@ def export_serve_db(wh_path: Path = WAREHOUSE_DB, serve_path: Path = SERVE_DB, l
         for sql in idx_ddl:
             serve.execute(sql)
         serve.commit()
+    finally:
+        serve.close()
+    # Row counts for the front ends' schema listings, counted once here instead
+    # of on every NL question (~60s of COUNT(*) over the aggregate views).
+    from . import warehouse_query
+
+    warehouse_query.record_row_counts(serve_path)
+    serve = sqlite3.connect(serve_path)
+    try:
         serve.execute("VACUUM")
     finally:
         serve.close()

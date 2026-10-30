@@ -274,6 +274,13 @@ Two tools go beyond raw data (all over the same read-only guard):
   + optional prose + optional chart; returns a link to a **self-contained HTML
   report** (charts embedded) served at an unauthenticated `/files/<unguessable>`
   capability URL, so it opens in any browser or is embeddable in a Copilot card.
+  At most 12 sections per report. Report and chart links expire after
+  `REPORT_TTL_DAYS` (default 7) and are pruned from disk on the next write.
+
+Tools run on worker threads, so one slow query or report doesn't stall other
+requests (or `/healthz`). Row counts in `list_marts` / `describe_table` come
+from the `serve_row_counts` table that `serve-export` writes, so listing the
+schema never re-counts the gold views.
 
 Rendering is matplotlib (Agg backend); the server still makes no LLM calls — the
 calling model writes the SQL and the prose. This is what a **Microsoft 365 /

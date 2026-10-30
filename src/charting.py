@@ -16,6 +16,7 @@ from __future__ import annotations
 import base64
 import html
 import io
+import math
 import os
 import tempfile
 
@@ -50,10 +51,13 @@ _SURFACE = "#ffffff"  # chart surface (sits on a white tile in the report)
 
 
 def _to_float(v):
+    """A finite float, or None. inf/nan (e.g. ``SELECT 1e999``) count as
+    non-numeric: they crash integer formatting and can't be plotted."""
     try:
-        return float(v)
+        f = float(v)
     except (TypeError, ValueError):
         return None
+    return f if math.isfinite(f) else None
 
 
 def _compact(v: float) -> str:
@@ -126,7 +130,12 @@ def render_chart(
     labels = [str(r.get(x)) for r in data]
     values = [_to_float(r.get(y)) or 0.0 for r in data]
 
-    plt.rcParams.update({"font.family": "sans-serif", "font.sans-serif": ["DejaVu Sans"]})
+    # parse_math off: labels are data (supplier names, titles), and a "$" in one
+    # would otherwise be read as matplotlib mathtext — garbled text, or a
+    # ValueError for an unpaired "$".
+    plt.rcParams.update(
+        {"font.family": "sans-serif", "font.sans-serif": ["DejaVu Sans"], "text.parse_math": False}
+    )
     fig, ax = plt.subplots(figsize=(8.2, 4.8), dpi=160)
     fig.patch.set_facecolor(_SURFACE)
     try:
