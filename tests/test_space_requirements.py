@@ -9,8 +9,15 @@ import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
 BOOT_PATH = {
-    "requirements-mcp.txt": {"mcp", "huggingface_hub", "sentry-sdk"},
-    "requirements-web.txt": {"gradio", "httpx", "huggingface_hub", "sentry-sdk"},
+    "requirements-mcp.txt": {
+        "mcp",
+        "starlette",
+        "uvicorn",
+        "matplotlib",
+        "huggingface_hub",
+        "sentry-sdk",
+    },
+    "requirements-web.txt": {"gradio", "httpx", "matplotlib", "huggingface_hub", "sentry-sdk"},
 }
 
 

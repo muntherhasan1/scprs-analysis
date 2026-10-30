@@ -37,7 +37,10 @@ Run:
 Env overrides: WAREHOUSE_DB (db path); MCP_AUTH_TOKEN and/or MCP_AUTH_TOKENS
 (one required for http — MCP_AUTH_TOKENS holds `label:token` pairs for per-user,
 revocable access, and the matched label is recorded in the audit log);
-MCP_RATE_LIMIT_PER_MIN (optional per-user request cap, 0/unset = off); HOST
+MCP_RATE_LIMIT_PER_MIN (optional per-user request cap, 0/unset = off);
+MCP_TOOL_THREADS / MCP_MAX_CONCURRENT_PER_PRINCIPAL (tool worker pool size and
+each principal's share of it, default 8 / 3); MCP_REPORT_TIMEOUT_S (a report's
+wall-clock budget, default 45); REPORT_TTL_DAYS (link lifetime, default 7); HOST
 (default 0.0.0.0), PORT (default 8000), MCP_ALLOWED_HOSTS (comma-separated Host
 allowlist; see `_transport_security` for the DNS-rebinding-guard rationale).
 """
@@ -46,10 +49,14 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextvars
 import functools
 import os
+import re
 import secrets
 import time
+import weakref
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
@@ -66,9 +73,47 @@ mcp = FastMCP("scprs-warehouse")
 REPORTS_DIR = Path(os.environ.get("REPORTS_DIR", "reports"))
 # Capability files expire: older ones 404 and are pruned on the next write, so
 # report links stay shareable for a working week without the disk growing forever.
-REPORT_TTL_S = float(os.environ.get("REPORT_TTL_DAYS", "7")) * 86400
-# Each report section is a query of up to QUERY_TIMEOUT_S; cap the fan-out.
+# REPORT_TTL_DAYS <= 0 (or unparseable) falls back to the 7-day default: a zero
+# TTL would 404 every link the moment it was written.
+_DEFAULT_TTL_DAYS = 7.0
+
+
+def _ttl_seconds(raw: str | None) -> float:
+    try:
+        days = float(raw) if raw is not None else _DEFAULT_TTL_DAYS
+    except ValueError:
+        days = _DEFAULT_TTL_DAYS
+    return (days if days > 0 else _DEFAULT_TTL_DAYS) * 86400
+
+
+REPORT_TTL_S = _ttl_seconds(os.environ.get("REPORT_TTL_DAYS"))
+# Only names this server wrote (secrets.token_urlsafe(18) + suffix) are served or
+# pruned, so pointing REPORTS_DIR at a shared directory can't expose or delete
+# anything else in it.
+_CAPABILITY_NAME = re.compile(r"[A-Za-z0-9_-]{24}\.(?:png|html)")
+# Each report section is a query of up to QUERY_TIMEOUT_S; cap the fan-out and
+# the whole report's wall clock (sections past the deadline are skipped, so a
+# report takes at most REPORT_TIMEOUT_S plus one query).
 MAX_REPORT_SECTIONS = 12
+REPORT_TIMEOUT_S = float(os.environ.get("MCP_REPORT_TIMEOUT_S", "45"))
+
+# Tools run on a dedicated, bounded pool, and each principal may hold at most
+# MCP_MAX_CONCURRENT_PER_PRINCIPAL of its threads; further calls from that
+# principal queue on the event loop without taking a thread. So one token holder
+# firing 40 heavy calls can't occupy every worker (the 2026-10 review measured a
+# 115s wait for a trivial `select 1` from another user while /healthz stayed green).
+TOOL_THREADS = max(2, int(os.environ.get("MCP_TOOL_THREADS", "8")))
+MAX_CONCURRENT_PER_PRINCIPAL = max(1, int(os.environ.get("MCP_MAX_CONCURRENT_PER_PRINCIPAL", "3")))
+_POOL = ThreadPoolExecutor(max_workers=TOOL_THREADS, thread_name_prefix="mcp-tool")
+# asyncio.Semaphore binds to the loop that first waits on it, so keep one set per loop.
+_principal_slots: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
+
+
+def _slot(principal: str) -> asyncio.Semaphore:
+    per_loop = _principal_slots.setdefault(asyncio.get_running_loop(), {})
+    if principal not in per_loop:
+        per_loop[principal] = asyncio.Semaphore(MAX_CONCURRENT_PER_PRINCIPAL)
+    return per_loop[principal]
 
 
 def _in_thread(fn):
@@ -77,13 +122,17 @@ def _in_thread(fn):
     FastMCP calls a sync tool inline (``fn(**args)``) on the server's event loop,
     so one 10s query or a slow report froze every other request — including
     ``/healthz``. The async wrapper keeps the tool's signature and docstring
-    (FastMCP reads them through ``__wrapped__``); ``asyncio.to_thread`` copies the
-    request's context, so the audit log still sees the caller's principal.
+    (FastMCP reads them through ``__wrapped__``). The call runs inside a copy of
+    the request's context, so the audit log still sees the caller's principal,
+    and holds one of that principal's slots (see MAX_CONCURRENT_PER_PRINCIPAL).
     """
 
     @functools.wraps(fn)
     async def wrapper(*args, **kwargs):
-        return await asyncio.to_thread(fn, *args, **kwargs)
+        principal = auth.current_principal.get() or "local"
+        async with _slot(principal):
+            call = functools.partial(contextvars.copy_context().run, fn, *args, **kwargs)
+            return await asyncio.get_running_loop().run_in_executor(_POOL, call)
 
     return wrapper
 
@@ -233,6 +282,7 @@ def generate_report(title: str, sections_json: str) -> dict:
 
     built = []
     section_sqls = []
+    deadline = time.monotonic() + REPORT_TIMEOUT_S
     for s in sections:
         if not isinstance(s, dict):
             continue
@@ -241,6 +291,16 @@ def generate_report(title: str, sections_json: str) -> dict:
         section_sqls.append(sql)
         narrative = str(s.get("narrative", ""))
         chart = str(s.get("chart", "none")).lower()
+        if time.monotonic() >= deadline:
+            built.append(
+                {
+                    "heading": heading,
+                    "narrative": "(skipped: the report reached its time limit)",
+                    "columns": [],
+                    "rows": [],
+                }
+            )
+            continue
         res = wq.run_select(sql, max_rows=200)
         if "error" in res:
             built.append(
@@ -314,10 +374,10 @@ def _expired(path: Path) -> bool:
 
 
 def _prune_expired_files() -> None:
-    """Delete capability files past their TTL (best-effort)."""
+    """Delete this server's capability files past their TTL (best-effort)."""
     for path in REPORTS_DIR.iterdir():
         try:
-            if path.is_file() and _expired(path):
+            if _CAPABILITY_NAME.fullmatch(path.name) and path.is_file() and _expired(path):
                 path.unlink()
         except OSError:
             pass  # raced with another writer/reader; next prune retries
@@ -449,16 +509,22 @@ def _require_db() -> None:
 
 def _serve_file(request):
     """Serve a generated report from REPORTS_DIR by its capability-URL name."""
-    from starlette.responses import FileResponse, PlainTextResponse
+    from starlette.responses import PlainTextResponse, Response
 
     name = request.path_params["name"]
-    if "/" in name or "\\" in name or ".." in name:  # no path traversal
-        return PlainTextResponse("bad request", status_code=400)
+    if not _CAPABILITY_NAME.fullmatch(name):  # only names we wrote; no traversal
+        return PlainTextResponse("not found", status_code=404)
     path = REPORTS_DIR / name
-    if not path.is_file() or _expired(path):
+    try:
+        # Read now rather than stream later: a prune between the checks and a
+        # lazy FileResponse open would surface as a 500 instead of a 404.
+        if _expired(path):
+            return PlainTextResponse("not found", status_code=404)
+        data = path.read_bytes()
+    except OSError:
         return PlainTextResponse("not found", status_code=404)
     media = "image/png" if name.endswith(".png") else "text/html"
-    return FileResponse(str(path), media_type=media)
+    return Response(data, media_type=media)
 
 
 def serve_http() -> None:
