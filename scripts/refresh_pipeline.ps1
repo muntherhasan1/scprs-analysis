@@ -1,10 +1,16 @@
 <#
 End-to-end online-data refresh (Phase 3 of the data pipeline).
 
-Rebuilds the warehouse from data/scprs.db, exports the slim serving DB, and
-publishes it to the private HF Dataset. The always-on Spaces fetch the serve DB only
-at boot, so reboot them (Space UI -> Settings -> Factory reboot) afterward to serve
-the new data. Optionally drills a newest-first enrichment slice first (-Enrich).
+Optionally drills a newest-first enrichment slice (-Enrich) and publishes it to
+the operational dataset, then asks CI to rebuild and publish the serve DB by
+dispatching "Warehouse refresh (Wave 2c)" (needs the gh CLI, logged in).
+
+CI is the single serve publisher: warehouse-refresh.yml runs in the
+warehouse-serve-publisher concurrency group and verifies go-live with an
+evidence-graded rollback. A local serve publish has neither — it can overwrite a
+NEWER CI publish with this machine's older build, and nothing checks the Spaces
+afterwards. -LocalServePublish keeps the old local build -> publish -> restart
+path for when CI is unavailable; check no warehouse refresh is running first.
 
 Built for Windows Task Scheduler on the (intermittent) collection machine: the
 always-on Spaces serve whatever was last published, so a missed/late run only
@@ -18,9 +24,11 @@ reaches the Spaces.
 Run manually:
     powershell -NoProfile -ExecutionPolicy Bypass -File scripts\refresh_pipeline.ps1
     ... -Enrich -EnrichDays 200      # also deepen line-item detail first
+    ... -LocalServePublish           # build + publish the serve DB from this machine
 #>
 param(
     [switch]$Enrich,
+    [switch]$LocalServePublish,
     [int]$EnrichDays = 200,
     [string]$Dataset = "munther-hasan/scprs-warehouse-data",
     [string]$OperationalDataset = "munther-hasan/scprs-operational-db",
@@ -61,13 +69,24 @@ try {
                 -File (Join-Path $root "scripts\enrich_batch.ps1") -Days $EnrichDays
         }
         # Local enrichment must flow back to the dataset, or the next fetch
-        # (here or in CI) would discard it. The CI cron's concurrency group does
-        # not cover this local publish — avoid running during a scheduled slot
-        # (17 past 02/08/14/20 UTC).
+        # (here or in CI) would discard it. This publish is compare-and-swap
+        # against the revision fetched above: if a CI writer committed in the
+        # meantime it is REFUSED (the local drill is lost, CI's data is kept).
+        # CI writers fire at unpredictable times (crons run hours late), so
+        # check `gh run list --workflow "Enrich (Wave 2)"` before a long -Enrich.
         Step "publish operational store" {
             & $py -m src.data_sync publish-operational --dataset $OperationalDataset
         }
     }
+    if (-not $LocalServePublish) {
+        Step "dispatch CI warehouse refresh" {
+            & gh workflow run "Warehouse refresh (Wave 2c)"
+        }
+        Log ("=== refresh done: CI warehouse refresh dispatched (it rebuilds, publishes, " +
+            "restarts the Spaces and verifies go-live) ===")
+        exit 0
+    }
+    Log "WARNING -LocalServePublish: no CAS, outside the CI publisher lock, no go-live check"
     Step "warehouse build" { & $py -m src.warehouse build }
     Step "serve-export" { & $py -m src.warehouse serve-export }
     # publish reads the write-scoped HF_WAREHOUSE_TOKEN from the repo-root .env (via

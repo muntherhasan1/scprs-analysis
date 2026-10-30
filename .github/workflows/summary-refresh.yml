@@ -16,9 +16,10 @@ name: Summary refresh
 # that gained new/amended documents, so enrich drills them.
 on:
   schedule:
-    # Daily 10:37 UTC — in the quiet gap after the 09:17 enrich slot (~70m)
-    # and before 12:17; warehouse-refresh at 13:47 picks the result up. The
-    # writer lock queues it behind any overlap.
+    # Daily 10:37 UTC. GitHub fires it late, not on time: measured
+    # 2026-10-27..29 it started 16:00-17:03 (5.4-6.4h late), so the "quiet gap
+    # between enrich slots" this slot was chosen for does not exist in
+    # practice — the writer lock queues it behind any overlapping run.
     - cron: "37 10 * * *"
   workflow_dispatch:
     inputs:
@@ -44,10 +45,17 @@ jobs:
     # Backstop only — `refresh --budget-minutes` starts no unit after the
     # budget, so worst case = setup (usually ~2m, but 13m observed on
     # 2026-10-26 run 40353722312: slow apt for playwright --with-deps) +
-    # budget 60m + the slowest unit finishing (3540 solo: 50m on 2026-07-28,
-    # run 30325120879) + publish ~3m ≈ 126m. 150 keeps headroom over that;
-    # if 3540 grows past it, split it into its own dispatch first.
-    timeout-minutes: 150
+    # budget 60m + the slowest unit STARTED just before the budget runs out +
+    # publish ~3m. Measured slowest units: 3540 44-50m (runs 30325120879,
+    # 40729599170); 3790 83m and 95m (runs 40917663888, 40729599170 —
+    # bisecting down to one day on a false row-cap hit, fixed in #159, but it
+    # shows one unit CAN take ~95m when the site misbehaves). 13 + 60 + 95 + 3
+    # = 171m; the old 150 was below that (the 10-28 run took 141m). 200 leaves
+    # ~30m. A kill here loses EVERY unit the run refreshed (publish is the
+    # last step), so this errs high: the only cost is the writer lock held
+    # longer on a run that is genuinely slow. The step summary flags any unit
+    # over 60m so erosion shows before this backstop is reached.
+    timeout-minutes: 200
     env:
       PYTHONUNBUFFERED: "1" # a killed run must still show how far it got
       SCPRS_DATASET: ${{ vars.SCPRS_DATASET || 'munther-hasan/scprs-operational-db' }}
@@ -87,12 +95,28 @@ jobs:
           args=(--budget-minutes "${IN_BUDGET:-60}")
           for bu in $(echo "$IN_BUS" | tr ',' ' '); do args+=(--bu "$bu"); done
           start=$SECONDS
-          python -m src.model refresh "${args[@]}" 2>&1 | tee refresh.log
+          # Hard stop INSIDE the step, well before the job's timeout-minutes:
+          # a job-level kill skips the publish, losing every unit refreshed so
+          # far and the unfinished unit's attempt stamp — so the same slow unit
+          # was first again next run. Killed here (rc 124/137), the run still
+          # publishes: refreshed units keep their rows and the unit that was
+          # mid-scrape carries its "attempt started" stamp to the back of the
+          # rotation. SQLite rolls the interrupted unit's transaction back.
+          # Basis: 200m job - 13m worst setup - ~3m publish - margin = 175m.
+          timeout -k 60 175m python -m src.model refresh "${args[@]}" 2>&1 | tee refresh.log
           rc=${PIPESTATUS[0]}
+          timed_out=0
+          if [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; then
+            timed_out=1
+            echo "::error::refresh hit its 175m hard stop (exit $rc) — publishing what finished; the unit in progress goes to the back of the rotation"
+          fi
+          echo "timed_out=$timed_out" >> "$GITHUB_OUTPUT"
           result=$(grep -E '^RESULT ' refresh.log | tail -1)
           refreshed=$(echo "$result" | sed -nE 's/.*refreshed=([0-9]+).*/\1/p')
+          failed=$(echo "$result" | sed -nE 's/.*failed=([0-9]+).*/\1/p')
           echo "rc=$rc" >> "$GITHUB_OUTPUT"
           echo "refreshed=${refreshed:-0}" >> "$GITHUB_OUTPUT"
+          echo "failed=${failed:-0}" >> "$GITHUB_OUTPUT"
           {
             echo "### Summary refresh (budget ${IN_BUDGET:-60}m)"
             echo '```'
@@ -103,10 +127,23 @@ jobs:
           if [ -z "$result" ]; then
             echo "::error::refresh crashed before reporting a RESULT line (exit $rc)"
           fi
+          # Duration tripwire (report-only): a unit over 60m is eating into the
+          # timeout-minutes headroom above — look before the backstop fires.
+          sed -nE 's/^  ([0-9A-Z]{4}): .*, ([0-9.]+)m$/\1 \2/p' refresh.log \
+            | awk '$2 > 60 { printf "::warning::BU %s took %sm to refresh (>60m tripwire) - see the timeout-minutes basis\n", $1, $2 }'
           exit 0
 
+      # Also publish when units only FAILED: each failure is stamped in
+      # `summary_refresh_failure`, which moves the unit to the back of the
+      # rotation. Unpublished, that stamp is lost and the same failing unit is
+      # first again next run (the 2026-10-27..29 BU 3790 loop: 0 refreshed).
+      # A failed unit's `purchases` rows are untouched by its gate. A run cut
+      # by the hard stop has no RESULT line (counts read 0) but must publish
+      # too, for the same reason.
       - name: Publish scprs.db back to the dataset
-        if: steps.refresh.outputs.refreshed != '0'
+        if: >-
+          steps.refresh.outputs.refreshed != '0' || steps.refresh.outputs.failed != '0'
+          || steps.refresh.outputs.timed_out == '1'
         run: python -m src.data_sync publish-operational
 
       - name: Fail on refused or errored units
@@ -114,5 +151,5 @@ jobs:
         env:
           RC: ${{ steps.refresh.outputs.rc }}
         run: |
-          echo "::error::summary refresh exited $RC — a unit was refused by its gate or errored (see the step summary). Units that succeeded WERE published; the failed ones retry next run."
+          echo "::error::summary refresh exited $RC — a unit was refused by its gate or errored (see the step summary). Units that succeeded WERE published; the failed ones go to the back of the rotation."
           exit 1
