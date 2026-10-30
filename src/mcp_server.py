@@ -307,7 +307,12 @@ class BearerAuthMiddleware:
         if path.startswith("/files/"):
             await self._app(scope, receive, send)  # capability URL — no bearer needed
             return
-        provided = dict(scope.get("headers") or []).get(b"authorization", b"").decode().strip()
+        provided = (
+            dict(scope.get("headers") or [])
+            .get(b"authorization", b"")
+            .decode("utf-8", "replace")
+            .strip()
+        )
         # Accept "Bearer <token>" or a bare "<token>": some connector UIs (e.g.
         # Copilot Studio's API-key-in-header) send the header value verbatim, so a
         # user who omits the "Bearer " prefix should still authenticate.
