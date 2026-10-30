@@ -3,8 +3,11 @@ name: Operational backup
 # Weekly cold backup of the one NON-REBUILDABLE artifact: scprs.db (plus the
 # side-input .db files) copied from the operational dataset to a second,
 # private backup dataset under a dated folder, keeping the newest 4 snapshots.
-# The operational dataset's revision history protects against bad writes; this
-# protects against repo deletion and token misuse. Residual risk: both live in
+# The operational dataset's revision history protects against bad writes only
+# back to its last storage prune (hf-storage-prune.yml squashes it, and refuses
+# unless THIS backup succeeded in the last 8 days) -- so these dated snapshots
+# are the long-range copies. They also protect against repo deletion and token
+# misuse. Residual risk: both live in
 # the SAME HF account — an account-level compromise takes both. Cover that
 # tail with an occasional manual download (quarterly is plenty).
 #

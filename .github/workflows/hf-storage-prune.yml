@@ -1,0 +1,129 @@
+name: HF storage prune
+
+# Every publish keeps a full copy of its DB in the dataset's git history and
+# nothing ever dropped it: 2026-10-29 the operational dataset used 483.4 GB
+# (638 commits) and the warehouse dataset 208.5 GB (774 commits) -- ~690 GB of a
+# PRO account's 1 TB private quota, growing ~7 GB/day. This squashes each
+# dataset's `main` to ONE commit holding exactly the HEAD files
+# (`HfApi.super_squash_history`); the Hub frees the rest within ~36h
+# (https://huggingface.co/docs/hub/storage-limits).
+#
+# IRREVERSIBLE, so it is REPORT-ONLY by default:
+#   * a scheduled run squashes only when the repo variable HF_PRUNE_APPLY is
+#     'true' -- otherwise it logs commit counts + used storage (a dry run);
+#   * a manual dispatch squashes only with the `apply` box ticked.
+# Recommended first use: dispatch once without `apply`, read the log, dispatch
+# again with `apply`, check storage after ~36h, then set HF_PRUNE_APPLY.
+#
+# Safety: an applying job holds that dataset's WRITER lock (the same concurrency
+# group its publishers use), so no compare-and-swap publish is in flight; the
+# squash re-checks HEAD right before and verifies every file's blob id is
+# unchanged after. It refuses to squash
+#   * the operational dataset unless an Operational backup succeeded in the last
+#     8 days -- that history was the bad-write safety net; the dated backup
+#     snapshots are now the only older copies;
+#   * the warehouse dataset unless the last Warehouse refresh succeeded -- the
+#     squashed commit becomes the copy rollback_serve_db restores, so it must
+#     be a verified-live serve DB.
+# A dry run takes no lock (holding the writer group can cancel a pending
+# enrich run: GitHub keeps one pending run per group).
+on:
+  schedule:
+    # Sunday 08:41 UTC: after the weekly backup (05:29) has had time to finish.
+    - cron: "41 8 * * 0"
+  workflow_dispatch:
+    inputs:
+      apply:
+        description: "Really squash (IRREVERSIBLE). Unticked = report only."
+        type: boolean
+        default: false
+      target:
+        description: Which dataset(s)
+        type: choice
+        options: [both, operational, warehouse]
+        default: both
+
+permissions:
+  contents: read
+  actions: read # gh run list for the backup / refresh guards
+
+env:
+  APPLY: ${{ (github.event_name == 'workflow_dispatch' && inputs.apply) || (github.event_name == 'schedule' && vars.HF_PRUNE_APPLY == 'true') }}
+
+jobs:
+  operational:
+    if: ${{ github.event_name == 'schedule' || inputs.target != 'warehouse' }}
+    runs-on: ubuntu-latest
+    # A squash is one API call plus two file listings; minutes at most.
+    timeout-minutes: 20
+    concurrency:
+      group: ${{ ((github.event_name == 'workflow_dispatch' && inputs.apply) || (github.event_name == 'schedule' && vars.HF_PRUNE_APPLY == 'true')) && 'scprs-operational-writer' || format('hf-prune-dry-op-{0}', github.run_id) }}
+      cancel-in-progress: false
+    env:
+      PYTHONUNBUFFERED: "1"
+      SCPRS_DATASET: ${{ vars.SCPRS_DATASET || 'munther-hasan/scprs-operational-db' }}
+      # The single operational writer token: squashing needs write.
+      HF_SCPRS_TOKEN: ${{ secrets.HF_SCPRS_TOKEN }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+      # Full requirements: data_sync's CLI imports model -> scprs -> playwright
+      # (the package only; no browser install).
+      - run: pip install -r requirements.txt "huggingface_hub>=0.25"
+      - name: Guard -- a recent successful backup exists
+        if: env.APPLY == 'true'
+        run: |
+          set -euo pipefail
+          last=$(gh run list --workflow backup.yml --status success --limit 1 --json createdAt -q '.[0].createdAt')
+          if [ -z "$last" ]; then
+            echo "::error::no successful Operational backup on record -- refusing to squash the operational history"
+            exit 1
+          fi
+          age=$(( ( $(date -u +%s) - $(date -u -d "$last" +%s) ) / 86400 ))
+          echo "last successful backup: $last (${age}d ago)"
+          if [ "$age" -gt 8 ]; then
+            echo "::error::last successful backup is ${age}d old (>8) -- refusing to squash"
+            exit 1
+          fi
+      - name: Prune operational history
+        run: >
+          python -m src.data_sync prune-history --kind operational
+          --dataset "$SCPRS_DATASET" ${{ env.APPLY == 'true' && '--apply' || '' }}
+
+  warehouse:
+    if: ${{ github.event_name == 'schedule' || inputs.target != 'operational' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    concurrency:
+      group: ${{ ((github.event_name == 'workflow_dispatch' && inputs.apply) || (github.event_name == 'schedule' && vars.HF_PRUNE_APPLY == 'true')) && 'warehouse-serve-publisher' || format('hf-prune-dry-wh-{0}', github.run_id) }}
+      cancel-in-progress: false
+    env:
+      PYTHONUNBUFFERED: "1"
+      WAREHOUSE_DATASET: ${{ vars.WAREHOUSE_DATASET || 'munther-hasan/scprs-warehouse-data' }}
+      HF_WAREHOUSE_TOKEN: ${{ secrets.HF_WAREHOUSE_TOKEN }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt "huggingface_hub>=0.25"
+      - name: Guard -- the last warehouse refresh succeeded
+        if: env.APPLY == 'true'
+        run: |
+          set -euo pipefail
+          c=$(gh run list --workflow warehouse-refresh.yml --status completed --limit 1 --json conclusion -q '.[0].conclusion')
+          echo "last completed Warehouse refresh: ${c:-none}"
+          if [ "$c" != "success" ]; then
+            echo "::error::last Warehouse refresh did not succeed -- HEAD may not be a verified-live serve DB; refusing to squash"
+            exit 1
+          fi
+      - name: Prune warehouse history
+        run: >
+          python -m src.data_sync prune-history --kind warehouse
+          --dataset "$WAREHOUSE_DATASET" ${{ env.APPLY == 'true' && '--apply' || '' }}
