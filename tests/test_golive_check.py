@@ -37,6 +37,14 @@ def test_main_skips_without_token(monkeypatch, capsys):
     assert "SKIPPED" in capsys.readouterr().out
 
 
+def test_main_fails_inconclusive_without_token_when_required(monkeypatch, capsys):
+    # The scheduled refresh passes --require-token: a missing secret must not
+    # read as rc=0, which would let the public vendor-app feed publish unverified.
+    monkeypatch.delenv("MCP_VERIFY_TOKEN", raising=False)
+    assert golive_check.main(["--require-token"]) == 2
+    assert "INCONCLUSIVE" in capsys.readouterr().out
+
+
 def _wire(monkeypatch, tmp_path, served):
     """Stub the network-facing pieces; the local serve DB is real."""
     db = tmp_path / "warehouse-serve.db"

@@ -80,3 +80,19 @@ def test_no_chart_for_tiny_results():
         _result(["year_month", "total_spend"], [{"year_month": "2026-01", "total_spend": 1.0}]),
     )
     assert png is None
+
+
+def test_chart_files_are_pruned_on_write(tmp_path, monkeypatch):
+    # Chart PNGs used to be NamedTemporaryFile(delete=False) and never removed,
+    # so anonymous questions grew the Space's disk until a restart.
+    import os
+    import time
+
+    monkeypatch.setattr(web_app, "_CHART_DIR", tmp_path)
+    old = tmp_path / "old.png"
+    old.write_bytes(b"x")
+    stale = time.time() - web_app._CHART_TTL_S - 60
+    os.utime(old, (stale, stale))
+    new = web_app._save_chart(b"png")
+    assert not old.exists()
+    assert open(new, "rb").read() == b"png" and os.path.dirname(new) == str(tmp_path)

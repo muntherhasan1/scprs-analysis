@@ -274,13 +274,29 @@ Two tools go beyond raw data (all over the same read-only guard):
   + optional prose + optional chart; returns a link to a **self-contained HTML
   report** (charts embedded) served at an unauthenticated `/files/<unguessable>`
   capability URL, so it opens in any browser or is embeddable in a Copilot card.
-  At most 12 sections per report. Report and chart links expire after
-  `REPORT_TTL_DAYS` (default 7) and are pruned from disk on the next write.
+  At most 12 sections per report, and a report stops running sections after
+  `MCP_REPORT_TIMEOUT_S` (default 45s; later sections say they were skipped).
+  Report and chart links expire after `REPORT_TTL_DAYS` (default 7; zero,
+  negative or unparseable values fall back to 7) and are pruned from disk on the
+  next write — only files the server itself wrote are served or pruned.
 
-Tools run on worker threads, so one slow query or report doesn't stall other
-requests (or `/healthz`). Row counts in `list_marts` / `describe_table` come
-from the `serve_row_counts` table that `serve-export` writes, so listing the
-schema never re-counts the gold views.
+Tools run on a dedicated pool of `MCP_TOOL_THREADS` worker threads (default 8),
+so one slow query or report doesn't stall other requests (or `/healthz`). Each
+principal (token label) holds at most `MCP_MAX_CONCURRENT_PER_PRINCIPAL` of those
+threads at once (default 3); its further calls queue without taking a thread, so
+one token holder's burst can't starve other users. A token shared by many people
+(e.g. one Copilot Studio connector serving a whole team) is one principal, so
+those people share its slots — give each deployment its own `MCP_AUTH_TOKENS`
+label, or raise the per-principal cap (keep it below the pool size). Row counts in `list_marts` /
+`describe_table` come from the `serve_row_counts` table that `serve-export`
+writes, so listing the schema never re-counts the gold views. A serve DB without
+that table (published before it existed) is counted once on a background thread,
+each view under the query time limit; until that finishes, counts show as
+unknown rather than blocking the call.
+
+`run_sql` returns strict JSON: an infinite or NaN value (e.g. `SELECT 1e999`)
+comes back as `null`, since strict parsers such as Copilot Studio's reject
+`Infinity`.
 
 Rendering is matplotlib (Agg backend); the server still makes no LLM calls — the
 calling model writes the SQL and the prose. This is what a **Microsoft 365 /

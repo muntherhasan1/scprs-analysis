@@ -183,3 +183,31 @@ def test_default_event_years_is_current_and_two_prior():
 
     today = datetime(2026, 7, 24, tzinfo=timezone.utc)
     assert eprocure.default_event_years(today) == (2024, 2025, 2026)
+
+
+@pytest.mark.parametrize(
+    ("name", "flags"),
+    [
+        ("26VS0017-**SB Only** Water Management", (1, 0, 0)),
+        ("*DVBE Only* Kitchen Door Replacement", (0, 1, 0)),
+        ("24CS0060 *DVBEs only* Kitchen Door Replacement Services", (0, 1, 0)),
+        # SB-or-DVBE set-asides: open to either, so neither "only" flag
+        ("**Certified SB, including MB, SB-PW, or a DVBE Only** IFPQ 04A7533", (0, 0, 1)),
+        ("*SB/DVBE ONLY* IFPQ 07A", (0, 0, 1)),
+        (
+            "IFPQ - Certified SB, including MB, SB-PW, or a DVBE OnlyOn-Call Weed Abatement",
+            (0, 0, 1),
+        ),
+        # SB phrasings the old "SB ONLY" substring test missed
+        ("Flooring Replacement services **SB BIDDERS ONLY**", (1, 0, 0)),
+        ("HVAC Units Services **Small Business Bidders ONLY**", (1, 0, 0)),
+        ("*Certified Small Business ONLY* IFPQ Elevator Maintenance", (1, 0, 0)),
+        ("24YS0056 *SB-MB Only* Johnson Hall Fan Coils", (1, 0, 0)),
+        # "only" that is not a set-aside
+        ("Emergency repairs, weekends only", (0, 0, 0)),
+        ("Janitorial Services", (0, 0, 0)),
+        (None, (0, 0, 0)),
+    ],
+)
+def test_set_aside_flags(name, flags):
+    assert eprocure.set_aside_flags(name) == flags

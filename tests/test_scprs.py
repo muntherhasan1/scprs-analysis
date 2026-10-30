@@ -42,6 +42,27 @@ def test_load_extract_cleans_quirks(tmp_path: Path):
     assert str(df["Start Date"].iloc[0].date()) == "2026-09-30"
 
 
+def test_load_extract_decodes_utf8_without_charset(tmp_path: Path):
+    # The live export is UTF-8 with no charset declared; parsed as Latin-1 the
+    # NBSP after an id survived strip() as 'Â' (prod 4265 '22-10799Â') and '¿'
+    # in titles became 'Â¿' (11,585 titles). Bytes copied from a real export.
+    html = (
+        "<table><tr><th>Purchase Document #</th><th>First Item Title</th></tr>"
+        "<tr><td>'22-10799 </td><td>What¿s Happening</td></tr></table>"
+    )
+    f = tmp_path / "s.xls"
+    f.write_bytes(html.encode("utf-8"))
+    df = scprs.load_extract(f)
+    assert df["Purchase Document #"].iloc[0] == "22-10799"
+    assert df["First Item Title"].iloc[0] == "What¿s Happening"
+
+
+def test_read_export_html_falls_back_to_cp1252(tmp_path: Path):
+    f = tmp_path / "s.xls"
+    f.write_bytes("<table><tr><th>A</th></tr><tr><td>café</td></tr></table>".encode("cp1252"))
+    assert scprs.read_export_html(f)["A"].iloc[0] == "café"
+
+
 def test_to_csv_roundtrip(tmp_path: Path):
     f = tmp_path / "s.xls"
     f.write_text(SAMPLE_XLS, encoding="utf-8")

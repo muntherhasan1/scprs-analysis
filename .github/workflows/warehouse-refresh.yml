@@ -149,8 +149,9 @@ jobs:
       # Observability extended to deploys (retrospective action #4): verify over
       # the real MCP channel that the rebooted Space serves the snapshot THIS run
       # published. A failure here means the data is safe but NOT live — the
-      # silent-staleness failure mode of 2026-07-20, made loud. Skips (exit 0)
-      # when the MCP_VERIFY_TOKEN secret is unset. Exit codes are evidence-graded
+      # silent-staleness failure mode of 2026-07-20, made loud. --require-token:
+      # an unset MCP_VERIFY_TOKEN exits 2 (fail, no rollback) — it used to skip
+      # with rc=0, which also published the PUBLIC app feed unverified. Exit codes are evidence-graded
       # (#45): 1 = Space up but serving a DIFFERENT snapshot (roll back);
       # 2 = could not observe (boot timeout / unreachable — fail, don't touch).
       - name: Verify go-live (Space serves this build)
@@ -160,7 +161,7 @@ jobs:
           MCP_VERIFY_TOKEN: ${{ secrets.MCP_VERIFY_TOKEN }}
         run: |
           set +e
-          python -m src.golive_check
+          python -m src.golive_check --require-token
           rc=$?
           set -e
           echo "rc=$rc" >> "$GITHUB_OUTPUT"
