@@ -1,9 +1,10 @@
 """collect_po_details completeness against a fake results grid (no browser).
 
-A day may only be reported complete when the DISTINCT documents covered reach
-the grid's own total: the grid order can shift between pages (a document shown
-twice, another never), and a grid that never renders must not read as an
-empty day. Both used to be recorded as done days (2026-10 review)."""
+A day may only be reported complete when the DISTINCT (document, version) rows
+covered reach the grid's own total (a document has one row per version): the
+grid order can shift between pages (a document shown twice, another never),
+and a grid that never renders must not read as an empty day. Both used to be
+recorded as done days (2026-10 review)."""
 
 import contextlib
 
@@ -28,7 +29,7 @@ class _Loc:
         grid = self.page.grid()
         if self.sel.startswith("a[id^='PURCHASE_DOC$']"):
             return len(grid)
-        if self.sel.startswith("[id='PURCHASE_DOC$"):
+        if self.sel.startswith(("[id='PURCHASE_DOC$", "[id='VERSION_NBR$")):
             return 1 if self._index() < len(grid) else 0
         if self.sel == scprs._NEXT_PAGE:
             return 1 if self.page.pg + 1 < len(self.page.pages) else 0
@@ -38,7 +39,10 @@ class _Loc:
         return self.count() > 0
 
     def inner_text(self):
-        doc = self.page.grid()[self._index()]
+        # Grid cells are "DOC" or "DOC@VERSION" (version defaults to 0).
+        doc, _, ver = self.page.grid()[self._index()].partition("@")
+        if self.sel.startswith("[id='VERSION_NBR$"):
+            return ver or "0"
         self.page.last = doc
         return doc
 
@@ -161,6 +165,22 @@ def test_shifting_grid_order_is_not_a_complete_day(monkeypatch):
 def test_unrendered_grid_is_not_an_empty_day(monkeypatch):
     docs, stats = _collect(monkeypatch, _Page([["D1"]], total=1, loaded=False))
     assert docs == [] and stats["complete"] is False
+
+
+def test_document_listed_once_per_version_is_a_complete_day(monkeypatch):
+    # The grid total counts (document, version) rows: 0690 2026-01-27 lists
+    # S251017090 at versions 0 and 1 under "1 to 7 of 7". Drill it once; the
+    # day is complete. Counting distinct documents (6 of 7) never finished it.
+    page = _Page([["D1", "D2@0", "D2@1", "D3"]], total=4)
+    docs, stats = _collect(monkeypatch, page)
+    assert docs == ["D1", "D2", "D3"] and page.drilled == ["D1", "D2", "D3"]
+    assert stats["complete"] is True
+
+
+def test_version_rows_count_for_skipped_documents(monkeypatch):
+    page = _Page([["D1@0", "D1@1"], ["D2"]], total=3)
+    docs, stats = _collect(monkeypatch, page, skip_docs={"D1", "D2"})
+    assert docs == [] and stats["complete"] is True and stats["skipped"] == 2
 
 
 def test_full_coverage_with_skips_is_complete(monkeypatch):

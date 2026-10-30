@@ -22,8 +22,10 @@ How it works, over the same channel a real MCP client uses:
                           workflow fails loudly but must NOT roll back
 
 Needs ``MCP_VERIFY_TOKEN`` (any valid ``MCP_AUTH_TOKENS`` entry's token). Without
-it the check prints a skip note and exits 0, so the workflow still passes on
-forks / before the secret exists.
+it the check prints a skip note and exits 0 (local runs), unless
+``--require-token`` is passed — the scheduled refresh passes it, so a missing
+secret exits 2 (INCONCLUSIVE) instead of reading as a verified go-live that
+lets the public vendor-app feed publish unchecked.
 """
 
 from __future__ import annotations
@@ -126,10 +128,21 @@ def main(argv: list[str] | None = None) -> int:
     # boots (#45).
     ap.add_argument("--boot-timeout", type=float, default=1500, help="seconds to wait for RUNNING")
     ap.add_argument("--serve-timeout", type=float, default=300, help="seconds to wait for the app")
+    ap.add_argument(
+        "--require-token",
+        action="store_true",
+        help="exit 2 (INCONCLUSIVE) instead of skipping when MCP_VERIFY_TOKEN is unset",
+    )
     args = ap.parse_args(argv)
 
     token = os.environ.get("MCP_VERIFY_TOKEN")
     if not token:
+        if args.require_token:
+            # The scheduled refresh must never read "not checked" as "verified":
+            # rc=0 gates the PUBLIC vendor-app publish (#46 lesson, go-live
+            # edition). 2 = no evidence either way: fail loudly, no rollback.
+            print("go-live INCONCLUSIVE: MCP_VERIFY_TOKEN not set — cannot verify this build")
+            return 2
         print("go-live check SKIPPED: MCP_VERIFY_TOKEN not set")
         return 0
 

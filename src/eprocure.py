@@ -191,7 +191,9 @@ def load_registry(path: Path):
     """
     import pandas as pd
 
-    df = pd.read_html(path)[0]
+    from src.scprs import read_export_html  # same UTF-8, no-charset export format
+
+    df = read_export_html(path)
     for col in df.columns:
         if pd.api.types.is_object_dtype(df[col]) or pd.api.types.is_string_dtype(df[col]):
             df[col] = df[col].astype("string").str.strip()
