@@ -27,9 +27,10 @@ name: Pipeline monitor
 # grace period means the pipeline OR its monitor is down.
 on:
   schedule:
-    # Offset ~35 min behind an enrich slot start ("17 */3"). A tick can land
-    # while that slot is still running — harmless: the check is on the age of
-    # the last SUCCESS, not the current run.
+    # Offset ~35 min behind an enrich slot start ("17 */3") on paper; in
+    # practice it fires ~4-5h late like the rest. A tick can land while an
+    # enrich run is still going — harmless: the check is on the age of the
+    # last SUCCESS, not the current run.
     - cron: "52 3,9,15,21 * * *"
   workflow_dispatch:
 
@@ -44,22 +45,28 @@ concurrency:
 
 env:
   ALERT_LABEL: pipeline-monitor-alert
-  # Enrich publishes every 3h; 9h = two missed slots + runtime headroom (a
-  # healthy full-budget run concludes ~1.5h after its slot under the 95m
-  # backstop). Detection of a two-missed-slot outage can slip one 6h
-  # monitor cycle — accepted: the dead-man's switch (~14h grace) is the outer
-  # bound, and tightening below ~9h would false-alert on routine GitHub cron
-  # lateness (slots observed firing up to ~3h late).
-  MAX_AGE_HOURS: "9"
-  # Serve commits come from warehouse-refresh.yml, every 6h with a 61–120m+
-  # build: healthy worst case ≈ 6h gap + ~1h duration spread + ~3h cron
-  # lateness ≈ 10h; a fully missed slot pushes the age past ~12h. 12 alerts
-  # on the first monitor tick after two consecutive slots produce no commit —
-  # the same two-missed-slots semantics as the enrich threshold above.
+  # Thresholds are set from MEASURED scheduler behaviour, not the cron
+  # spacing: GitHub fires this repo's crons hours late and silently skips
+  # slots. 2026-10-15..29: enrich's 8 nominal slots/day produced 3-5 runs;
+  # every workflow fired ~3-7h after its cron time. GitHub does not guarantee
+  # schedule delivery at all — these numbers can get worse without warning.
+  #
+  # Enrich: longest gap between consecutive scheduled fires was 9.0h (10-29
+  # 00:57 -> 09:58) and a full-budget run takes ~72m, so a HEALTHY pipeline
+  # reaches ~10.3h of success age. The old 9h threshold alerted on that
+  # routinely (#143, #145, #146: each "9h ago", each self-closed). 12h
+  # alerts after ~3 consecutive missing slots; the dead-man's switch (~14h
+  # grace) stays the outer bound.
+  MAX_AGE_HOURS: "12"
+  # Serve commits come from warehouse-refresh.yml (nominally every 6h, build
+  # 6-12m since PR #139): longest measured fire gap 9.1h (10-28 14:32 ->
+  # 23:37), so healthy age reaches ~9.3h. 12 leaves ~2.7h margin and still
+  # alerts once a slot after a long gap is missed.
   SERVE_MAX_AGE_HOURS: "12"
-  # Summary refresh runs daily: two missed slots (48h) + ~3h cron lateness +
-  # ~2h max duration. A single failed run doesn't page here (triage covers
-  # it); this catches "hasn't succeeded in two days, whatever the cause".
+  # Summary refresh runs daily; consecutive fires measured 16:00, 16:48,
+  # 17:03 (gaps <= ~25h). Two missed days (48h) + ~3h fire-time drift + ~2h
+  # max duration. A single failed run doesn't page here (triage covers it);
+  # this catches "hasn't succeeded in two days, whatever the cause".
   SUMMARY_MAX_AGE_HOURS: "53"
 
 jobs:

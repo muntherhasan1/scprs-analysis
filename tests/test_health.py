@@ -252,3 +252,25 @@ def test_main_accepts_unit_stale_hours_flag(tmp_path, capsys):
     assert health.main(["--db", str(db), "--json", "--unit-stale-hours", "1"]) == 1
     out = capsys.readouterr().out
     assert '"enrichment_stalled"' in out and '"2660"' in out
+
+
+def test_reopened_days_count_as_pending(tmp_path):
+    """A unit whose only remaining work is reopened days (a refresh found late
+    or amended documents on finished days) must still be picked — enrich treats
+    those days as pending, so the picker and the stall check must too."""
+    db = tmp_path / "scprs.db"
+    _seed(db)
+    _add_summary(db, "8660", ["2026-01-01", "2026-01-02"])
+    _mark_done(db, "8660", ["2026-01-01", "2026-01-02"], NOW - timedelta(hours=400))
+    assert _next_bu(db) is None
+
+    con = sqlite3.connect(db)
+    con.execute(
+        "INSERT INTO details_reopen (business_unit, day, reopened_at) "
+        "VALUES ('8660', '2026-01-02', '2026-07-15T00:00:00')"
+    )
+    con.commit()
+    con.close()
+    assert _next_bu(db) == "8660"
+    stalled = _by_check(_evaluate(db))["enrichment_stalled"][0]
+    assert stalled.scope == "8660" and "1 of 2 day(s) still pending" in stalled.detail
