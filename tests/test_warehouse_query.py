@@ -118,6 +118,53 @@ def test_distinct_values_guards_table_and_column(tiny_db):
     assert "error" in wq.distinct_values("gold_spend", "no_such_col")
 
 
+def test_row_counts_are_computed_once_per_db(tiny_db, monkeypatch):
+    # COUNT(*) over the gold views is ~60s on the real serve DB; it must not run
+    # on every NL question.
+    calls = []
+    real = wq._count_all
+
+    def counting(con):
+        calls.append(1)
+        return real(con)
+
+    monkeypatch.setattr(wq, "_count_all", counting)
+    wq.schema_for_llm()
+    wq.schema_for_llm()
+    wq.list_marts()
+    assert wq.describe("gold_spend")["row_count"] == 3
+    assert len(calls) == 1
+
+
+def test_row_counts_prefer_the_stored_table(tiny_db, monkeypatch):
+    assert wq.record_row_counts(tiny_db) == 1
+    # A stored count is used as-is — no COUNT(*) at request time.
+    con = sqlite3.connect(tiny_db)
+    con.execute("UPDATE serve_row_counts SET row_count = 42")
+    con.commit()
+    con.close()
+
+    def fail(con):
+        pytest.fail("counted at request time")
+
+    monkeypatch.setattr(wq, "_count_all", fail)
+    text = wq.schema_for_llm()
+    assert "gold_spend (42 rows)" in text
+    # The counts table is not an analytical object a model would be shown.
+    assert "serve_row_counts" not in text
+
+
+def test_distinct_values_honours_the_time_limit(tiny_db, monkeypatch):
+    con = sqlite3.connect(tiny_db)
+    con.executemany("INSERT INTO gold_spend VALUES (?, ?)", [(str(i), i) for i in range(50_000)])
+    con.commit()
+    con.close()
+    monkeypatch.setattr(wq, "QUERY_TIMEOUT_S", 1e-9)
+    assert wq.distinct_values("gold_spend", "supplier") == {
+        "error": "Query exceeded the time limit."
+    }
+
+
 def test_extract_sql_strips_fences():
     assert nl_query._extract_sql("```sql\nSELECT 1\n```") == "SELECT 1"
     assert nl_query._extract_sql("SELECT 1;") == "SELECT 1"

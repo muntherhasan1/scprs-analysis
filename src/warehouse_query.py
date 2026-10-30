@@ -21,6 +21,7 @@ from __future__ import annotations
 import os
 import re
 import sqlite3
+import threading
 import time
 from pathlib import Path
 
@@ -45,6 +46,15 @@ _BLOB_DENY = re.compile(r"\b(randomblob|zeroblob)\s*\(", re.IGNORECASE)
 MAX_VALUE_BYTES = 100_000
 # Total size of the rows one query may return; fetching stops past it.
 MAX_RESULT_BYTES = 5_000_000
+
+# Row counts for the schema listings. COUNT(*) over every gold view costs ~60s on
+# the serve DB (some marts are aggregate views), so it is paid once: serve-export
+# stores the counts in this table, and anything without it (a local
+# warehouse.db) computes them once per process. Not a gold_/lv_ name, so it never
+# appears in the allowlist or the schema shown to a model.
+ROW_COUNTS_TABLE = "serve_row_counts"
+_row_count_cache: dict[tuple, dict[str, int]] = {}
+_row_count_lock = threading.Lock()
 
 # Curated, human-authored hints surfaced by `list_marts` and `schema_for_llm` so an
 # NL/MCP model picks the right mart *and dimension* instead of guessing (e.g. it must
@@ -114,6 +124,14 @@ def connect() -> sqlite3.Connection:
     return con
 
 
+def _set_deadline(con: sqlite3.Connection) -> None:
+    """Interrupt (raises OperationalError) once past QUERY_TIMEOUT_S; the handler
+    is polled every ~10k VM ops during execute and fetch."""
+    if QUERY_TIMEOUT_S > 0:
+        deadline = time.monotonic() + QUERY_TIMEOUT_S
+        con.set_progress_handler(lambda: 1 if time.monotonic() > deadline else 0, 10_000)
+
+
 def _row_bytes(row: sqlite3.Row) -> int:
     return sum(len(v) if isinstance(v, (str, bytes)) else 8 for v in row)
 
@@ -133,17 +151,61 @@ def analytical_objects(con: sqlite3.Connection) -> set[str]:
     return {r[0] for r in rows}
 
 
+def _count_all(con: sqlite3.Connection) -> dict[str, int]:
+    """COUNT(*) of every allowlisted object (slow — see ROW_COUNTS_TABLE)."""
+    # Names come from the sqlite_master allowlist, never the caller.
+    return {
+        name: con.execute(f'SELECT COUNT(*) FROM "{name}"').fetchone()[0]  # noqa: S608
+        for name in sorted(analytical_objects(con))
+    }
+
+
+def record_row_counts(db_path: Path) -> int:
+    """Store every allowlisted object's row count in ``ROW_COUNTS_TABLE`` of the
+    (writable) DB at ``db_path``. Run by serve-export so the Spaces never count at
+    request time. Returns the number of objects counted."""
+    con = sqlite3.connect(db_path)
+    try:
+        counts = _count_all(con)
+        con.execute(f"DROP TABLE IF EXISTS {ROW_COUNTS_TABLE}")
+        con.execute(f"CREATE TABLE {ROW_COUNTS_TABLE} (name TEXT PRIMARY KEY, row_count INTEGER)")
+        con.executemany(f"INSERT INTO {ROW_COUNTS_TABLE} VALUES (?, ?)", counts.items())  # noqa: S608
+        con.commit()
+    finally:
+        con.close()
+    return len(counts)
+
+
+def row_counts(con: sqlite3.Connection) -> dict[str, int]:
+    """Row count per allowlisted object: the stored table when serve-export wrote
+    one, else counted once per process per DB file (keyed by path, size, mtime so
+    a replaced file is recounted)."""
+    try:
+        st = WAREHOUSE_DB.stat()
+        key = (str(WAREHOUSE_DB), st.st_size, st.st_mtime_ns)
+    except OSError:
+        key = (str(WAREHOUSE_DB), None, None)
+    with _row_count_lock:  # one counter at a time; later callers reuse its result
+        if key not in _row_count_cache:
+            stored = con.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (ROW_COUNTS_TABLE,)
+            ).fetchone()
+            if stored:
+                counts = dict(con.execute(f"SELECT name, row_count FROM {ROW_COUNTS_TABLE}"))  # noqa: S608
+            else:
+                counts = _count_all(con)
+            _row_count_cache[key] = counts
+        return _row_count_cache[key]
+
+
 def list_marts() -> list[dict]:
     """Analytical marts / star tables with row counts + curated hints (by name)."""
     with connect() as con:
-        out = []
-        for name in sorted(analytical_objects(con)):
-            # name comes from the sqlite_master allowlist, not the caller.
-            count = con.execute(f'SELECT COUNT(*) FROM "{name}"').fetchone()[0]  # noqa: S608
-            out.append(
-                {"name": name, "rows": count, "description": MART_DESCRIPTIONS.get(name, "")}
-            )
-        return out
+        counts = row_counts(con)
+        return [
+            {"name": name, "rows": counts.get(name), "description": MART_DESCRIPTIONS.get(name, "")}
+            for name in sorted(analytical_objects(con))
+        ]
 
 
 def describe(name: str) -> dict:
@@ -157,7 +219,9 @@ def describe(name: str) -> dict:
             {"name": r[1], "type": r[2]}
             for r in con.execute(f'PRAGMA table_info("{name}")')  # noqa: S608
         ]
-        count = con.execute(f'SELECT COUNT(*) FROM "{name}"').fetchone()[0]  # noqa: S608
+        count = row_counts(con).get(name)
+        if count is None:  # gold_data_dictionary isn't in the allowlisted counts
+            count = con.execute(f'SELECT COUNT(*) FROM "{name}"').fetchone()[0]  # noqa: S608
         return {"name": name, "row_count": count, "columns": cols}
 
 
@@ -180,13 +244,19 @@ def distinct_values(table: str, column: str, max_values: int = 100) -> dict:
         if column not in cols:
             return {"error": f"Column {column!r} not found on {table!r}."}
         limit = max(1, min(max_values, 500))
+        _set_deadline(con)  # a GROUP BY over a fact table is caller-triggered work
         # Both identifiers validated above (allowlist + real columns); the limit is
         # a bound parameter. Values are returned as data, never interpolated.
-        rows = con.execute(
-            f'SELECT "{column}" AS value, COUNT(*) AS n FROM "{table}" '  # noqa: S608
-            f'GROUP BY "{column}" ORDER BY n DESC LIMIT ?',
-            (limit + 1,),
-        ).fetchall()
+        try:
+            rows = con.execute(
+                f'SELECT "{column}" AS value, COUNT(*) AS n FROM "{table}" '  # noqa: S608
+                f'GROUP BY "{column}" ORDER BY n DESC LIMIT ?',
+                (limit + 1,),
+            ).fetchall()
+        except sqlite3.OperationalError as exc:
+            if "interrupt" not in str(exc).lower():
+                raise
+            return {"error": "Query exceeded the time limit."}
         return {
             "table": table,
             "column": column,
@@ -216,11 +286,12 @@ def schema_for_llm() -> str:
     """
     with connect() as con:
         names = sorted(n for n in analytical_objects(con) if n.startswith(("gold_", "lv_")))
+        counts = row_counts(con)
         lines = []
         for name in names:
             # name is from the sqlite_master allowlist, not caller input.
             cols = [r[1] for r in con.execute(f'PRAGMA table_info("{name}")')]  # noqa: S608
-            count = con.execute(f'SELECT COUNT(*) FROM "{name}"').fetchone()[0]  # noqa: S608
+            count = counts.get(name)
             desc = MART_DESCRIPTIONS.get(name)
             hint = f"  -- {desc}" if desc else ""
             lines.append(f"{name} ({count} rows): {', '.join(cols)}{hint}")
@@ -243,11 +314,7 @@ def run_select(query: str, max_rows: int = 200) -> dict:
     limit = max(1, min(max_rows, 1000))
     try:
         with connect() as con:
-            if QUERY_TIMEOUT_S > 0:
-                # Interrupt (raises OperationalError) once past the deadline; the
-                # handler is polled every ~10k VM ops during execute and fetch.
-                deadline = time.monotonic() + QUERY_TIMEOUT_S
-                con.set_progress_handler(lambda: 1 if time.monotonic() > deadline else 0, 10_000)
+            _set_deadline(con)
             cur = con.execute(stripped)  # read-only connection; writes raise
             rows, size = [], 0
             while len(rows) < limit and (row := cur.fetchone()) is not None:

@@ -164,7 +164,7 @@ Watch the tool-call trace to confirm it's hitting `run_sql` / `generate_chart` /
 | First call is slow / times out | The HF Space was asleep (cold start). Retry; or move the server to always-on hosting (Azure App Service B1) — see REMOTE_MCP.md. |
 | 401 Unauthorized | Bearer token wrong/missing in the connection. It must be `Bearer <token>` in the `Authorization` header. |
 | 421 Invalid Host header | The server's `MCP_ALLOWED_HOSTS` must include the Space host (it does by default via the deploy). |
-| Report link won't open | `/files/*` is unauthenticated by design; if it 404s the Space likely restarted (reports are currently transient — regenerate). |
+| Report link won't open | `/files/*` is unauthenticated by design; if it 404s the link is over 7 days old (`REPORT_TTL_DAYS`) or the Space restarted (reports are transient — regenerate). |
 | Wrong/empty numbers | Usually the model used `gold_line_item` or `MAX(fiscal_year)` — the instructions above steer away from both; make sure they're pasted in full. |
 
 ## Notes & limits

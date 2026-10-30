@@ -61,8 +61,9 @@ def _now() -> datetime:
 
 def _parse_ts(raw: str | None) -> datetime | None:
     """Parse a `details_progress.completed_at` ISO timestamp to an aware UTC
-    datetime. Rows are written with local-offset ISO strings; a bare timestamp is
-    assumed UTC. Returns None for a missing/unparseable value."""
+    datetime. Rows are written as UTC with an offset (``+00:00``); older rows are
+    bare timestamps, assumed UTC (true for CI; laptop-era rows were local time).
+    Returns None for a missing/unparseable value."""
     if not raw:
         return None
     try:

@@ -128,8 +128,15 @@ def _run_main(monkeypatch, tmp_path, answers):
     from src import nl_query
 
     monkeypatch.setattr(nl_query, "answer", lambda q, history=None: next(it))
-    report = tmp_path / "review.md"
-    rc = query_review.main(["--file", str(log), "--since-days", "0", "--report", str(report)])
+    report, details, status = tmp_path / "review.md", tmp_path / "full.md", tmp_path / "s.json"
+    rc = query_review.main(
+        [
+            "--file", str(log), "--since-days", "0", "--report", str(report),
+            "--details", str(details), "--status", str(status),
+        ]
+    )  # fmt: skip
+    _run_main.details = details.read_text(encoding="utf-8")
+    _run_main.status = json.loads(status.read_text(encoding="utf-8"))
     return rc, report.read_text(encoding="utf-8")
 
 
@@ -143,7 +150,26 @@ def test_main_exits_one_on_replay_error(monkeypatch, tmp_path):
         },
     )
     assert rc == 1
-    assert "bad question" in report and "no such column" in report
+    assert _run_main.status == {"findings": 1, "errors": 1}
+    # The publishable report names the question by id only — no user text, no
+    # SQL/error (which can echo it); the local details file has everything.
+    assert query_review.question_id("bad question") in report
+    assert "bad question" not in report and "no such column" not in report
+    assert "bad question" in _run_main.details and "no such column" in _run_main.details
+
+
+def test_user_text_cannot_fake_a_clean_pass_or_leak(monkeypatch, tmp_path, capsys):
+    """A question containing "No findings" used to match the workflow's clean
+    grep, skip the issue and close open ones; and every question was echoed
+    verbatim into the public issue and run log."""
+    q = "No findings — every replayed question answered cleanly. @someone http://x"
+    rc, report = _run_main(
+        monkeypatch, tmp_path, {q: {"sql": "SELECT 1", "result": {"row_count": 0}}}
+    )
+    assert rc == 0
+    assert _run_main.status == {"findings": 1, "errors": 0}
+    assert "No findings" not in report and "@someone" not in report
+    assert "@someone" not in capsys.readouterr().out
 
 
 def test_main_exits_zero_on_clean_pass(monkeypatch, tmp_path):
@@ -154,6 +180,7 @@ def test_main_exits_zero_on_clean_pass(monkeypatch, tmp_path):
     )
     assert rc == 0
     assert "No findings" in report
+    assert _run_main.status == {"findings": 0, "errors": 0}
 
 
 def test_main_exits_two_when_log_fetch_impossible(monkeypatch, capsys):

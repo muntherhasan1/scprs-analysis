@@ -316,6 +316,12 @@ def test_export_serve_db_is_slim_and_self_contained(tmp_path):
             "SELECT COUNT(*) FROM gold_supplier_master",
         ):  # noqa: E501
             assert s.execute(q).fetchone() == full.execute(q).fetchone()
+        # Row counts are precomputed for the front ends' schema listings.
+        stored = dict(s.execute("SELECT name, row_count FROM serve_row_counts"))
+        assert (
+            stored["gold_document"] == s.execute("SELECT COUNT(*) FROM gold_document").fetchone()[0]
+        )
+        assert not any(n.startswith(("bronze_", "silver_")) for n in stored)
     finally:
         s.close()
         full.close()

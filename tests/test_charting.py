@@ -13,6 +13,29 @@ def _is_png(b: bytes) -> bool:
 
 
 @pytest.mark.parametrize("kind", ["bar", "line", "pie"])
+def test_dollar_signs_in_labels_are_literal_text(kind):
+    # Labels are data; a paired "$" was parsed as mathtext — garbled text, or a
+    # ValueError when the "math" between them doesn't parse.
+    rows = [
+        {"supplier": "PAY $5 OR $10 PLAN", "total": 10.0},
+        {"supplier": "A $x^$ B", "total": 5.0},
+    ]
+    assert _is_png(charting.render_chart(_COLS, rows, kind=kind, title="Spend in $ by $upplier"))
+
+
+def test_non_finite_numbers_do_not_crash_formatting_or_charts():
+    inf = float("inf")
+    assert charting._fmt_cell("n", inf) == "inf"
+    assert charting._fmt_cell("total_spend", float("nan")) == "nan"
+    rows = [{"supplier": "A", "total": inf}, {"supplier": "B", "total": 2.0}]
+    report = charting.build_report_html(
+        "t", [{"heading": "h", "narrative": "", "columns": _COLS, "rows": rows}]
+    )
+    assert "inf" in report
+    assert _is_png(charting.render_chart(_COLS, rows, kind="bar", y="total"))
+
+
+@pytest.mark.parametrize("kind", ["bar", "line", "pie"])
 def test_render_chart_returns_png(kind):
     png = charting.render_chart(_COLS, _ROWS, kind=kind, title="T")
     assert _is_png(png) and len(png) > 500

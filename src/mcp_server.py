@@ -45,6 +45,8 @@ allowlist; see `_transport_security` for the DNS-rebinding-guard rationale).
 from __future__ import annotations
 
 import argparse
+import asyncio
+import functools
 import os
 import secrets
 import time
@@ -62,6 +64,29 @@ mcp = FastMCP("scprs-warehouse")
 # capability URL (/files/<unguessable>). Env-overridable so the container can
 # point at a writable dir (the image's WORKDIR is root-owned).
 REPORTS_DIR = Path(os.environ.get("REPORTS_DIR", "reports"))
+# Capability files expire: older ones 404 and are pruned on the next write, so
+# report links stay shareable for a working week without the disk growing forever.
+REPORT_TTL_S = float(os.environ.get("REPORT_TTL_DAYS", "7")) * 86400
+# Each report section is a query of up to QUERY_TIMEOUT_S; cap the fan-out.
+MAX_REPORT_SECTIONS = 12
+
+
+def _in_thread(fn):
+    """Run a blocking tool on a worker thread instead of the event loop.
+
+    FastMCP calls a sync tool inline (``fn(**args)``) on the server's event loop,
+    so one 10s query or a slow report froze every other request — including
+    ``/healthz``. The async wrapper keeps the tool's signature and docstring
+    (FastMCP reads them through ``__wrapped__``); ``asyncio.to_thread`` copies the
+    request's context, so the audit log still sees the caller's principal.
+    """
+
+    @functools.wraps(fn)
+    async def wrapper(*args, **kwargs):
+        return await asyncio.to_thread(fn, *args, **kwargs)
+
+    return wrapper
+
 
 # All query logic lives in the shared, hardened `warehouse_query` module so the
 # read-only guard (SELECT-only, ?mode=ro, allowlisted object names) has exactly
@@ -70,6 +95,7 @@ REPORTS_DIR = Path(os.environ.get("REPORTS_DIR", "reports"))
 
 
 @mcp.tool()
+@_in_thread
 def list_marts() -> list[dict]:
     """List the analytical marts and star-schema tables with row counts + a hint.
 
@@ -85,12 +111,14 @@ def list_marts() -> list[dict]:
 
 
 @mcp.tool()
+@_in_thread
 def describe_table(name: str) -> dict:
     """Return the columns (logical names) and row count for one mart or table."""
     return wq.describe(name)
 
 
 @mcp.tool()
+@_in_thread
 def distinct_values(table: str, column: str, max_values: int = 100) -> dict:
     """List the distinct values (with counts) of one column — the real vocabulary
     of a categorical, so you filter on values that exist instead of guessing.
@@ -106,6 +134,7 @@ def distinct_values(table: str, column: str, max_values: int = 100) -> dict:
 
 
 @mcp.tool()
+@_in_thread
 def data_dictionary() -> list[dict]:
     """Logical↔physical column mapping for the abbreviated gold tables.
 
@@ -118,6 +147,7 @@ def data_dictionary() -> list[dict]:
 
 
 @mcp.tool()
+@_in_thread
 def run_sql(query: str, max_rows: int = 200) -> dict:
     """Run one read-only ``SELECT``/``WITH`` query and return the rows.
 
@@ -136,6 +166,7 @@ def run_sql(query: str, max_rows: int = 200) -> dict:
 
 
 @mcp.tool()
+@_in_thread
 def generate_chart(sql: str, kind: str = "bar", title: str = "", x: str = "", y: str = "") -> dict:
     """Render a chart from one read-only ``SELECT`` and return a link to the PNG.
 
@@ -169,6 +200,7 @@ def generate_chart(sql: str, kind: str = "bar", title: str = "", x: str = "", y:
 
 
 @mcp.tool()
+@_in_thread
 def generate_report(title: str, sections_json: str) -> dict:
     """Build a self-contained HTML executive report and return its URL.
 
@@ -196,6 +228,8 @@ def generate_report(title: str, sections_json: str) -> dict:
         raise ValueError(f"sections_json must be valid JSON: {exc}") from exc
     if not isinstance(sections, list):
         raise ValueError("sections_json must be a JSON array of {heading, sql, narrative, chart}")
+    if len(sections) > MAX_REPORT_SECTIONS:
+        raise ValueError(f"a report takes at most {MAX_REPORT_SECTIONS} sections")
 
     built = []
     section_sqls = []
@@ -269,9 +303,24 @@ def _save_capability_file(data: bytes, suffix: str) -> str:
     charts/reports can be opened inline by a browser or Copilot.
     """
     REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+    _prune_expired_files()
     name = secrets.token_urlsafe(18) + suffix
     (REPORTS_DIR / name).write_bytes(data)
     return f"{_public_base_url()}/files/{name}"
+
+
+def _expired(path: Path) -> bool:
+    return time.time() - path.stat().st_mtime > REPORT_TTL_S
+
+
+def _prune_expired_files() -> None:
+    """Delete capability files past their TTL (best-effort)."""
+    for path in REPORTS_DIR.iterdir():
+        try:
+            if path.is_file() and _expired(path):
+                path.unlink()
+        except OSError:
+            pass  # raced with another writer/reader; next prune retries
 
 
 class BearerAuthMiddleware:
@@ -297,9 +346,18 @@ class BearerAuthMiddleware:
         self._limiter = limiter
 
     async def __call__(self, scope, receive, send) -> None:
-        if scope["type"] != "http":
+        if scope["type"] == "lifespan":  # server startup/shutdown, no client
             await self._app(scope, receive, send)
             return
+        if scope["type"] == "websocket":
+            # No websocket routes today, but one added later must not skip auth.
+            if self._authorize(scope) is None:
+                await send({"type": "websocket.close", "code": 1008})
+                return
+            await self._app(scope, receive, send)
+            return
+        if scope["type"] != "http":
+            return  # unknown scope type: refuse rather than pass through
         path = scope.get("path", "")
         if path == "/healthz":
             await self._respond(send, 200, b"ok")
@@ -307,18 +365,7 @@ class BearerAuthMiddleware:
         if path.startswith("/files/"):
             await self._app(scope, receive, send)  # capability URL — no bearer needed
             return
-        provided = (
-            dict(scope.get("headers") or [])
-            .get(b"authorization", b"")
-            .decode("utf-8", "replace")
-            .strip()
-        )
-        # Accept "Bearer <token>" or a bare "<token>": some connector UIs (e.g.
-        # Copilot Studio's API-key-in-header) send the header value verbatim, so a
-        # user who omits the "Bearer " prefix should still authenticate.
-        if provided[:7].lower() == "bearer ":
-            provided = provided[7:].strip()
-        principal = auth.identify(provided, self._tokens) if provided else None
+        principal = self._authorize(scope)
         if principal is None:
             await self._respond(
                 send, 401, b"unauthorized", extra=[(b"www-authenticate", b"Bearer")]
@@ -330,6 +377,21 @@ class BearerAuthMiddleware:
             return
         auth.current_principal.set(principal)  # flows to the audit log via ContextVar
         await self._app(scope, receive, send)
+
+    def _authorize(self, scope) -> str | None:
+        """The principal for the request's token, or None if it has none/a bad one."""
+        provided = (
+            dict(scope.get("headers") or [])
+            .get(b"authorization", b"")
+            .decode("utf-8", "replace")
+            .strip()
+        )
+        # Accept "Bearer <token>" or a bare "<token>": some connector UIs (e.g.
+        # Copilot Studio's API-key-in-header) send the header value verbatim, so a
+        # user who omits the "Bearer " prefix should still authenticate.
+        if provided[:7].lower() == "bearer ":
+            provided = provided[7:].strip()
+        return auth.identify(provided, self._tokens) if provided else None
 
     @staticmethod
     async def _respond(send, status: int, body: bytes, extra=None) -> None:
@@ -393,7 +455,7 @@ def _serve_file(request):
     if "/" in name or "\\" in name or ".." in name:  # no path traversal
         return PlainTextResponse("bad request", status_code=400)
     path = REPORTS_DIR / name
-    if not path.is_file():
+    if not path.is_file() or _expired(path):
         return PlainTextResponse("not found", status_code=404)
     media = "image/png" if name.endswith(".png") else "text/html"
     return FileResponse(str(path), media_type=media)
