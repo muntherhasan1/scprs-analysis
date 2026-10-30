@@ -542,6 +542,27 @@ def collect_po_details(
     return results
 
 
+def read_export_html(path: Path):
+    """Read a PeopleSoft "Excel" export (really an HTML table) as UTF-8.
+
+    The file carries no charset declaration, so ``pandas.read_html(path)``
+    decoded its UTF-8 bytes as Latin-1: '¿' became 'Â¿' and a trailing
+    non-breaking space survived ``strip()`` as 'Â' — garbling 8 document ids
+    and 11,585 item titles in prod (e.g. 4265 '22-10799Â'). Decode explicitly
+    (cp1252 if a file is ever not valid UTF-8) and turn NBSP into a plain space.
+    """
+    import io
+
+    import pandas as pd
+
+    raw = Path(path).read_bytes()
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        text = raw.decode("cp1252", errors="replace")
+    return pd.read_html(io.StringIO(text.replace("\xa0", " ")))[0]
+
+
 def load_extract(path: Path):
     """Parse a downloaded SCPRS .xls (HTML table) into a tidy DataFrame.
 
@@ -551,7 +572,7 @@ def load_extract(path: Path):
     """
     import pandas as pd
 
-    df = pd.read_html(path)[0]
+    df = read_export_html(path)
     # Strip leading apostrophes the export puts on id-like text columns.
     # (Handle both the legacy object dtype and pandas' newer str dtype.)
     for col in df.columns:
