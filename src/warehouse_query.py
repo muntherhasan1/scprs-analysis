@@ -18,6 +18,7 @@ the scraping stack.
 
 from __future__ import annotations
 
+import math
 import os
 import re
 import sqlite3
@@ -49,12 +50,17 @@ MAX_RESULT_BYTES = 5_000_000
 
 # Row counts for the schema listings. COUNT(*) over every gold view costs ~60s on
 # the serve DB (some marts are aggregate views), so it is paid once: serve-export
-# stores the counts in this table, and anything without it (a local
-# warehouse.db) computes them once per process. Not a gold_/lv_ name, so it never
+# stores the counts in this table, and anything without it (a local warehouse.db,
+# or a serve DB published before the table existed) counts once per process on
+# ONE background thread, each object under the query deadline. Callers wait at
+# most ROW_COUNT_WAIT_S and otherwise get the counts as unknown (None) — they
+# never block a worker for the full count. Not a gold_/lv_ name, so it never
 # appears in the allowlist or the schema shown to a model.
 ROW_COUNTS_TABLE = "serve_row_counts"
+ROW_COUNT_WAIT_S = 2.0
 _row_count_cache: dict[tuple, dict[str, int]] = {}
-_row_count_lock = threading.Lock()
+_row_count_pending: set[tuple] = set()
+_row_count_cond = threading.Condition()
 
 # Curated, human-authored hints surfaced by `list_marts` and `schema_for_llm` so an
 # NL/MCP model picks the right mart *and dimension* instead of guessing (e.g. it must
@@ -132,6 +138,14 @@ def _set_deadline(con: sqlite3.Connection) -> None:
         con.set_progress_handler(lambda: 1 if time.monotonic() > deadline else 0, 10_000)
 
 
+def _json_safe(value):
+    """inf/-inf/nan (e.g. ``SELECT 1e999``) as None: Python's JSON writes them as
+    ``Infinity``/``NaN``, which strict JSON clients (Copilot Studio) reject."""
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
+    return value
+
+
 def _row_bytes(row: sqlite3.Row) -> int:
     return sum(len(v) if isinstance(v, (str, bytes)) else 8 for v in row)
 
@@ -151,13 +165,36 @@ def analytical_objects(con: sqlite3.Connection) -> set[str]:
     return {r[0] for r in rows}
 
 
-def _count_all(con: sqlite3.Connection) -> dict[str, int]:
-    """COUNT(*) of every allowlisted object (slow — see ROW_COUNTS_TABLE)."""
-    # Names come from the sqlite_master allowlist, never the caller.
-    return {
-        name: con.execute(f'SELECT COUNT(*) FROM "{name}"').fetchone()[0]  # noqa: S608
-        for name in sorted(analytical_objects(con))
-    }
+def _count_all(con: sqlite3.Connection, bounded: bool = False) -> dict[str, int]:
+    """COUNT(*) of every allowlisted object (slow — see ROW_COUNTS_TABLE).
+
+    ``bounded`` puts each COUNT under the query deadline and leaves an object that
+    exceeds it out (unknown) — the request-time fallback. serve-export counts
+    unbounded so the stored table is complete.
+    """
+    counts = {}
+    for name in sorted(analytical_objects(con)):
+        if bounded:
+            _set_deadline(con)
+        try:
+            # Names come from the sqlite_master allowlist, never the caller.
+            counts[name] = con.execute(f'SELECT COUNT(*) FROM "{name}"').fetchone()[0]  # noqa: S608
+        except sqlite3.OperationalError as exc:
+            if not bounded or "interrupt" not in str(exc).lower():
+                raise
+    return counts
+
+
+def _count_in_background(key: tuple) -> None:
+    try:
+        with connect() as con:
+            counts = _count_all(con, bounded=True)
+    except sqlite3.Error:
+        counts = {}  # shown as unknown; a replaced DB file gets a fresh key and retry
+    with _row_count_cond:
+        _row_count_cache[key] = counts
+        _row_count_pending.discard(key)
+        _row_count_cond.notify_all()
 
 
 def record_row_counts(db_path: Path) -> int:
@@ -179,23 +216,30 @@ def record_row_counts(db_path: Path) -> int:
 def row_counts(con: sqlite3.Connection) -> dict[str, int]:
     """Row count per allowlisted object: the stored table when serve-export wrote
     one, else counted once per process per DB file (keyed by path, size, mtime so
-    a replaced file is recounted)."""
+    a replaced file is recounted) on a background thread. Objects not counted
+    (yet, or past the deadline) are simply absent — callers show them as unknown."""
     try:
         st = WAREHOUSE_DB.stat()
         key = (str(WAREHOUSE_DB), st.st_size, st.st_mtime_ns)
     except OSError:
         key = (str(WAREHOUSE_DB), None, None)
-    with _row_count_lock:  # one counter at a time; later callers reuse its result
-        if key not in _row_count_cache:
-            stored = con.execute(
-                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (ROW_COUNTS_TABLE,)
-            ).fetchone()
-            if stored:
-                counts = dict(con.execute(f"SELECT name, row_count FROM {ROW_COUNTS_TABLE}"))  # noqa: S608
-            else:
-                counts = _count_all(con)
+    with _row_count_cond:
+        if key in _row_count_cache:
+            return _row_count_cache[key]
+        stored = con.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (ROW_COUNTS_TABLE,)
+        ).fetchone()
+        if stored:
+            counts = dict(con.execute(f"SELECT name, row_count FROM {ROW_COUNTS_TABLE}"))  # noqa: S608
             _row_count_cache[key] = counts
-        return _row_count_cache[key]
+            return counts
+        if key not in _row_count_pending:  # one counter per DB file
+            _row_count_pending.add(key)
+            threading.Thread(
+                target=_count_in_background, args=(key,), name="row-counts", daemon=True
+            ).start()
+        _row_count_cond.wait_for(lambda: key in _row_count_cache, timeout=ROW_COUNT_WAIT_S)
+        return _row_count_cache.get(key, {})
 
 
 def list_marts() -> list[dict]:
@@ -220,7 +264,7 @@ def describe(name: str) -> dict:
             for r in con.execute(f'PRAGMA table_info("{name}")')  # noqa: S608
         ]
         count = row_counts(con).get(name)
-        if count is None:  # gold_data_dictionary isn't in the allowlisted counts
+        if name == "gold_data_dictionary":  # a small table outside the counted allowlist
             count = con.execute(f'SELECT COUNT(*) FROM "{name}"').fetchone()[0]  # noqa: S608
         return {"name": name, "row_count": count, "columns": cols}
 
@@ -291,7 +335,7 @@ def schema_for_llm() -> str:
         for name in names:
             # name is from the sqlite_master allowlist, not caller input.
             cols = [r[1] for r in con.execute(f'PRAGMA table_info("{name}")')]  # noqa: S608
-            count = counts.get(name)
+            count = counts.get(name, "unknown")
             desc = MART_DESCRIPTIONS.get(name)
             hint = f"  -- {desc}" if desc else ""
             lines.append(f"{name} ({count} rows): {', '.join(cols)}{hint}")
@@ -334,7 +378,7 @@ def run_select(query: str, max_rows: int = 200) -> dict:
         return {"error": msg}
     return {
         "columns": cols,
-        "rows": [dict(r) for r in rows],
+        "rows": [{k: _json_safe(v) for k, v in dict(r).items()} for r in rows],
         "row_count": len(rows),
         "truncated": len(rows) == limit,
     }

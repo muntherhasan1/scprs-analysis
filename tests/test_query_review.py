@@ -186,3 +186,15 @@ def test_main_exits_zero_on_clean_pass(monkeypatch, tmp_path):
 def test_main_exits_two_when_log_fetch_impossible(monkeypatch, capsys):
     rc = query_review.main(["--repo", ""])  # no file, no repo
     assert rc == 2
+
+
+def test_question_id_is_keyed_so_a_guess_cannot_be_confirmed(monkeypatch):
+    monkeypatch.delenv("QUERY_REVIEW_ID_KEY", raising=False)
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    unkeyed = query_review.question_id("How much did ACME get?")
+    monkeypatch.setenv("GEMINI_API_KEY", "k1")
+    keyed = query_review.question_id("How much did ACME get?")
+    assert keyed != unkeyed  # hashing the guess alone no longer reproduces the id
+    assert keyed == query_review.question_id("  how much did acme get?  ")  # stable dedupe
+    monkeypatch.setenv("QUERY_REVIEW_ID_KEY", "k2")
+    assert query_review.question_id("How much did ACME get?") not in (keyed, unkeyed)

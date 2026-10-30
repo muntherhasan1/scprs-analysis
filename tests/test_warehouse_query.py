@@ -124,9 +124,9 @@ def test_row_counts_are_computed_once_per_db(tiny_db, monkeypatch):
     calls = []
     real = wq._count_all
 
-    def counting(con):
+    def counting(con, **kw):
         calls.append(1)
-        return real(con)
+        return real(con, **kw)
 
     monkeypatch.setattr(wq, "_count_all", counting)
     wq.schema_for_llm()
@@ -144,7 +144,7 @@ def test_row_counts_prefer_the_stored_table(tiny_db, monkeypatch):
     con.commit()
     con.close()
 
-    def fail(con):
+    def fail(con, **kw):
         pytest.fail("counted at request time")
 
     monkeypatch.setattr(wq, "_count_all", fail)
@@ -152,6 +152,64 @@ def test_row_counts_prefer_the_stored_table(tiny_db, monkeypatch):
     assert "gold_spend (42 rows)" in text
     # The counts table is not an analytical object a model would be shown.
     assert "serve_row_counts" not in text
+
+
+def test_slow_count_fallback_never_blocks_callers(tiny_db, monkeypatch):
+    # 2026-10 review: with no stored counts, the first caller held a global lock
+    # for ~64s while every other schema call waited on it. Now one background
+    # thread counts; callers wait at most ROW_COUNT_WAIT_S and see "unknown".
+    import threading
+    import time
+
+    release, calls = threading.Event(), []
+    real = wq._count_all
+
+    def slow(con, **kw):
+        calls.append(kw)
+        release.wait(5)
+        return real(con, **kw)
+
+    monkeypatch.setattr(wq, "_count_all", slow)
+    monkeypatch.setattr(wq, "ROW_COUNT_WAIT_S", 0.05)
+    texts, t0 = [], time.monotonic()
+    workers = [threading.Thread(target=lambda: texts.append(wq.schema_for_llm())) for _ in range(8)]
+    for w in workers:
+        w.start()
+    for w in workers:
+        w.join(2)
+    assert time.monotonic() - t0 < 1.5  # nobody waited for the count
+    assert len(texts) == 8 and all("gold_spend (unknown rows)" in t for t in texts)
+    assert calls == [{"bounded": True}]  # one bounded counter for the file
+
+    release.set()
+    deadline = time.monotonic() + 3
+    while "(3 rows)" not in wq.schema_for_llm() and time.monotonic() < deadline:
+        time.sleep(0.02)
+    assert "gold_spend (3 rows)" in wq.schema_for_llm()
+    assert wq.describe("gold_spend")["row_count"] == 3
+    assert len(calls) == 1
+
+
+def test_bounded_count_leaves_a_slow_object_unknown(tiny_db, monkeypatch):
+    con = sqlite3.connect(tiny_db)
+    con.execute(
+        "CREATE VIEW gold_slow AS WITH RECURSIVE r(n) AS "
+        "(SELECT 1 UNION ALL SELECT n + 1 FROM r WHERE n < 50000000) SELECT n FROM r"
+    )
+    con.commit()
+    con.close()
+    monkeypatch.setattr(wq, "QUERY_TIMEOUT_S", 0.05)
+    with wq.connect() as con:
+        counts = wq._count_all(con, bounded=True)
+    assert counts == {"gold_spend": 3}  # the slow view is left out, not waited on
+
+
+def test_run_select_returns_strict_json(tiny_db):
+    import json
+
+    out = wq.run_select("SELECT 1e999 AS pos, -1e999 AS neg, 1.5 AS ok")
+    assert out["rows"] == [{"pos": None, "neg": None, "ok": 1.5}]
+    json.dumps(out, allow_nan=False)  # what strict clients (Copilot Studio) require
 
 
 def test_distinct_values_honours_the_time_limit(tiny_db, monkeypatch):

@@ -14,6 +14,8 @@ from __future__ import annotations
 
 import os
 import tempfile
+import time
+from pathlib import Path
 
 import gradio as gr
 
@@ -36,6 +38,12 @@ _EXAMPLES = [
 ]
 
 _MAX_TABLE_ROWS = 20
+
+# Chart PNGs handed to Gradio by path. Kept in one directory and pruned on each
+# write (Gradio copies a file into its own cache when it sends it), so anonymous
+# questions can't grow the Space's disk until a restart.
+_CHART_DIR = Path(tempfile.gettempdir()) / "scprs-web-charts"
+_CHART_TTL_S = 3600
 
 
 def _cell(col: str, v) -> str:
@@ -162,18 +170,35 @@ def _respond(message: str, history):
     text = "\n\n".join(p for p in parts if p)
     if png is None:
         return text
-    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as fh:
-        fh.write(png)
     return [
         gr.ChatMessage(content=text),
-        gr.ChatMessage(content=gr.Image(value=fh.name)),
+        gr.ChatMessage(content=gr.Image(value=_save_chart(png))),
     ]
+
+
+def _save_chart(png: bytes) -> str:
+    """Write a chart PNG for Gradio and delete chart files older than the TTL."""
+    _CHART_DIR.mkdir(parents=True, exist_ok=True)
+    cutoff = time.time() - _CHART_TTL_S
+    for old in _CHART_DIR.glob("*.png"):
+        try:
+            if old.stat().st_mtime < cutoff:
+                old.unlink()
+        except OSError:
+            pass  # raced with another worker; the next write retries
+    with tempfile.NamedTemporaryFile(suffix=".png", dir=_CHART_DIR, delete=False) as fh:
+        fh.write(png)
+    return fh.name
 
 
 def build_demo() -> gr.Blocks:
     """Assemble the Gradio chat UI."""
     marts = len(wq.list_marts())
-    with gr.Blocks(title="SCPRS Warehouse Chat", fill_height=True) as demo:
+    # delete_cache: Gradio's own cached copies of served files (the chart PNGs)
+    # are swept hourly, older than a day.
+    with gr.Blocks(
+        title="SCPRS Warehouse Chat", fill_height=True, delete_cache=(3600, 86400)
+    ) as demo:
         gr.Markdown(_INTRO)
         # Gradio 6 dropped ChatInterface's `type` kwarg — the OpenAI-style
         # "messages" history format (list of {role, content}) is now the default,
