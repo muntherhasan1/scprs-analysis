@@ -176,6 +176,33 @@ _HINTS: dict[str, dict[str, str]] = {
             "The next weekly run retries; dispatch manually after fixing the token."
         ),
     },
+    "HF storage prune": {
+        "_default": (
+            "The weekly dataset-history prune failed. Nothing is lost by a refusal: "
+            "every check runs BEFORE the squash, and an un-pruned dataset just keeps "
+            "growing toward the 1 TB private quota until the next run."
+        ),
+        "Guard -- a recent successful backup exists": (
+            "Refused to squash the operational history: no Operational backup "
+            "succeeded in the last 8 days, and after a squash the dated backups are "
+            "the only older copies of scprs.db. Fix the backup first."
+        ),
+        "Guard -- the last warehouse refresh succeeded": (
+            "Refused to squash the warehouse history: the last Warehouse refresh did "
+            "not succeed, so HEAD may not be a verified-live serve DB (the squashed "
+            "commit becomes rollback's last-good copy). Resolve the refresh first."
+        ),
+        "Prune operational history": (
+            "The squash call or its check failed. If the log says files differ after "
+            "the squash, the squash HAPPENED and changed HEAD -- compare the dataset "
+            "against the latest backup before the next publish."
+        ),
+        "Prune warehouse history": (
+            "The squash call or its check failed. If the log says files differ after "
+            "the squash, the squash HAPPENED -- the next Warehouse refresh republishes "
+            "the serve DB, so trigger one."
+        ),
+    },
     "Ground-truth recon": {
         "_default": (
             "The weekly live-site reconciliation failed. Read-only probe — nothing "

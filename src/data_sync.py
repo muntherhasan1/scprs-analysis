@@ -767,6 +767,116 @@ def rollback_serve_db(repo: str, token: str | None = None) -> str:
     return _upload_db(Path(cached), repo, SERVE_FILENAME, token, f"Rollback serve DB to {prev[:8]}")
 
 
+# --------------------------------------------------------------- storage pruning
+
+# Squash only when the history is at least this long (~3 days of publishes on
+# either dataset), so a weekly prune always has real growth to reclaim.
+PRUNE_MIN_COMMITS = 20
+
+
+class PruneError(RuntimeError):
+    """A history squash was refused, or its result could not be confirmed."""
+
+
+def _tree(api, repo: str, token: str | None, revision: str) -> dict[str, str]:
+    """{path: blob id} of every file at ``revision`` -- the squash must not change it."""
+    return {
+        f.path: f.blob_id
+        for f in api.list_repo_tree(
+            repo, recursive=True, revision=revision, repo_type="dataset", token=token
+        )
+        if getattr(f, "blob_id", None)
+    }
+
+
+def prune_history(
+    repo: str,
+    token: str | None = None,
+    *,
+    apply: bool = False,
+    min_commits: int = PRUNE_MIN_COMMITS,
+    log=print,
+) -> dict:
+    """Reclaim dataset storage by squashing ``main``'s history to ONE commit.
+
+    Why: every publish keeps a full copy of the DB in the dataset's history and
+    nothing ever drops it (2026-10-29: operational 482 GB, warehouse ~208 GB; a PRO
+    account includes 1 TB of private storage). ``super_squash_history`` collapses
+    the branch to a single commit holding exactly the HEAD files; the Hub frees
+    the unreferenced objects (its docs: reflected in the quota within ~36h).
+
+    IRREVERSIBLE -- so this is a dry run (report only) unless ``apply``. Callers
+    must hold the dataset's writer lock (CI concurrency group): the squash takes
+    no parent revision, so the guard here is a HEAD re-check just before it plus a
+    before/after comparison of every file's blob id, which must be identical.
+
+    Rollback: ``rollback_serve_db`` needs an earlier revision holding a different
+    serve DB. After a squash the single commit holds the CURRENT (verified-live)
+    serve DB, and the next publish adds commits on top of it -- so a go-live
+    failure right after still finds that copy. The caller must only squash when
+    HEAD is known good (the workflow checks the last refresh succeeded).
+    """
+    from huggingface_hub import HfApi
+
+    api = HfApi()
+    commits = _with_retries(
+        lambda: api.list_repo_commits(repo, repo_type="dataset", token=token),
+        what=f"commit list of {repo}",
+    )
+    head = commits[0].commit_id
+    info = _with_retries(
+        lambda: api.dataset_info(repo, token=token, expand=["usedStorage"]),
+        what=f"storage lookup of {repo}",
+    )
+    used = getattr(info, "used_storage", None)
+    refs = api.list_repo_refs(repo, repo_type="dataset", token=token)
+    other_refs = [b.ref for b in refs.branches if b.name != "main"] + [
+        r.ref for r in (*refs.converts, *refs.tags)
+    ]
+    report = {
+        "repo": repo,
+        "commits": len(commits),
+        "used_storage_gb": round(used / 1e9, 1) if used is not None else None,
+        "head": head,
+        "other_refs": other_refs,
+    }
+    log(
+        f"{repo}: {len(commits)} commit(s) on main, "
+        f"{report['used_storage_gb']} GB used storage, HEAD {head[:8]}"
+    )
+    if other_refs:
+        # Objects these refs point at stay billed after a squash of main.
+        log(f"  note: other refs keep their own objects: {', '.join(other_refs)}")
+    if len(commits) < min_commits:
+        log(f"  {len(commits)} < {min_commits} commits -- nothing worth squashing")
+        return {**report, "action": "skip"}
+    if not apply:
+        log(f"  DRY RUN: would squash {len(commits)} commits into 1 (re-run with --apply)")
+        return {**report, "action": "dry-run"}
+
+    before = _tree(api, repo, token, head)
+    now = api.dataset_info(repo, token=token).sha
+    if now != head:
+        raise PruneError(f"{repo} HEAD moved {head[:8]} -> {now[:8]} -- a writer is active")
+    api.super_squash_history(
+        repo,
+        branch="main",
+        repo_type="dataset",
+        token=token,
+        commit_message=f"Storage prune: squash {len(commits)} commits (HEAD {head[:8]} files)",
+    )
+    after_commits = api.list_repo_commits(repo, repo_type="dataset", token=token)
+    after = _tree(api, repo, token, after_commits[0].commit_id)
+    if after != before:
+        changed = sorted(set(before.items()) ^ set(after.items()))[:5]
+        raise PruneError(f"{repo}: files differ after the squash: {changed}")
+    log(
+        f"  squashed {len(commits)} -> {len(after_commits)} commit(s); "
+        f"{len(after)} file(s) unchanged. Storage drops within ~36h."
+    )
+    return {**report, "action": "squashed", "commits_after": len(after_commits)}
+
+
 def restart_spaces(
     spaces: tuple[str, ...] = DEFAULT_SPACES, token: str | None = None
 ) -> list[tuple[str, str]]:
@@ -961,6 +1071,20 @@ def _cli() -> None:
     )
     papp.add_argument("--dataset", default=os.environ.get("APP_DATASET"))
     papp.add_argument("--path", default=None, help="app JSON directory (default: data/app)")
+    prn = sub.add_parser(
+        "prune-history",
+        help="Squash a dataset's commit history to reclaim storage (dry run unless --apply; "
+        "IRREVERSIBLE with --apply)",
+    )
+    prn.add_argument("--dataset", required=True)
+    prn.add_argument(
+        "--kind",
+        choices=("operational", "warehouse"),
+        required=True,
+        help="which token to use: the operational writer's or the warehouse publisher's",
+    )
+    prn.add_argument("--min-commits", type=int, default=PRUNE_MIN_COMMITS)
+    prn.add_argument("--apply", action="store_true", help="really squash (default: report only)")
 
     args = ap.parse_args()
 
@@ -1060,6 +1184,9 @@ def _cli() -> None:
             raise SystemExit("set --dataset or the APP_DATASET env var")
         url = publish_app(Path(args.path or APP_DIR), args.dataset, token=_app_token())
         print(f"Published app JSON -> {args.dataset}: {url}")
+    elif args.cmd == "prune-history":
+        tok = _operational_token() if args.kind == "operational" else _publish_token()
+        prune_history(args.dataset, token=tok, apply=args.apply, min_commits=args.min_commits)
 
 
 if __name__ == "__main__":

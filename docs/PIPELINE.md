@@ -58,6 +58,28 @@ Registers a Windows Scheduled Task with **StartWhenAvailable**, so a run missed
 while the machine was off fires as soon as it is next on. The Spaces serve the
 last-published data in between.
 
+## Dataset storage (history pruning)
+
+Every publish is a commit holding a full copy of its DB, and the Hub keeps every
+revision: on 2026-10-29 the operational dataset used **483.4 GB** (638 commits)
+and the warehouse dataset **208.5 GB** (774 commits) — ~690 GB of a PRO account's
+1 TB private quota ([HF storage limits](https://huggingface.co/docs/hub/storage-limits)),
+growing ~7 GB/day. `hf-storage-prune.yml` (weekly, Sunday 08:41 UTC) squashes each
+dataset's `main` to **one** commit holding exactly the HEAD files
+(`python -m src.data_sync prune-history --kind operational|warehouse --dataset <id>`);
+the Hub reflects the freed space within ~36h.
+
+**Irreversible, so report-only by default.** A scheduled run applies only when the
+repo variable `HF_PRUNE_APPLY` is `true`; a manual dispatch applies only with
+`apply` ticked. An applying job holds the dataset's writer lock
+(`scprs-operational-writer` / `warehouse-serve-publisher`), re-checks HEAD right
+before the squash, and fails loudly if any file's blob id differs afterwards. It
+refuses the operational squash without an Operational backup that succeeded in the
+last 8 days (after a squash the dated backups are the only older copies), and the
+warehouse squash unless the last Warehouse refresh succeeded (the squashed commit
+becomes the copy `rollback_serve_db` restores, so it must be verified-live — the
+next publish adds commits on top of it, so rollback still finds it).
+
 ## Config
 
 | Env / var | Where | Purpose |
