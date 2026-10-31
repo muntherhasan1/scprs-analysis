@@ -13,6 +13,7 @@ front end never sums, dedupes or joins. Reads the slim serve DB (run
   insights/overview.json         the dashboard home: headline, trends, mixes, closing soon
   insights/{vector}/{key}.json   a page per acquisition type, size bucket, product category
   search.json                    small index over departments (+ aliases) and the vectors
+  cmas/agreements.json           every CMAS agreement + filter facets (the CMAS tab)
 
 Grain rules (the contract's): documents are current-version (``gold_document``);
 every supplier figure is per CANONICAL supplier computed here from
@@ -36,7 +37,7 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 from . import scprs
-from .warehouse import EPROCURE_DB, SERVE_DB, WAREHOUSE_DB
+from .warehouse import CMAS_DB, EPROCURE_DB, SERVE_DB, WAREHOUSE_DB
 
 APP_DIR = scprs.DATA_DIR / "app"
 SCHEMA_VERSION = 1
@@ -500,6 +501,99 @@ CATEGORIES_CSV = REFERENCES / "product_categories.csv"
 OTHER_CATEGORY = ("other", "Other / unclassified")
 
 
+# CMAS "Business Enterprise Type" -> (small_business, dvbe). "NA" = neither.
+_CMAS_ENTERPRISE = {"SB": (True, False), "DVBE": (False, True), "DVBE and SB": (True, True)}
+
+
+def _cmas_category(code: str) -> str:
+    """A product/service code's family — the text before its first hyphen
+    ("IT CONSULT-SYSTEM MGMT" -> "IT CONSULT"); a code without one is its own."""
+    return code.split("-", 1)[0].strip()
+
+
+def _cmas_brand(code: str) -> str | None:
+    """ "BRAND-CISCO" -> "CISCO": an authorized-brand code, not a product family
+    (700 brands, the single largest "family" if left in the categories)."""
+    head, _, tail = code.partition("-")
+    return tail.strip() or None if head.strip() == "BRAND" else None
+
+
+def _cmas(con, today: str) -> dict | None:
+    """cmas/agreements.json: every CMAS agreement (not just the ones matched to a
+    SCPRS supplier — 70% aren't) plus filter facets, for a searchable tab the
+    front end filters client-side. None when the build had no CMAS side input.
+    Contact name/email and company website are deliberately not selected
+    (public slice, same rule as the supplier shards)."""
+    if not con.execute("SELECT 1 FROM sqlite_master WHERE name = 'gold_cmas_agreement'").fetchone():
+        return None
+    items = []
+    facets = {
+        k: defaultdict(int) for k in ("status", "enterprise_type", "state", "category", "brand")
+    }
+    for r in _rows(
+        con,
+        "SELECT agreement_number, supplier_name, base_schedule_number, base_schedule_holder, "
+        "business_enterprise_type, term_start_date, term_end_date, product_service_codes, "
+        "city, state_or_country, matched_canonical_id, matched_canonical_name "
+        "FROM gold_cmas_agreement ORDER BY supplier_name, agreement_number",
+    ):
+        enterprise = (r["business_enterprise_type"] or "").strip()
+        sb, dvbe = _CMAS_ENTERPRISE.get(enterprise, (False, False))
+        codes = [c.strip() for c in (r["product_service_codes"] or "").split(",") if c.strip()]
+        brands = sorted({b for c in codes if (b := _cmas_brand(c))})
+        categories = sorted({_cmas_category(c) for c in codes if not _cmas_brand(c)})
+        end = r["term_end_date"]
+        status = "active" if end and end >= today else "expired"
+        cid = r["matched_canonical_id"]
+        items.append(
+            {
+                "agreement_number": r["agreement_number"],
+                "supplier_name": r["supplier_name"],
+                "base_schedule_number": r["base_schedule_number"],
+                "base_schedule_holder": r["base_schedule_holder"],
+                "enterprise_type": enterprise if enterprise in _CMAS_ENTERPRISE else None,
+                "small_business": sb,
+                "dvbe": dvbe,
+                "term_start_date": r["term_start_date"],
+                "term_end_date": end,
+                "status": status,
+                "city": r["city"] or None,
+                "state": r["state_or_country"] or None,
+                "product_service_codes": codes,
+                "categories": categories,
+                "brands": brands,
+                # Link to the supplier page (suppliers/shard-{NN}.json) when the
+                # agreement holder also has SCPRS contracts.
+                "supplier": {
+                    "canonical_id": cid,
+                    "canonical_name": r["matched_canonical_name"],
+                    "shard": _shard(cid),
+                }
+                if cid
+                else None,
+            }
+        )
+        facets["status"][status] += 1
+        facets["enterprise_type"][items[-1]["enterprise_type"] or "None"] += 1
+        if items[-1]["state"]:
+            facets["state"][items[-1]["state"]] += 1
+        for c in categories:
+            facets["category"][c] += 1
+        for b in brands:
+            facets["brand"][b] += 1
+    return {
+        "total_count": len(items),
+        "active_count": facets["status"]["active"],
+        "matched_to_supplier_count": sum(1 for i in items if i["supplier"]),
+        # Facet values with counts, most common first, for the filter controls.
+        "facets": {
+            k: [{"value": v, "count": n} for v, n in sorted(f.items(), key=lambda x: (-x[1], x[0]))]
+            for k, f in facets.items()
+        },
+        "items": items,
+    }
+
+
 def _slug(text: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")
 
@@ -821,6 +915,7 @@ def export_app(
     app_dir: Path = APP_DIR,
     wh_path: Path = WAREHOUSE_DB,
     eprocure_path: Path = EPROCURE_DB,
+    cmas_path: Path = CMAS_DB,
     today: str | None = None,
     log=print,
 ) -> dict[str, int]:
@@ -846,6 +941,7 @@ def export_app(
         overview, insight_pages, search = _insights(
             con, flags, dept_index, sup_index, opps, today, load_categories()
         )
+        cmas = _cmas(con, today)
         cov = con.execute(
             "SELECT COUNT(*), SUM(grand_total), MIN(start_date), MAX(start_date), "
             "SUM(line_count > 0) FROM gold_document"
@@ -874,7 +970,11 @@ def export_app(
             _optional_scalar(eprocure_path, "SELECT MAX(extracted_at) FROM extract_meta") or ""
         )[:10]
         or None,
-        "cmas_as_of": None,  # cmas.db records no extraction timestamp
+        # Stamped by `src.cmas extract` since 2026-10-31; null for an older store.
+        "cmas_as_of": (
+            _optional_scalar(cmas_path, "SELECT MAX(extracted_at) FROM extract_meta") or ""
+        )[:10]
+        or None,
         "coverage": {
             "departments_loaded": len(loaded),
             "departments_total": len(dept_index),
@@ -909,6 +1009,8 @@ def export_app(
         for key, page in pages.items():
             _write(staging / "insights" / vector / f"{key}.json", page, generated_at)
     sizes["search"] = _write(staging / "search.json", {"items": search}, generated_at)
+    if cmas is not None:
+        sizes["cmas"] = _write(staging / "cmas" / "agreements.json", cmas, generated_at)
     shutil.rmtree(app_dir, ignore_errors=True)
     staging.rename(app_dir)
 
@@ -922,6 +1024,8 @@ def export_app(
         "suppliers_index_bytes": sizes["suppliers_index"],
         "insight_pages": sum(len(p) for p in insight_pages.values()),
         "search_bytes": sizes["search"],
+        "cmas_agreements": cmas["total_count"] if cmas else 0,
+        "cmas_bytes": sizes.get("cmas", 0),
     }
     log(f"app-export: {app_dir} {counts}")
     return counts
