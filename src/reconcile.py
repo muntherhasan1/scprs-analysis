@@ -31,6 +31,7 @@ reports by END year like the warehouse (2024 = the same year).
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import re
 import sqlite3
@@ -76,6 +77,17 @@ PAYEE_EXCLUSIONS = {
 }
 R2_TOP = 50
 R2_TOLERANCE = 1.10
+
+REFERENCES = Path(__file__).resolve().parent.parent / "references"
+# Deferred FI$Cal agencies (State Auditor Report 2025-039): their payments run through their own
+# systems and SCO's legacy system, which reach Open FI$Cal without vendor names, so R1/R2 cannot
+# run. The label switches off by itself once a unit's vendor files appear.
+FISCAL_DEFERRED_CSV = REFERENCES / "fiscal_deferred.csv"
+# Budget Act actual expenditures (all funds) by unit and fiscal year (end-year label), each row
+# with its source; the R3 envelope.
+BUDGET_ACTUALS_CSV = REFERENCES / "budget_actuals.csv"
+NOT_ON_FISCAL = "not on FI$Cal: vendor payments not published"
+NO_FILES = "no FI$Cal vendor files found"
 
 # Exception mechanisms: why a payee may be paid above its recorded award (or with no award)
 # for reasons that are NOT a procurement anomaly. They LABEL exceptions; they never remove a
@@ -355,6 +367,75 @@ def reconcile(
     }
 
 
+def load_fiscal_deferred(path: Path = FISCAL_DEFERRED_CSV) -> dict[str, dict]:
+    """business_unit -> {department_name, status, expected_completion, source}."""
+    with open(path, encoding="utf-8", newline="") as f:
+        return {r["business_unit"]: r for r in csv.DictReader(f)}
+
+
+def load_budget_actuals(path: Path = BUDGET_ACTUALS_CSV) -> dict[str, dict[int, dict]]:
+    """business_unit -> {fiscal year (end-year label) -> row}; amounts in thousands."""
+    out: dict[str, dict[int, dict]] = defaultdict(dict)
+    with open(path, encoding="utf-8", newline="") as f:
+        for r in csv.DictReader(f):
+            out[r["business_unit"]][int(r["fiscal_year"])] = r
+    return dict(out)
+
+
+def budget_envelope(annualized_by_fy: dict[int, float], actuals: dict[int, dict]) -> list[dict]:
+    """R3: annualized contract value vs Budget Act actual total expenditures, per fiscal year
+    with an actual. A year passes when contract value fits inside the whole budget."""
+    rows = []
+    for fy, row in sorted(actuals.items()):
+        if not row.get("total_k"):
+            continue
+        budget = float(row["total_k"]) * 1000
+        contracts_value = annualized_by_fy.get(fy, 0.0)
+        rows.append(
+            {
+                "fiscal_year": fy,
+                "annualized_contract_value": contracts_value,
+                "budget_actual_total": budget,
+                "ratio": contracts_value / budget if budget else None,
+                "within_budget": contracts_value <= budget,
+                "source": row.get("source_url"),
+            }
+        )
+    return rows
+
+
+def reconcile_unit(
+    business_unit: str,
+    fiscal_paths: list[Path],
+    all_contracts: list[dict],
+    deferred: dict[str, dict],
+    actuals: dict[str, dict[int, dict]],
+    award_from: str | None = None,
+    award_to: str = "2025-06-30",
+) -> dict:
+    """Everything this module can say about one unit: the payment tests when its FI$Cal vendor
+    files exist, otherwise a status that says why not; R3 whenever budget actuals exist."""
+    mine = [c for c in all_contracts if c["business_unit"] == business_unit]
+    envelope = budget_envelope(annualized(mine), actuals.get(business_unit, {}))
+    if fiscal_paths:
+        out = reconcile(
+            business_unit, load_payments(fiscal_paths), all_contracts, award_from, award_to
+        )
+        out["status"] = "reconciled"
+    elif business_unit in deferred:
+        d = deferred[business_unit]
+        out = {
+            "business_unit": business_unit,
+            "status": NOT_ON_FISCAL,
+            "fiscal_onboarding": {k: d[k] for k in ("status", "expected_completion", "source")},
+        }
+    else:
+        out = {"business_unit": business_unit, "status": NO_FILES}
+    out["R3"] = envelope
+    out["R3_pass"] = all(r["within_budget"] for r in envelope) if envelope else None
+    return out
+
+
 def _cli() -> None:
     ap = argparse.ArgumentParser(
         description="Reconcile SCPRS contracts against Open FI$Cal payments."
@@ -389,6 +470,7 @@ def _cli() -> None:
         everything = contracts(con)
     finally:
         con.close()
+    deferred, actuals = load_fiscal_deferred(), load_budget_actuals()
     out = {}
     for bu in args.bu:
         paths = sorted(
@@ -396,12 +478,17 @@ def _cli() -> None:
             for p in args.fiscal_dir.glob(f"Vendor_{bu}_*_FY*.csv")
             if int(p.stem.rsplit("FY", 1)[1]) + 2000 in args.years
         )
-        out[bu] = reconcile(bu, load_payments(paths), everything, args.award_from, args.award_to)
-        r = out[bu]
+        out[bu] = r = reconcile_unit(
+            bu, paths, everything, deferred, actuals, args.award_from, args.award_to
+        )
+        r3 = {True: "pass", False: "FAIL", None: "no budget actuals"}[r["R3_pass"]]
+        if r["status"] != "reconciled":
+            print(f"{bu}: {r['status']}  |  R3 {r3}")
+            continue
         print(
             f"{bu}: R1 dept {r['R1_department']:.1%}  any dept {r['R1_any_department']:.1%}  "
             f"R2 {r['R2']:.1%}  unexplained {r['exceptions']['unexplained_share']:.1%} of $  "
-            f"(award window {r['award_window'][0]}..{r['award_window'][1]})"
+            f"R3 {r3}  (award window {r['award_window'][0]}..{r['award_window'][1]})"
         )
     if args.out:
         args.out.write_text(json.dumps(out, indent=1, default=str), encoding="utf-8")

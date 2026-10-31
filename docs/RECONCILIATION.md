@@ -63,3 +63,22 @@ aliased (DynCorp → Amentum, $45.6M at CAL FIRE).
 First run (2026-10-31, CAL FIRE / Social Services / PUC, FY2022-23..2024-25, $4.14B in scope):
 91.6% of dollars within award, 4.0% local agency reimbursement, 1.6% other labeled mechanisms,
 2.7% unexplained (about 1.6% once DynCorp is aliased).
+
+## Departments not on FI$Cal, and the budget envelope (R3)
+
+Deferred FI$Cal agencies (`references/fiscal_deferred.csv`, from State Auditor Report 2025-039)
+process payments in their own systems and SCO's legacy system, which reach Open FI$Cal without
+vendor names — and SCO publishes no state-agency vendor payments. For them `reconcile_unit`
+reports status `not on FI$Cal: vendor payments not published` instead of R1/R2; the label stops
+applying by itself once their vendor files appear. A unit with no files that is **not** on that
+list reports `no FI$Cal vendor files found` — a download problem, never excused.
+
+R3 runs for every unit with Budget Act actuals (`references/budget_actuals.csv`: the actual
+column of the Enacted Budget Detail two editions later, all funds, $ thousands, each row with its
+ebudget.ca.gov source; the PDF folder is the agency area, e.g. `2500` for Caltrans and DMV,
+`5210` for Corrections, `4000` for Social Services). A year passes when contract value spread by
+day over each term fits inside total expenditures. Caltrans' total includes $5.7–7.2B a year of
+capital outlay and Water Resources' OE&E is not a procurement proxy (2023-24 printed negative),
+so R3 is an envelope, not a tie-out.
+
+`app_export` reports the same split in `meta.coverage.payments_reconcilable` and the coverage note.

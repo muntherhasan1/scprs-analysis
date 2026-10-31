@@ -286,3 +286,70 @@ def test_exceptions_are_labeled_without_changing_r1_or_r2(tmp_path):
     # Labels don't touch the tests: R2 counts only ACME within award, as before.
     assert r["R2"] == pytest.approx(100 / 250)
     assert r["R1_department"] == pytest.approx(190 / 250)  # ACME, ANAHEIM, BIG
+
+
+DEFERRED = {
+    "2660": {
+        "department_name": "Department of Transportation",
+        "status": "onboarding in progress",
+        "expected_completion": "2028-07",
+        "source": "State Auditor Report 2025-039",
+    }
+}
+
+
+def test_budget_envelope_passes_only_inside_the_budget():
+    actuals = {
+        2024: {"total_k": "1000", "source_url": "u"},  # $1.0M
+        2025: {"total_k": "500", "source_url": "u"},  # $0.5M
+        2026: {"total_k": "", "source_url": "u"},  # no figure: skipped, not failed
+    }
+    rows = reconcile.budget_envelope({2024: 800_000.0, 2025: 600_000.0}, actuals)
+    assert [(r["fiscal_year"], r["within_budget"]) for r in rows] == [(2024, True), (2025, False)]
+    assert rows[0]["ratio"] == pytest.approx(0.8)
+
+
+def test_unit_not_on_fiscal_is_labeled_and_still_gets_r3(tmp_path):
+    """A deferred FI$Cal agency has no vendor files: no R1/R2, a status saying why, and the
+    budget-envelope check still runs from its Budget Act actuals."""
+    con = _store(
+        tmp_path / "s.db",
+        [
+            ("2660", "T1", "1", "2023-07-01", "2024-06-30", 900_000.0, "ROAD CO"),
+        ],
+    )
+    actuals = {"2660": {2024: {"total_k": "1000", "source_url": "https://ebudget.ca.gov/x"}}}
+    r = reconcile.reconcile_unit("2660", [], reconcile.contracts(con), DEFERRED, actuals)
+    assert r["status"] == reconcile.NOT_ON_FISCAL
+    assert r["fiscal_onboarding"]["expected_completion"] == "2028-07"
+    assert "R1_department" not in r and "R2" not in r
+    assert r["R3_pass"] is True and r["R3"][0]["annualized_contract_value"] == pytest.approx(
+        900_000
+    )
+
+
+def test_unit_missing_files_but_not_deferred_is_flagged_not_excused(tmp_path):
+    con = _store(tmp_path / "s.db", [("3540", "A", "1", "2023-08-01", None, 1.0, "ACME")])
+    r = reconcile.reconcile_unit("3540", [], reconcile.contracts(con), DEFERRED, {})
+    assert r["status"] == reconcile.NO_FILES
+    assert r["R3"] == [] and r["R3_pass"] is None  # no actuals: unknown, never a pass
+
+
+def test_reconciled_unit_carries_status_and_r3(tmp_path):
+    path = _fiscal_csv(tmp_path / "Vendor_5180_DSS_FY23.csv", [("ACME", "5340580", OPS, SO, "10")])
+    con = _store(tmp_path / "s.db", [("5180", "A", "1", "2023-08-01", None, 20.0, "ACME")])
+    actuals = {"5180": {2024: {"total_k": "1", "source_url": "u"}}}
+    r = reconcile.reconcile_unit("5180", [path], reconcile.contracts(con), DEFERRED, actuals)
+    assert r["status"] == "reconciled" and r["R2"] == 1.0 and r["R3_pass"] is True
+
+
+def test_reference_files_are_well_formed():
+    deferred = reconcile.load_fiscal_deferred()
+    assert {"2660", "0820", "5225", "3860", "2740"} <= set(deferred)
+    assert all(d["source"] and d["expected_completion"] for d in deferred.values())
+    for bu, years in reconcile.load_budget_actuals().items():
+        for fy, row in years.items():
+            assert 2016 <= fy <= 2030, (bu, fy)
+            assert row["source_url"].startswith("https://ebudget.ca.gov/"), (bu, fy)
+            if row["total_k"]:
+                assert int(row["total_k"]) > 0 and int(row["state_operations_k"]) >= 0
