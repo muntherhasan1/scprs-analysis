@@ -12,6 +12,7 @@ on:
       - "Warehouse refresh (Wave 2c)"
       - "CMAS refresh (Wave 2)"
       - "eProcure registry refresh"
+      - "eProcure solicitations refresh"
       - "Deploy MCP Space"
       - "MCP image"
       - "CI"
