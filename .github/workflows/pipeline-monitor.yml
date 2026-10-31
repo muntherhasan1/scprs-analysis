@@ -141,6 +141,7 @@ jobs:
       # CMAS 37 6 * * * fired 11:34-13:40 UTC, eProcure 53 4 * * 2 fired
       # 09:07-12:12, backup 29 5 * * 0 fired 09:31-11:29 — i.e. 4-7h late).
       #   CMAS (daily):  two missed days 48h + 8h lateness + 1h run   = 57h
+      #   eProcure solicitations (daily): same basis as CMAS          = 57h
       #   weekly ones:   one missed week 168h + 8h lateness + 4h run  = 180h
       # A weekly job pages on ONE missed slot: two would mean three weeks blind.
       - name: Check last successful rare-writer runs
@@ -164,6 +165,7 @@ jobs:
           done <<'EOF'
           CMAS refresh (Wave 2)|57|CMAS agreements are not being refreshed
           eProcure registry refresh|180|SB/DVBE certifications and solicitations are going stale
+          eProcure solicitations refresh|57|the vendor app's open solicitations are going stale
           Operational backup|180|the operational store has no fresh cold backup
           EOF
           if [ -n "$findings" ]; then

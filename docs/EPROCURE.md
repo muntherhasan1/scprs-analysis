@@ -84,6 +84,16 @@ extracts and publishes `eprocure.db` to the private operational dataset via
 Failures open a triage issue (`src/triage.py` hints under
 "eProcure registry refresh").
 
+**Daily Posted refresh.** `.github/workflows/eprocure-solicitations.yml` keeps
+the vendor app's open solicitations current between weekly runs. It fetches the
+*published* `eprocure.db` (fail-closed: a fresh runner has no store, and a
+Posted-only file would wipe the registry), runs `extract-events --posted-only`,
+and publishes only if (a) the registry and every Historical slice are
+byte-identical to the fetched store and (b) Posted holds ≥ 50% of the previous
+Posted count (open solicitations churn daily, so the 90% floor would
+false-alarm). The next warehouse refresh carries it into `opportunities.json`.
+The pipeline monitor alerts if it hasn't succeeded in 57h.
+
 ## Warehouse fold
 
 **Shipped.** The warehouse ingests `data/eprocure.db` as an optional side input
@@ -118,6 +128,7 @@ non-goal until something needs it.
 python -m src.eprocure extract-events                    # Posted + recent years
 python -m src.eprocure extract-events --years 2023 2024  # explicit years
 python -m src.eprocure extract-events --budget-minutes 35
+python -m src.eprocure extract-events --posted-only      # Posted only (daily job)
 ```
 
 Mechanism (recon 2026-07-24) — the overlay, not the PeopleSoft host:
