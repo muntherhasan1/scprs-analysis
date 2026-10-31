@@ -3,6 +3,8 @@
 import re
 from pathlib import Path
 
+import pytest
+
 from src import scprs
 
 
@@ -132,15 +134,40 @@ def test_download_range_splits_on_row_cap_without_dialog(monkeypatch):
 
 
 def test_truncation_comes_from_the_grid_banner_not_page_text():
-    """BU 3790, 2026-10: a 10-row day whose grid shows a title containing
-    "65000" ("S24650003 - BULK FUEL") was read as capped, so every refresh of
-    the unit was refused. Only the banner total, or a warning the download
-    dialog itself adds, may flag truncation."""
-    grid = "1 to 10 of 10\nS24650003 - BULK FUEL- UNLEADED GASOLINE"
-    assert scprs._grid_total(grid) == 10
+    """BU 3790, 2026-10: grid text containing "65000"/"65,000" (a contract
+    title, a dollar amount) was read as capped, so every refresh of the unit
+    was refused. Only the banner total may flag truncation."""
+    grid = "1 to 22 of 22\nS24650003 - BULK FUEL\n$65,000.00"
+    assert scprs._grid_total(grid) == 22
     assert scprs._grid_total("1 to 200 of 70,123") == 70123
     assert scprs._grid_total("No banner here") is None
-    # The same text before and after the dialog: no new warning -> not truncated.
-    assert not scprs._dialog_warns_truncation(grid, grid + "\nOK")
-    # The dialog adds a cap warning -> truncated.
-    assert scprs._dialog_warns_truncation(grid, grid + "\nResult exceeds 65,000 row limit")
+
+
+class _SlowGrid:
+    """Fake page whose results render only after `ready_after` polls."""
+
+    def __init__(self, ready_after: int, text: str):
+        self.polls, self.ready_after, self.text = 0, ready_after, text
+
+    def wait_for_timeout(self, _ms):
+        self.polls += 1
+
+    def inner_text(self, _sel):
+        # The pre-result page: no banner, but a stray "65,000" must not matter.
+        return self.text if self.polls >= self.ready_after else "Search Criteria 65,000"
+
+
+def test_wait_for_results_polls_until_the_banner_renders():
+    """CI runners render the grid after the old fixed 6s sleep; the wait must
+    poll past the pre-result page instead of snapshotting it."""
+    page = _SlowGrid(9, "1 to 22 of 22\n$65,000.00")
+    assert scprs._grid_total(scprs._wait_for_results(page, 60_000)) == 22
+    assert page.polls == 9
+    assert "No Records Found" in scprs._wait_for_results(_SlowGrid(2, "No Records Found"), 60_000)
+
+
+def test_wait_for_results_times_out_instead_of_guessing():
+    """No banner ever: raise ExtractTimeout (download_range bisects on it)
+    rather than guess the size from page text."""
+    with pytest.raises(scprs.ExtractTimeout):
+        scprs._wait_for_results(_SlowGrid(10**9, ""), 5_000)

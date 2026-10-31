@@ -98,16 +98,23 @@ def _grid_total(text: str) -> int | None:
     return int(m.group(3).replace(",", "")) if m else None
 
 
-_TRUNCATION_WORDS = ("exceeds excel", "row limit", f"{ROW_CAP:,}", str(ROW_CAP))
-
-
-def _dialog_warns_truncation(before: str, after: str) -> bool:
-    """Fallback when the banner is missing: a truncation keyword that the
-    download dialog ADDED to the page. Matching the whole page instead flagged
-    BU 3790's 10-row day as capped because a contract title read
-    "S24650003 - BULK FUEL" (2026-10: every refresh of 3790 was refused)."""
-    b, a = before.lower(), after.lower()
-    return any(a.count(k) > b.count(k) for k in _TRUNCATION_WORDS)
+def _wait_for_results(page, timeout_ms: int) -> str:
+    """Poll after Search until the grid banner or "No Records Found" renders;
+    return the page text. The search round-trip takes 4-6s locally and longer
+    on CI runners, so a fixed sleep snapshotted the pre-result page, found no
+    banner, and fell back to keyword-matching truncation — which a "$65,000"
+    contract amount satisfied once the grid loaded behind the download dialog.
+    BU 3790's whole 7-year window (26K rows) read as over the cap and every
+    refresh was refused (2026-10). Raises ExtractTimeout if neither appears, so
+    download_range bisects and a single day fails loudly instead of guessing."""
+    waited = 0
+    while waited < timeout_ms:
+        page.wait_for_timeout(1000)
+        waited += 1000
+        text = page.inner_text("body")
+        if "No Records Found" in text or _grid_total(text) is not None:
+            return text
+    raise ExtractTimeout(f"results grid showed no row-count banner within {timeout_ms // 1000}s")
 
 
 def download_extract(
@@ -143,25 +150,20 @@ def download_extract(
                     "return unfiltered data."
                 )
             page.click(_SEARCH)
-            page.wait_for_timeout(6000)
 
-            grid = page.inner_text("body")
+            grid = _wait_for_results(page, timeout_ms)
             if "No Records Found" in grid:
                 return Extract(business_unit, from_date, to_date, None, False, True)
             # The grid banner ("1 to 200 of 70,123") is the authoritative size.
-            total = _grid_total(grid)
-
-            truncated = total is not None and total > ROW_CAP
+            truncated = _grid_total(grid) > ROW_CAP
             with page.expect_download(timeout=timeout_ms) as dl_info:
                 page.click(_DL_SUMMARY)
                 page.wait_for_timeout(2500)
-                # A confirmation dialog appears for every download; it must be
-                # accepted or the file is never generated. When the result set
-                # exceeds the row cap the dialog also warns about truncation.
+                # A confirmation dialog ("Download may take a few minutes to
+                # complete. Do you want to proceed?") appears for every
+                # download; it must be accepted or the file is never generated.
                 ok = page.locator(_MODAL_OK)
                 if ok.count() and ok.is_visible():
-                    if total is None and _dialog_warns_truncation(grid, page.inner_text("body")):
-                        truncated = True
                     ok.click()
             dl = dl_info.value
             dest = (
