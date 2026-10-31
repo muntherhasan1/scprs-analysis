@@ -335,3 +335,49 @@ def test_no_cmas_store_means_no_cmas_file(tmp_path):
     out, counts = _build(tmp_path)
     assert _load(out / "meta.json")["cmas_as_of"] is None
     assert counts["cmas_agreements"] == 0
+
+
+def test_explore_cube_ties_to_gold_and_lists_large_contracts(tmp_path):
+    """explore/cube.json sums to gold_document (FY2021-22 on) to the cent; contracts of
+    EXPLORE_LIST_MIN or more are listed per department with their award family and class."""
+    out, counts = _build(
+        tmp_path,
+        extra_purchases=[("BIG", "2023-08-01", 250_000.0), ("SMALL", "2023-09-01", 5_000.0)],
+    )
+    cube = _load(out / "explore" / "cube.json")
+    col = cube["columns"]
+    con = sqlite3.connect(tmp_path / "warehouse-serve.db")
+    n, v = con.execute(
+        "SELECT COUNT(*), SUM(grand_total) FROM gold_document WHERE fiscal_year >= ?",
+        (app_export.EXPLORE_FROM_FY,),
+    ).fetchone()
+    assert (sum(col["count"]), round(sum(col["value"]), 2)) == (n, round(v, 2)) == (2, 255_000.0)
+    assert len({len(c) for c in col.values()}) == 1  # columnar arrays line up
+    fam = cube["dimensions"]["family"][col["family"][0]]
+    assert (fam["label"], fam["award_class"]) == ("Formal competitive", "C")
+    items = _load(out / "explore" / "contracts" / "8660.json")["items"]
+    assert [i["purchase_document"] for i in items] == ["BIG"]  # SMALL is counted, not listed
+    assert items[0]["scm_code"] == "002" and items[0]["flag"] is None
+    assert counts["unmapped_award_methods"] == 0
+    meta = _load(out / "meta.json")
+    assert meta["explore"]["beta"] is True and "not payments" in meta["coverage"]["note"]
+
+    # A reviewed outlier's override moves it to class X under its own family.
+    flags = {("8660", "BIG"): {"award_class": "X", "flag": "pass-through", "note": "n"}}
+    con.row_factory = None
+    dept_index = _load(out / "departments" / "index.json")["items"]
+    methods = app_export.load_award_methods()
+    cube2, contracts, cov = app_export._explore(con, dept_index, methods, flags)
+    big = contracts["8660"][0]
+    assert cube2["dimensions"]["family"][big["family"]]["award_class"] == "X"
+    assert big["flag"]["flag"] == "pass-through" and cov["non_procurement_value"] == 250_000.0
+
+
+def test_award_methods_reference_is_well_formed():
+    """Every governed mapping row has a known class and a 3-digit SCM code (or none)."""
+    rows = app_export.load_award_methods()
+    assert rows["Fair and Reasonable - COMPETITIVE"]["award_class"] == "N"  # SCM 15-01 code 012
+    assert rows["CMAS (requires offers)"]["award_class"] == "L"
+    for method, r in rows.items():
+        assert r["award_class"] in app_export.AWARD_CLASSES, method
+        assert r["scm_code"] == "" or (len(r["scm_code"]) == 3 and r["scm_code"].isdigit()), method

@@ -13,7 +13,7 @@ python -m src.app_export --today 2026-07-25   # pin "open" solicitations to a sn
 
 | File | Contents |
 | --- | --- |
-| `meta.json` | freshness dates (`contracts_as_of`, `opportunities_as_of`, …) and coverage counts the UI shows beside totals |
+| `meta.json` | freshness dates (`contracts_as_of`, `opportunities_as_of`, …) and coverage counts the UI shows beside totals; `coverage.note` (one sentence to show beside every total), `coverage.non_procurement_value` (class X, FY2021-22 on), `explore.beta` |
 | `opportunities.json` | posted solicitations closing on/after the export date, soonest first |
 | `departments/index.json` | one row per business unit, loaded first by value |
 | `departments/{bu}.json` | spend by fiscal year, acquisition mix, top canonical suppliers, canonical HHI, solicitation history, open solicitations |
@@ -23,6 +23,8 @@ python -m src.app_export --today 2026-07-25   # pin "open" solicitations to a sn
 | `insights/{acquisition,size,category}/{key}.json` | one page per vector value: totals, trend, top departments and suppliers, concentration, plus a cross-mix (size mix, acquisition mix, or top UNSPSC commodities) |
 | `search.json` | small index (~60 KB) over departments (with aliases) and every vector value; suppliers stay in the lazy `suppliers/index.json` |
 | `cmas/agreements.json` | the CMAS tab: every CMAS agreement (~2,500, ~1.8 MB — lazy-load on the tab), each with derived `status` (active/expired vs the export date), `enterprise_type` + `small_business`/`dvbe`, `product_service_codes`, code-family `categories`, authorized `brands` (from `BRAND-*` codes), city/state, and a `supplier` link (`canonical_id`, `shard`) when the holder also has SCPRS contracts (~40%); `facets` gives value/count lists for status, enterprise type, state, category and brand. Filtering and search are client-side. Contact name/email and company website are excluded (public slice). Absent when the build had no `cmas.db`. `meta.cmas_as_of` is the extraction date (null for a store extracted before 2026-10-31). |
+| `explore/cube.json` | **Explore (beta)**: a columnar cross-filter cube from FY2021-22 — one row per fiscal year × department × acquisition type × size band × award family (`columns.*` arrays line up by index; `count`, `value` in dollars), with `dimensions` holding the labels. Each family carries its `award_class`: C competitive, L leveraged agreement, N non-competitive, X not procurement (interagency, subvention, leases, reviewed pass-throughs), U unknown — from the governed `references/award_methods.csv` (SCM code lists 14-01/15-01/16-01). The page excludes X from totals by default. ~460 KB. |
+| `explore/contracts/{bu}.json` | Explore's contract list for one loaded department: every contract of $100K or more (`contracts_listed_from`), largest first, with `title` (SCPRS first-item title), canonical company + `shard` (link to the supplier page), value, start date, fiscal year, acquisition type, raw `award_method`, `scm_code`, `family` (index into the cube's families), status, `line_count`, and `flag` for reviewed outliers (`references/contract_flags.csv`). Load only for departments in view; up to ~4 MB. |
 
 Insight vectors:
 
