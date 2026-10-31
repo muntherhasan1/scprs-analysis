@@ -37,6 +37,7 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 from . import scprs
+from .reconcile import load_fiscal_deferred
 from .warehouse import CMAS_DB, EPROCURE_DB, SERVE_DB, WAREHOUSE_DB
 
 APP_DIR = scprs.DATA_DIR / "app"
@@ -665,6 +666,28 @@ def load_contract_flags(path: Path = CONTRACT_FLAGS_CSV) -> dict[tuple[str, str]
         return {(r["business_unit"], r["purchase_document"]): r for r in csv.DictReader(f)}
 
 
+def payments_coverage(value_by_bu: dict[str, float], deferred: dict[str, dict]) -> dict:
+    """Which loaded departments' payments Open FI$Cal can check. Deferred FI$Cal agencies
+    (references/fiscal_deferred.csv) publish no vendor-level payments until they onboard."""
+    total = sum(value_by_bu.values())
+    out = sorted(bu for bu in value_by_bu if bu in deferred)
+    checkable = [bu for bu in value_by_bu if bu not in deferred]
+    share = sum(value_by_bu[bu] for bu in checkable) / total if total else None
+    return {
+        "departments_checkable": len(checkable),
+        "departments_loaded": len(value_by_bu),
+        "value_share_checkable": share,
+        "not_on_fiscal": [
+            {
+                "business_unit": bu,
+                "department_name": deferred[bu]["department_name"],
+                "expected_completion": deferred[bu]["expected_completion"],
+            }
+            for bu in out
+        ],
+    }
+
+
 def _explore(con, dept_index: list[dict], methods: dict, flags: dict) -> tuple[dict, dict, dict]:
     """explore/cube.json + explore/contracts/{bu}.json for the Explore page (beta).
 
@@ -1095,6 +1118,15 @@ def export_app(
         explore, explore_contracts, explore_cov = _explore(
             con, dept_index, load_award_methods(), load_contract_flags()
         )
+        value_by_bu = {
+            bu: v or 0.0
+            for bu, v in con.execute(
+                "SELECT business_unit, SUM(grand_total) FROM gold_document "
+                "WHERE fiscal_year >= ? GROUP BY business_unit",
+                (EXPLORE_FROM_FY,),
+            )
+        }
+        pay_cov = payments_coverage(value_by_bu, load_fiscal_deferred())
         cov = con.execute(
             "SELECT COUNT(*), SUM(grand_total), MIN(start_date), MAX(start_date), "
             "SUM(line_count > 0) FROM gold_document"
@@ -1144,9 +1176,19 @@ def export_app(
             "note": (
                 f"{len(loaded)} of {len(dept_index)} state departments loaded; contracts from "
                 "FY2021-22 (Public Utilities Commission from 2016). Values are contract value "
-                "as registered in SCPRS, not payments, and are not yet reconciled to outside "
-                "totals for every department."
+                "as registered in SCPRS, not payments. "
+                f"Payments can be checked against Open FI$Cal for "
+                f"{pay_cov['departments_checkable']} of {pay_cov['departments_loaded']} "
+                "loaded departments"
+                + (
+                    f" ({pay_cov['value_share_checkable']:.0%} of contract value); "
+                    + ", ".join(d["department_name"] for d in pay_cov["not_on_fiscal"])
+                    + " are not on FI$Cal yet."
+                    if pay_cov["not_on_fiscal"]
+                    else "."
+                )
             ),
+            "payments_reconcilable": pay_cov,
         },
         "explore": {"beta": True, "contracts_listed_from": EXPLORE_LIST_MIN},
         "ask_url": None,  # the chat Space is private/frozen; the MVP ships without the Ask box

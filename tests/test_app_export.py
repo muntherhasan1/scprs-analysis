@@ -5,6 +5,8 @@ exclusions."""
 import json
 import sqlite3
 
+import pytest
+
 from src import app_export, warehouse
 from tests.test_warehouse import _seed_cmas, _seed_eprocure, _seed_source
 
@@ -381,3 +383,17 @@ def test_award_methods_reference_is_well_formed():
     for method, r in rows.items():
         assert r["award_class"] in app_export.AWARD_CLASSES, method
         assert r["scm_code"] == "" or (len(r["scm_code"]) == 3 and r["scm_code"].isdigit()), method
+
+
+def test_payments_coverage_splits_checkable_and_deferred_departments():
+    deferred = {
+        "2660": {
+            "department_name": "Department of Transportation",
+            "expected_completion": "2028-07",
+        }
+    }
+    cov = app_export.payments_coverage({"3540": 70.0, "2660": 30.0}, deferred)
+    assert (cov["departments_checkable"], cov["departments_loaded"]) == (1, 2)
+    assert cov["value_share_checkable"] == pytest.approx(0.7)
+    assert [d["business_unit"] for d in cov["not_on_fiscal"]] == ["2660"]
+    assert app_export.payments_coverage({}, deferred)["value_share_checkable"] is None
