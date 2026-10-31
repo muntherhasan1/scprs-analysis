@@ -211,3 +211,24 @@ def test_default_event_years_is_current_and_two_prior():
 )
 def test_set_aside_flags(name, flags):
     assert eprocure.set_aside_flags(name) == flags
+
+
+def test_extract_events_posted_only_queues_no_historical_years(monkeypatch, tmp_path):
+    """years=() is the daily job's Posted-only run: it must NOT fall back to the
+    default Historical years (the old `years or default` did), or the daily job
+    would re-extract ~16K Historical rows it is gated to leave untouched."""
+    seen = {}
+
+    def fake_download(on_slice, *, years, include_posted, **_kw):
+        seen["years"], seen["posted"] = years, include_posted
+        on_slice("posted", [], 0)
+        return []
+
+    monkeypatch.setattr(eprocure, "download_events", fake_download)
+    monkeypatch.setattr(
+        eprocure, "write_events_slice", lambda _db, key, rows, total: {"slice": key, "rows": 0}
+    )
+    eprocure.extract_events(tmp_path / "e.db", years=())
+    assert seen == {"years": (), "posted": True}
+    eprocure.extract_events(tmp_path / "e.db", years=None)
+    assert seen["years"] == eprocure.default_event_years()

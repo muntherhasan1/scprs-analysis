@@ -136,6 +136,29 @@ _HINTS: dict[str, dict[str, str]] = {
             "(upload-on-success held)."
         ),
     },
+    "eProcure solicitations refresh": {
+        "_default": (
+            "The daily Posted-solicitations refresh failed. It edits the published "
+            "`eprocure.db` in place and publishes only on success, so the previous "
+            "copy (and the vendor app's Opportunities page) stays as it was — just "
+            "staler. The weekly eProcure registry refresh also re-extracts Posted."
+        ),
+        "Fetch": (
+            "No published `eprocure.db` could be fetched (token scope or dataset "
+            "var). The job refuses to extract into an empty store — publishing a "
+            "Posted-only file would wipe the registry."
+        ),
+        "Extract": (
+            "The headless Posted search failed — FI$Cal may be throttling Actions' "
+            "IPs, a control id changed, or the slice came up short of the site's "
+            "own banner. See `docs/EPROCURE.md` for the recon map."
+        ),
+        "Gate": (
+            "Either the registry/Historical slices changed (this job must touch only "
+            "Posted — a code bug) or Posted shrank below 50% of the previous slice "
+            "(likely a broken search). Nothing was published."
+        ),
+    },
     "MCP image": {
         "_default": (
             "The MCP server container failed to build or boot its smoke test on "
@@ -268,6 +291,7 @@ QUEUE_DROP_ALERTS = frozenset(
         "Summary build",
         "CMAS refresh (Wave 2)",
         "eProcure registry refresh",
+        "eProcure solicitations refresh",
     }
 )
 
