@@ -72,7 +72,8 @@ MART_DESCRIPTIONS: dict[str, str] = {
         "Document grain (current version) with acquisition_type, acquisition_method, "
         "canonical_name, department_name, fiscal_year, grand_total — the base for most "
         "spend rollups. For 'top suppliers for <category>' filter acquisition_type and "
-        "group by canonical_name."
+        "group by canonical_name. first_item_title says what a contract is for (on every "
+        "document) — search it with LIKE for keyword questions."
     ),
     "gold_supplier_acquisition_profile": (
         "Supplier spend by acquisition_type — e.g. 'IT Services', 'IT Goods', "
