@@ -398,6 +398,16 @@ def extract_all(db_path: Path = DB_PATH, out_dir: Path = DATA_DIR, only: str | N
             csv_path = _write_csv(out_dir, name, cols, rows)
             summary.append({"entity": name, "rows": len(rows), "csv": csv_path.name})
             print(f"  {name}: {len(rows)} rows -> {csv_path.name}")
+        # When the data was pulled, for the vendor app's `cmas_as_of` (the model
+        # itself carries no refresh date). Not a model entity; the warehouse
+        # reads only Approved_Applications.
+        con.execute("CREATE TABLE IF NOT EXISTS extract_meta (extracted_at TEXT)")
+        con.execute("DELETE FROM extract_meta")
+        con.execute(
+            "INSERT INTO extract_meta VALUES (?)",
+            (datetime.now(timezone.utc).isoformat(timespec="seconds"),),
+        )
+        con.commit()
     finally:
         con.close()
     print(f"\nWrote {len(summary)} tables to {db_path}")

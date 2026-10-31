@@ -756,6 +756,10 @@ def build_silver(con: sqlite3.Connection, batch: str, ts: str) -> dict:
           COALESCE({d_col("lpa_contract_id")}, p.lpa_contract_id) AS lpa_contract_id,
           COALESCE({d_col("start_date")}, p.start_date)       AS start_date,
           COALESCE({d_col("end_date")}, p.end_date)           AS end_date,
+          -- What the contract is for: the summary's title for its first item, on
+          -- every document (line items exist only for drilled ones). Current
+          -- version's title, like every other summary field here.
+          NULLIF(TRIM(p.first_item_title), '')                AS first_item_title,
           {d_raw("merchandise_amount")}                       AS merchandise_amount,
           {d_raw("freight_tax_misc")}                         AS freight_tax_misc,
           -- Contract value: the summary's figure, which is what an SCPRS search
@@ -984,6 +988,7 @@ def build_gold(con: sqlite3.Connection, batch: str, ts: str) -> dict:
           s.business_unit || '|' || s.purchase_document AS document_bk,   -- degenerate key
           s.purchase_document, s.bill_code, s.status, s.version, s.is_enriched,
           s.has_associated_pos,
+          s.first_item_title,                                  -- degenerate attribute
           COALESCE(dt.date_key, 0)  AS start_date_key,
           dep.dept_key, sup.supplier_key, buy.buyer_key, acq.acq_key,
           s.merchandise_amount, s.freight_tax_misc, s.grand_total,
@@ -1578,7 +1583,7 @@ def _build_marts(con):
             SELECT dep.business_unit, dep.department_name,
                    s.supplier_id, s.supplier_name, s.canonical_id, s.canonical_name,
                    aq.acquisition_type, aq.acquisition_sub_type, aq.acquisition_method,
-                   f.purchase_document, f.status,
+                   f.purchase_document, f.first_item_title, f.status,
                    dd.full_date AS start_date, dd.year AS calendar_year, dd.fiscal_year,
                    f.grand_total, f.line_count, f.associated_po_count
             FROM fact_document f

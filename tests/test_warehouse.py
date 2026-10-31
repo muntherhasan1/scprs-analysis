@@ -1384,3 +1384,32 @@ def test_share_and_hhi_marts_group_by_canonical_supplier(tmp_path, monkeypatch):
         assert prof == [("S1", 50.0)]
     finally:
         con.close()
+
+
+def test_gold_document_carries_the_current_versions_first_item_title(tmp_path):
+    """Every document says what it is for via the summary's first_item_title
+    (line items exist only for drilled ones). The title follows the current
+    version like every other summary field; blank titles become NULL."""
+    src, wh = tmp_path / "scprs.db", tmp_path / "warehouse.db"
+    _seed_source(src)  # doc A at v1 and v2, doc B at v1
+    con = sqlite3.connect(src)
+    con.executemany(
+        "UPDATE purchases SET first_item_title = ? WHERE purchase_document = ? AND version = ?",
+        [("Old scope", "A", "1"), ("  Rate case support  ", "A", "2"), ("   ", "B", "1")],
+    )
+    con.commit()
+    con.close()
+    warehouse.build_all(
+        wh_path=wh,
+        source_path=src,
+        enrichment_db=tmp_path / "no_enrich.db",
+        cmas_db=tmp_path / "missing_cmas.db",
+        log=lambda *a: None,
+    )
+    con = sqlite3.connect(wh)
+    try:
+        titles = dict(con.execute("SELECT purchase_document, first_item_title FROM gold_document"))
+    finally:
+        con.close()
+    assert titles["A"] == "Rate case support"
+    assert titles["B"] is None

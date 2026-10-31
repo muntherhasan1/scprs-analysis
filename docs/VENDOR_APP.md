@@ -22,6 +22,7 @@ python -m src.app_export --today 2026-07-25   # pin "open" solicitations to a sn
 | `insights/overview.json` | the dashboard home: headline counts, spend by fiscal year (with `department_count` reporting each year), top departments and companies, acquisition / size / category mixes, solicitations closing soon |
 | `insights/{acquisition,size,category}/{key}.json` | one page per vector value: totals, trend, top departments and suppliers, concentration, plus a cross-mix (size mix, acquisition mix, or top UNSPSC commodities) |
 | `search.json` | small index (~60 KB) over departments (with aliases) and every vector value; suppliers stay in the lazy `suppliers/index.json` |
+| `cmas/agreements.json` | the CMAS tab: every CMAS agreement (~2,500, ~1.8 MB — lazy-load on the tab), each with derived `status` (active/expired vs the export date), `enterprise_type` + `small_business`/`dvbe`, `product_service_codes`, code-family `categories`, authorized `brands` (from `BRAND-*` codes), city/state, and a `supplier` link (`canonical_id`, `shard`) when the holder also has SCPRS contracts (~40%); `facets` gives value/count lists for status, enterprise type, state, category and brand. Filtering and search are client-side. Contact name/email and company website are excluded (public slice). Absent when the build had no `cmas.db`. `meta.cmas_as_of` is the extraction date (null for a store extracted before 2026-10-31). |
 
 Insight vectors:
 

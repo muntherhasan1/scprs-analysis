@@ -1,0 +1,133 @@
+name: eProcure solicitations refresh
+
+# Daily refresh of ONLY the live Posted CSCR slice (open solicitations), which
+# feeds the vendor app's Opportunities page (opportunities.json, via the next
+# warehouse refresh). The weekly eprocure-refresh.yml still owns the registry
+# and the Historical years; this job edits the PUBLISHED eprocure.db in place,
+# so it must fetch it first — a fresh runner has no store, and publishing a
+# Posted-only file would wipe the registry the warehouse folds in.
+# Upload-on-success: the gate proves the registry and Historical slices are
+# byte-for-byte untouched before anything is published.
+on:
+  schedule:
+    # Daily. GitHub fires schedules ~3-7h late (see pipeline-ops skill); the
+    # nominal slot sits between the 01:17 and 04:17 enrich slots and may briefly
+    # queue on the shared writer lock — safe by design (queue, never cancel).
+    - cron: "41 2 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Shares the operational-dataset single-writer group with enrich, CMAS and the
+# weekly eProcure refresh, so the fetch -> extract -> publish cycle below can't
+# interleave with another commit to the same dataset. Queue, don't cancel.
+concurrency:
+  group: scprs-operational-writer
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    # Basis: the Posted slice (384 rows, ~2 grid pages) extracted in 36s locally
+    # on 2026-10-31; setup (pip + Chromium) is ~3 min. 20 leaves ample margin for
+    # a slow overlay and the extractor's one in-session retry.
+    timeout-minutes: 20
+    env:
+      PYTHONUNBUFFERED: "1" # a killed run must still show how far it got
+      SCPRS_DATASET: ${{ vars.SCPRS_DATASET || 'munther-hasan/scprs-operational-db' }}
+      HF_SCPRS_TOKEN: ${{ secrets.HF_SCPRS_TOKEN }}
+      PLAYWRIGHT_NO_SANDBOX: "1"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt "huggingface_hub>=0.25"
+          playwright install --with-deps chromium
+
+      # Fail closed: without the published store there is nothing to update,
+      # and a Posted-only file must never be published in its place.
+      - name: Fetch the published eprocure.db
+        run: |
+          python - <<'PY'
+          import shutil, sys
+          from pathlib import Path
+          from src import data_sync
+
+          dest = Path("data/eprocure.db")
+          dest.parent.mkdir(parents=True, exist_ok=True)
+          if not data_sync.fetch_eprocure_db(dest):
+              print("FAIL: no published eprocure.db to update — run the weekly "
+                    "'eProcure registry refresh' first; NOT extracting")
+              sys.exit(1)
+          shutil.copy(dest, "data/eprocure_prev.db")
+          print(f"fetched {dest} ({dest.stat().st_size:,} bytes)")
+          PY
+
+      - name: Extract the Posted slice
+        run: python -m src.eprocure extract-events --posted-only
+
+      # Two checks before publishing:
+      #  1. Everything except Posted is identical to the fetched store (registry
+      #     row set, every Historical slice) — proves this job touched only Posted.
+      #  2. Posted holds >=50% of the previous Posted count. Open solicitations
+      #     churn day to day (402 -> 384 on 2026-10-31), so the registry's 90%
+      #     floor would false-alarm; 50% still catches a broken search. The
+      #     extractor already refuses a slice short of the site's own banner.
+      - name: Gate (untouched slices + Posted shrink)
+        run: |
+          set -o pipefail
+          python - <<'PY' 2>&1 | tee gate.log
+          import hashlib, sqlite3, sys
+
+          def digest(con, sql):
+              # Order-independent content hash: (row count, sha256 of sorted rows).
+              rows = sorted(repr(r) for r in con.execute(sql))
+              return len(rows), hashlib.sha256("\n".join(rows).encode()).hexdigest()[:16]
+
+          def snapshot(path):
+              con = sqlite3.connect(path)
+              try:
+                  reg = digest(con, "SELECT * FROM registry")
+                  hist = digest(con, "SELECT * FROM events WHERE slice_key <> 'posted'")
+                  posted = con.execute(
+                      "SELECT COUNT(*) FROM events WHERE slice_key = 'posted'"
+                  ).fetchone()[0]
+                  return reg, hist, posted
+              finally:
+                  con.close()
+
+          prev_reg, prev_hist, prev_posted = snapshot("data/eprocure_prev.db")
+          reg, hist, posted = snapshot("data/eprocure.db")
+          print(f"registry: {prev_reg} -> {reg}")
+          print(f"historical slices: {prev_hist} -> {hist}")
+          if (reg, hist) != (prev_reg, prev_hist):
+              print("FAIL: the registry or a Historical slice changed — this job "
+                    "must touch only Posted; NOT publishing")
+              sys.exit(1)
+          floor = int(prev_posted * 0.5)
+          print(f"posted: previous {prev_posted}; floor (50%): {floor}; new {posted}")
+          if posted < floor:
+              print("FAIL: Posted shrank below 50% of the previous slice — likely a "
+                    "broken search; NOT publishing")
+              sys.exit(1)
+          print("OK: gate passed")
+          PY
+          {
+            echo "### eProcure solicitations refresh"
+            echo '```'
+            cat gate.log
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Publish eprocure.db to the operational dataset
+        run: python -m src.data_sync publish-eprocure
