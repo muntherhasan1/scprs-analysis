@@ -44,10 +44,9 @@ EPROCURE_FILENAME = "eprocure.db"  # eProcure SB/DVBE registry, refreshed by epr
 
 # The always-on front ends that fetch the serve DB at boot. Restarting them is how
 # a freshly published serve DB goes live; mirrors refresh_pipeline.ps1's defaults.
-DEFAULT_SPACES = (
-    "munther-hasan/scprs-warehouse-mcp",
-    "munther-hasan/scprs-warehouse-chat",
-)
+# The NL chat Space (scprs-warehouse-chat) was retired 2026-10-31 (paused, not
+# deleted; see docs/WEB_APP.md) — add it back here if it is revived.
+DEFAULT_SPACES = ("munther-hasan/scprs-warehouse-mcp",)
 
 
 class WarehouseFetchError(RuntimeError):

@@ -32,9 +32,9 @@ param(
     [int]$EnrichDays = 200,
     [string]$Dataset = "munther-hasan/scprs-warehouse-data",
     [string]$OperationalDataset = "munther-hasan/scprs-operational-db",
+    # The NL chat Space was retired 2026-10-31 (paused); see docs/WEB_APP.md.
     [string[]]$Spaces = @(
-        "munther-hasan/scprs-warehouse-mcp",
-        "munther-hasan/scprs-warehouse-chat"
+        "munther-hasan/scprs-warehouse-mcp"
     )
 )
 # Continue, not Stop: these steps are native commands (python/powershell) and some

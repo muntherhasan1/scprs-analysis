@@ -188,7 +188,9 @@ web app** (`src/nl_query.py` + `src/web_app.py`, a Gradio chat that turns plain
 English into guarded SQL via free-tier Gemini; see `docs/WEB_APP.md`) for anyone
 with a browser. Never duplicate the query guard into a front end — extend
 `warehouse_query`. Each deploys as its own Hugging Face Docker Space via
-`deploy/hf-space/deploy.py` and `deploy/hf-chat/deploy.py`. The MCP server also
+`deploy/hf-space/deploy.py` and `deploy/hf-chat/deploy.py`. **The NL web app
+Space is retired (paused 2026-10-31)** — its code is kept for revival but it is
+no longer restarted or maintained; see `docs/WEB_APP.md`. The MCP server also
 has `generate_chart` / `generate_report` tools (matplotlib via `src/charting.py`;
 reports served at unauthenticated `/files/` capability URLs) so a **Microsoft 365
 / Copilot Studio agent** can produce query results *and* executive reports — see
