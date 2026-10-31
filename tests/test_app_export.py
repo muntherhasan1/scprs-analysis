@@ -397,3 +397,51 @@ def test_payments_coverage_splits_checkable_and_deferred_departments():
     assert cov["value_share_checkable"] == pytest.approx(0.7)
     assert [d["business_unit"] for d in cov["not_on_fiscal"]] == ["2660"]
     assert app_export.payments_coverage({}, deferred)["value_share_checkable"] is None
+
+
+def test_department_pages_use_procurement_totals_and_governed_shares(tmp_path):
+    """Totals and shares exclude class X (interagency, assistance, leases), which is reported
+    beside them; competitive share = C / (C + L + N) with Fair and Reasonable as N."""
+    src, wh = tmp_path / "scprs.db", tmp_path / "warehouse.db"
+    serve, out = tmp_path / "warehouse-serve.db", tmp_path / "app"
+    _seed_source(src)  # 8660: A (Formal -> C, current v2 = 150), B (NCB -> N, 5000)
+    con = sqlite3.connect(src)
+    con.executemany(
+        "INSERT INTO purchases (business_unit, purchase_document, version, grand_total, "
+        "start_date, acquisition_type_sub_type, acquisition_method, supplier_id, supplier_name, "
+        "status, department_name) VALUES ('8660', ?, '1', ?, '2023-08-01', 'NON-IT Services', ?, "
+        "'S1', 'Acme', 'Active', 'PUC')",
+        [
+            ("FR", 850.0, "Fair and Reasonable - COMPETITIVE"),  # N
+            ("CM", 4000.0, "CMAS (requires offers)"),  # L
+            ("IA", 1_000_000.0, "Exempt by Law - Interagency Agreement - NON-COMPETITIVELY BID"),
+        ],
+    )
+    con.commit()
+    con.close()
+    warehouse.build_all(
+        wh_path=wh,
+        source_path=src,
+        enrichment_db=tmp_path / "e.db",
+        cmas_db=tmp_path / "c.db",
+        log=lambda *a: None,
+    )
+    warehouse.export_serve_db(wh_path=wh, serve_path=serve, log=lambda *a: None)
+    app_export.export_app(
+        serve_path=serve,
+        app_dir=out,
+        wh_path=wh,
+        eprocure_path=tmp_path / "none.db",
+        cmas_path=tmp_path / "none.db",
+        today="2026-07-25",
+        log=lambda *a: None,
+    )
+    page = _load(out / "departments" / "8660.json")
+    # C = 150, L = 4000, N = 5000 + 850 -> procurement 10,000; the $1M interagency is X.
+    assert page["total_value"] == 10_000
+    assert page["competitive_share_pct"] == 1.5
+    assert page["leveraged_share_pct"] == 40.0 and page["noncompetitive_share_pct"] == 58.5
+    assert page["non_procurement"] == {"document_count": 1, "total_value": 1_000_000.0}
+    flags = {m["award_class"]: m["competitive_flag"] for m in page["acquisition_mix"]}
+    assert flags == {"C": "Competitive", "L": "Leveraged", "N": "Non-Competitive"}
+    assert sum(y["total_value"] for y in page["spend_by_fiscal_year"]) == 10_000

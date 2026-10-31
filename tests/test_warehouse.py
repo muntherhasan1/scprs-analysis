@@ -1413,3 +1413,78 @@ def test_gold_document_carries_the_current_versions_first_item_title(tmp_path):
         con.close()
     assert titles["A"] == "Rate case support"
     assert titles["B"] is None
+
+
+def test_governed_award_classes_and_procurement_view(tmp_path, monkeypatch):
+    """gold_document carries each method's SCM class/family/code (references/award_methods.csv),
+    a reviewed outlier's override wins (references/contract_flags.csv), gold_procurement drops
+    class X, an unmapped method is class U and trips the DQ warning, and the suppliers'
+    pct_noncompetitive_value uses the governed classes (Fair and Reasonable is N)."""
+    flags = tmp_path / "flags.csv"
+    flags.write_text(
+        "business_unit,purchase_document,award_class,flag,note,reviewed\n"
+        "8660,AGENT,X,payment agent pass-through,n,2026-10-31\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(warehouse, "CONTRACT_FLAGS_CSV", flags)
+    src, wh = tmp_path / "scprs.db", tmp_path / "warehouse.db"
+    _seed_source(src)  # A (Formal, v2 = 150) and B (5000), supplier S1/S2
+    con = sqlite3.connect(src)
+    con.executemany(
+        "INSERT INTO purchases (business_unit, purchase_document, version, grand_total, "
+        "start_date, acquisition_type_sub_type, acquisition_method, supplier_id, supplier_name, "
+        "status, department_name) VALUES ('8660', ?, '1', ?, '2023-08-01', 'NON-IT Services', ?, "
+        "'S1', 'Acme', 'Active', 'PUC')",
+        [
+            ("FR", 100.0, "Fair and Reasonable - COMPETITIVE"),  # N, not competitive
+            ("CM", 200.0, "CMAS (requires offers)"),  # L
+            ("IA", 1000.0, "Exempt by Law - Interagency Agreement - NON-COMPETITIVELY BID"),  # X
+            (
+                "AGENT",
+                5000.0,
+                "Exempt by Law - Other (buyer must indicate law) - NON-COMPETITIVELY BID",
+            ),
+            ("NEW", 7.0, "A Method SCPRS Added Tomorrow"),  # unmapped -> U
+        ],
+    )
+    con.commit()
+    con.close()
+    warehouse.build_all(
+        wh_path=wh,
+        source_path=src,
+        enrichment_db=tmp_path / "no_enrich.db",
+        cmas_db=tmp_path / "missing_cmas.db",
+        log=lambda *a: None,
+    )
+    con = sqlite3.connect(wh)
+    try:
+        cls = dict(con.execute("SELECT purchase_document, award_class FROM gold_document"))
+        assert cls["FR"] == "N" and cls["CM"] == "L" and cls["IA"] == "X" and cls["NEW"] == "U"
+        assert cls["AGENT"] == "X"  # the reviewed override beats its method's class N
+        fam, code = con.execute(
+            "SELECT award_family, scm_code FROM gold_document WHERE purchase_document = 'FR'"
+        ).fetchone()
+        assert (fam, code) == ("Fair and reasonable (small purchase)", "012")
+        assert (
+            con.execute(
+                "SELECT contract_flag FROM gold_document WHERE purchase_document = 'AGENT'"
+            ).fetchone()[0]
+            == "payment agent pass-through"
+        )
+        proc = {r[0] for r in con.execute("SELECT purchase_document FROM gold_procurement")}
+        assert "IA" not in proc and "AGENT" not in proc and {"FR", "CM", "NEW"} <= proc
+        failed = dict(
+            con.execute(
+                "SELECT check_name, failed_count FROM dw_dq_results WHERE batch_id = "
+                "(SELECT MAX(batch_id) FROM dw_batch)"
+            )
+        )
+        assert failed["award_methods_mapped"] == 1
+        # Acme (S1): C = A 150, N = FR 100, L = CM 200 (X and U out of the denominator).
+        pct = con.execute(
+            "SELECT pct_noncompetitive_value FROM gold_supplier_master WHERE canonical_name = "
+            "(SELECT canonical_name FROM gold_document WHERE purchase_document = 'FR')"
+        ).fetchone()[0]
+        assert pct == pytest.approx(round(100 * 100 / 450, 1))
+    finally:
+        con.close()

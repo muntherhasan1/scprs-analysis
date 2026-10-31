@@ -190,35 +190,30 @@ def _departments(
             "SELECT business_unit, MIN(start_date) AS coverage_from, "
             "MAX(start_date) AS coverage_to, COUNT(*) AS document_count, "
             "SUM(grand_total) AS total_value, COUNT(DISTINCT canonical_id) AS supplier_count "
-            "FROM gold_document GROUP BY business_unit",
+            "FROM gold_procurement GROUP BY business_unit",
         )
     }
     by_fy = defaultdict(list)
     for r in _rows(
         con,
         "SELECT business_unit, fiscal_year, MIN(start_date) AS lo, MAX(start_date) AS hi, "
-        "COUNT(*) AS document_count, SUM(grand_total) AS total_value FROM gold_document "
+        "COUNT(*) AS document_count, SUM(grand_total) AS total_value FROM gold_procurement "
         "WHERE fiscal_year IS NOT NULL GROUP BY business_unit, fiscal_year ORDER BY fiscal_year",
     ):
         by_fy[r["business_unit"]].append(r)
     mix = defaultdict(list)
     for r in _rows(
         con,
-        "SELECT d.business_unit, d.acquisition_type, "
-        "COALESCE(a.competitive_flag, 'Other') AS competitive_flag, "
-        "COUNT(*) AS document_count, SUM(d.grand_total) AS total_value "
-        "FROM gold_document d LEFT JOIN lv_dim_acquisition a "
-        "  ON a.acquisition_type IS d.acquisition_type "
-        " AND a.acquisition_sub_type IS d.acquisition_sub_type "
-        " AND a.acquisition_method IS d.acquisition_method "
-        "GROUP BY 1, 2, 3 ORDER BY total_value DESC",
+        "SELECT business_unit, acquisition_type, award_class, "
+        "COUNT(*) AS document_count, SUM(grand_total) AS total_value "
+        "FROM gold_procurement GROUP BY 1, 2, 3 ORDER BY total_value DESC",
     ):
         mix[r["business_unit"]].append(r)
     sup = defaultdict(list)
     for r in _rows(
         con,
         "SELECT business_unit, canonical_id, MAX(canonical_name) AS canonical_name, "
-        "COUNT(*) AS document_count, SUM(grand_total) AS total_value FROM gold_document "
+        "COUNT(*) AS document_count, SUM(grand_total) AS total_value FROM gold_procurement "
         "GROUP BY business_unit, canonical_id ORDER BY total_value DESC",
     ):
         sup[r["business_unit"]].append(r)
@@ -226,9 +221,19 @@ def _departments(
     for r in _rows(
         con,
         "SELECT business_unit, acquisition_type, canonical_id, SUM(grand_total) AS v "
-        "FROM gold_document GROUP BY 1, 2, 3",
+        "FROM gold_procurement GROUP BY 1, 2, 3",
     ):
         market[r["business_unit"]][r["acquisition_type"]].append(r["v"])
+    # What each department registered that is not procurement (award class X), shown beside
+    # its procurement totals so nothing disappears silently.
+    non_procurement = {
+        r["business_unit"]: r
+        for r in _rows(
+            con,
+            "SELECT business_unit, COUNT(*) AS document_count, SUM(grand_total) AS total_value "
+            "FROM gold_document WHERE award_class = 'X' GROUP BY business_unit",
+        )
+    }
     demand = defaultdict(list)
     for r in _rows(
         con,
@@ -261,12 +266,24 @@ def _departments(
         index.append(row)
         page = dict(row)
         if loaded:
-            total = h["total_value"] or 0
-            competitive = sum(
-                m["total_value"] or 0 for m in mix[bu] if m["competitive_flag"] == "Competitive"
-            )
+            # Governed classes: competitive share = C / (C + L + N); leveraged-agreement
+            # purchases are reported beside it, never folded in.
+            total = h["total_value"] or 0  # procurement value (class X excluded)
+            by_class = defaultdict(float)
+            for m in mix[bu]:
+                by_class[m["award_class"]] += m["total_value"] or 0
+            base = by_class["C"] + by_class["L"] + by_class["N"]
             page["supplier_count"] = h["supplier_count"]
-            page["competitive_share_pct"] = round(100 * competitive / total, 1) if total else None
+            page["competitive_share_pct"] = round(100 * by_class["C"] / base, 1) if base else None
+            page["leveraged_share_pct"] = round(100 * by_class["L"] / base, 1) if base else None
+            page["noncompetitive_share_pct"] = (
+                round(100 * by_class["N"] / base, 1) if base else None
+            )
+            npv = non_procurement.get(bu)
+            page["non_procurement"] = {
+                "document_count": npv["document_count"] if npv else 0,
+                "total_value": _money(npv["total_value"]) if npv else 0.0,
+            }
             page["spend_by_fiscal_year"] = [
                 {
                     "fiscal_year": r["fiscal_year"],
@@ -280,7 +297,8 @@ def _departments(
             ]
             page["acquisition_mix"] = [
                 {
-                    **{k: m[k] for k in ("acquisition_type", "competitive_flag", "document_count")},
+                    **{k: m[k] for k in ("acquisition_type", "award_class", "document_count")},
+                    "competitive_flag": AWARD_CLASS_FLAG[m["award_class"]],
                     "total_value": _money(m["total_value"]),
                 }
                 for m in mix[bu]
@@ -349,7 +367,7 @@ def _suppliers(con, flags: dict[str, dict], today: str) -> tuple[list[dict], dic
     for r in _rows(
         con,
         "SELECT canonical_id, fiscal_year, COUNT(*) AS document_count, "
-        "SUM(grand_total) AS total_value FROM gold_document WHERE fiscal_year IS NOT NULL "
+        "SUM(grand_total) AS total_value FROM gold_procurement WHERE fiscal_year IS NOT NULL "
         "GROUP BY 1, 2 ORDER BY 2",
     ):
         by_fy[r.pop("canonical_id")].append(
@@ -364,14 +382,14 @@ def _suppliers(con, flags: dict[str, dict], today: str) -> tuple[list[dict], dic
     for r in _rows(
         con,
         "SELECT canonical_id, business_unit, MAX(department_name) AS department_name, "
-        "COUNT(*) AS document_count, SUM(grand_total) AS total_value FROM gold_document "
+        "COUNT(*) AS document_count, SUM(grand_total) AS total_value FROM gold_procurement "
         "GROUP BY 1, 2 ORDER BY total_value DESC",
     ):
         depts[r.pop("canonical_id")].append({**r, "total_value": _money(r["total_value"])})
     for r in _rows(
         con,
         "SELECT canonical_id, acquisition_type, COUNT(*) AS document_count, "
-        "SUM(grand_total) AS total_value FROM gold_document GROUP BY 1, 2 "
+        "SUM(grand_total) AS total_value FROM gold_procurement GROUP BY 1, 2 "
         "ORDER BY total_value DESC",
     ):
         acq[r.pop("canonical_id")].append({**r, "total_value": _money(r["total_value"])})
@@ -380,7 +398,7 @@ def _suppliers(con, flags: dict[str, dict], today: str) -> tuple[list[dict], dic
         "SELECT canonical_id, business_unit, purchase_document, start_date, grand_total, "
         "acquisition_type, status FROM ("
         "  SELECT *, ROW_NUMBER() OVER (PARTITION BY canonical_id "
-        "    ORDER BY start_date DESC, purchase_document) AS rn FROM gold_document"
+        "    ORDER BY start_date DESC, purchase_document) AS rn FROM gold_procurement"
         ") WHERE rn <= ?",
         (RECENT_CONTRACTS,),
     ):
@@ -639,6 +657,15 @@ def load_categories(path: Path = CATEGORIES_CSV) -> list[dict]:
 
 
 AWARD_METHODS_CSV = REFERENCES / "award_methods.csv"
+# The legacy competitive_flag field on department pages, now derived from the governed class
+# so it agrees with competitive_share_pct (Fair and Reasonable is non-competitive, SCM 012).
+AWARD_CLASS_FLAG = {
+    "C": "Competitive",
+    "L": "Leveraged",
+    "N": "Non-Competitive",
+    "X": "Not procurement",
+    "U": "Other",
+}
 CONTRACT_FLAGS_CSV = REFERENCES / "contract_flags.csv"
 EXPLORE_FROM_FY = 2022  # FY2021-22: every loaded department is complete from here
 EXPLORE_LIST_MIN = 100_000.0  # contracts listed per department; smaller ones are counted only
@@ -827,13 +854,13 @@ def _category_matcher(categories: list[dict]):
 # aggregation routine serves all three. Each SELECT is an internal constant.
 _DOC_SLICE = (
     "SELECT {key} AS k, business_unit, purchase_document, canonical_id, canonical_name, "
-    "fiscal_year, grand_total AS v, {cross} AS x, NULL AS x_desc FROM gold_document"
+    "fiscal_year, grand_total AS v, {cross} AS x, NULL AS x_desc FROM gold_procurement"
 )
 _LINE_SLICE = (
     "SELECT app_category(l.unspsc) AS k, l.business_unit, l.purchase_document, "
     "d.canonical_id, d.canonical_name, l.fiscal_year, l.line_amount AS v, "
     "l.unspsc AS x, l.category AS x_desc FROM gold_line_item l "
-    "JOIN gold_document d ON d.business_unit = l.business_unit "
+    "JOIN gold_procurement d ON d.business_unit = l.business_unit "
     "AND d.purchase_document = l.purchase_document"
 )
 _VECTORS = (
@@ -1006,7 +1033,7 @@ def _insights(con, flags, dept_index, sup_index, opps, today, categories):
     fy = _rows(
         con,
         "SELECT fiscal_year, COUNT(*) AS document_count, SUM(grand_total) AS total_value, "
-        "COUNT(DISTINCT business_unit) AS department_count FROM gold_document "
+        "COUNT(DISTINCT business_unit) AS department_count FROM gold_procurement "
         "WHERE fiscal_year IS NOT NULL GROUP BY 1 ORDER BY 1",
     )
     cov = _coverage(con)
