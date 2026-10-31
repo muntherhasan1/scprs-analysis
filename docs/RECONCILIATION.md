@@ -26,7 +26,7 @@ python -m src.reconcile run --bu 3540 --bu 5180 --fiscal-dir data/fiscal --out r
 | Test | Definition |
 | --- | --- |
 | R1 payee coverage | Share of in-scope payments made to a vendor holding an SCPRS contract — with **this** department, and with **any** department |
-| R2 paid within awarded | Of the 50 largest payees, the share of dollars paid within 110% of their contracts' value in the award window (`--award-from/--award-to`) |
+| R2 paid within awarded | Of the 50 largest payees, the share of dollars paid within 110% of their contracts' value in the award window, which starts by default at the unit's earliest stored contract (`--award-from` overrides) |
 | R3 inputs | Contract value spread by day over each term, per fiscal year, for comparison with Budget Act actuals |
 
 In scope = **state-operations operating expenses**, minus card programs (US Bank, WEX, …),

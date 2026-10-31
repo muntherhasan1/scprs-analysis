@@ -188,10 +188,15 @@ def reconcile(
     business_unit: str,
     payments,
     all_contracts: list[dict],
-    award_from: str = "2021-07-01",
+    award_from: str | None = None,
     award_to: str = "2025-06-30",
 ) -> dict:
-    """R1 (this department / any department), R2 and the payment bridge for one unit."""
+    """R1 (this department / any department), R2 and the payment bridge for one unit.
+
+    The R2 award window starts, by default, at the unit's EARLIEST stored contract: a payment
+    in the period can draw on any award still running, however old. A fixed July-2021 start
+    read long contracts as unawarded (2026-10-31: PUC's R2 was 60.0% that way and 95.4% with
+    its 2016+ history; CAL FIRE's $485M January-2021 aviation contract looked missing)."""
     ops = payments[
         (payments["account_type"] == OPERATING)
         & (payments["budget_reference_category"] == STATE_OPERATIONS)
@@ -207,6 +212,13 @@ def reconcile(
     totals = payee_totals(scope)
     mine = {c["vendor"] for c in all_contracts if c["business_unit"] == business_unit}
     anywhere = {c["vendor"] for c in all_contracts}
+    if award_from is None:
+        starts = [
+            c["start"][:10]
+            for c in all_contracts
+            if c["business_unit"] == business_unit and c["start"]
+        ]
+        award_from = min(starts, default="0000-00-00")
     awarded: dict[str, float] = defaultdict(float)
     for c in all_contracts:
         if (
@@ -262,7 +274,9 @@ def _cli() -> None:
         default=[2022, 2023, 2024],
         help="FI$Cal start years to read (2022 = FY2022-23)",
     )
-    run.add_argument("--award-from", default="2021-07-01")
+    run.add_argument(
+        "--award-from", default=None, help="default: the unit's earliest stored contract"
+    )
     run.add_argument("--award-to", default="2025-06-30")
     run.add_argument("--out", type=Path, default=None, help="write full results as JSON")
     args = ap.parse_args()
