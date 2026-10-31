@@ -630,7 +630,9 @@ def extract_events(
 
     The store holds exactly the slices of the latest run (per-slice replace; a
     year outside ``--years`` ages out on the next run) — deliberate lean
-    semantics, documented in docs/EPROCURE.md. Returns per-slice summaries.
+    semantics, documented in docs/EPROCURE.md. ``years=()`` extracts Posted
+    only (the daily solicitation refresh); ``None`` means the default years.
+    Returns per-slice summaries.
     """
     summaries: list[dict] = []
 
@@ -641,7 +643,7 @@ def extract_events(
 
     skipped = download_events(
         on_slice,
-        years=years or default_event_years(),
+        years=default_event_years() if years is None else years,
         include_posted=include_posted,
         headless=headless,
         budget_minutes=budget_minutes,
@@ -700,6 +702,11 @@ def _cli() -> None:
     )
     ev.add_argument("--no-posted", action="store_true", help="Skip the live Posted slice")
     ev.add_argument(
+        "--posted-only",
+        action="store_true",
+        help="Only the live Posted slice (daily refresh); Historical slices are left as stored",
+    )
+    ev.add_argument(
         "--budget-minutes",
         type=float,
         default=None,
@@ -711,9 +718,11 @@ def _cli() -> None:
     if args.cmd == "extract-registry":
         extract_registry(args.db, args.out, headless=not args.show)
     elif args.cmd == "extract-events":
+        if args.posted_only and (args.no_posted or args.years):
+            ap.error("--posted-only cannot be combined with --no-posted or --years")
         extract_events(
             args.db,
-            years=tuple(args.years) if args.years else None,
+            years=() if args.posted_only else (tuple(args.years) if args.years else None),
             include_posted=not args.no_posted,
             headless=not args.show,
             budget_minutes=args.budget_minutes,
