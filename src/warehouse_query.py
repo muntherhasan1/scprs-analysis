@@ -73,7 +73,17 @@ MART_DESCRIPTIONS: dict[str, str] = {
         "canonical_name, department_name, fiscal_year, grand_total — the base for most "
         "spend rollups. For 'top suppliers for <category>' filter acquisition_type and "
         "group by canonical_name. first_item_title says what a contract is for (on every "
-        "document) — search it with LIKE for keyword questions."
+        "document) — search it with LIKE for keyword questions. award_class is the governed "
+        "competition class (State Contracting Manual codes): C competitive, L leveraged "
+        "agreement (CMAS, statewide contracts), N non-competitive (incl. Fair and Reasonable), "
+        "X not procurement (interagency, assistance, leases), U unknown — use it, not "
+        "competitive_flag, for competitive or sole-source shares."
+    ),
+    "gold_procurement": (
+        "gold_document minus award_class X (interagency agreements, subvention/local "
+        "assistance, leases, reviewed pass-throughs). Use for 'how much does the state buy' "
+        "totals, rankings and shares; use gold_document only when asked about everything "
+        "registered in SCPRS."
     ),
     "gold_supplier_acquisition_profile": (
         "Supplier spend by acquisition_type — e.g. 'IT Services', 'IT Goods', "

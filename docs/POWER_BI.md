@@ -181,7 +181,10 @@ canvas, ten pages plus a hidden Notes page, and a `_Measures` table with the
 full measure set (competitive/leveraged share, SB/DVBE goals, HHI, CMAS
 expiry, amendment growth, eProcure event counts). Three facts that came from
 profiling, not the spec draft: `competitive_flag` values are
-`Competitive`/`Non-Competitive`/`Other` (title case);
+`Competitive`/`Non-Competitive`/`Other` (title case) — legacy; since 2026-10-31 prefer
+`gold_document.award_class` (C/L/N/X/U, governed by the State Contracting Manual codes), and
+`pct_noncompetitive_value` is class N over classes C+L+N (it previously used `competitive_flag`
+over all value, counting Fair and Reasonable purchases as competitive);
 `gold_market_concentration.top_supplier_pct` is 0–100 (the `[Top Supplier %]`
 measure divides by 100 so it formats as a percentage) — and since 2026-10 that
 mart and `gold_supplier_acquisition_profile` are per **canonical** supplier

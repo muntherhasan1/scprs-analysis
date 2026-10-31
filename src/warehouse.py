@@ -888,7 +888,49 @@ def build_silver(con: sqlite3.Connection, batch: str, ts: str) -> dict:
 # --------------------------------------------------------------------------- #
 # Gold: Kimball star schema (surrogate-keyed dims + facts + marts)
 # --------------------------------------------------------------------------- #
+REFERENCES_DIR = Path(__file__).resolve().parent.parent / "references"
+AWARD_METHODS_CSV = REFERENCES_DIR / "award_methods.csv"
+CONTRACT_FLAGS_CSV = REFERENCES_DIR / "contract_flags.csv"
+
+
+def _load_award_references(con: sqlite3.Connection) -> None:
+    """TEMP tables from the governed references: every SCPRS acquisition method's State
+    Contracting Manual code, family and class (C competitive, L leveraged agreement,
+    N non-competitive, X not procurement, U unknown), and reviewed outliers' class override.
+    TEMP so they never reach the warehouse file; the classes land on dim_acquisition and
+    fact_document instead (both copied to the serve DB)."""
+    import csv
+
+    con.execute("DROP TABLE IF EXISTS temp.ref_award_method")
+    con.execute(
+        "CREATE TEMP TABLE ref_award_method (acquisition_method TEXT PRIMARY KEY, "
+        "scm_code TEXT, award_family TEXT, award_class TEXT)"
+    )
+    with open(AWARD_METHODS_CSV, encoding="utf-8", newline="") as f:
+        con.executemany(
+            "INSERT INTO temp.ref_award_method VALUES (?, ?, ?, ?)",
+            [
+                (r["acquisition_method"], r["scm_code"] or None, r["family"], r["award_class"])
+                for r in csv.DictReader(f)
+            ],
+        )
+    con.execute("DROP TABLE IF EXISTS temp.ref_contract_flag")
+    con.execute(
+        "CREATE TEMP TABLE ref_contract_flag (business_unit TEXT, purchase_document TEXT, "
+        "award_class TEXT, flag TEXT, PRIMARY KEY (business_unit, purchase_document))"
+    )
+    with open(CONTRACT_FLAGS_CSV, encoding="utf-8", newline="") as f:
+        con.executemany(
+            "INSERT INTO temp.ref_contract_flag VALUES (?, ?, ?, ?)",
+            [
+                (r["business_unit"], r["purchase_document"], r["award_class"], r["flag"])
+                for r in csv.DictReader(f)
+            ],
+        )
+
+
 def build_gold(con: sqlite3.Connection, batch: str, ts: str) -> dict:
+    _load_award_references(con)
     # -- dim_date (spine over the observed date range, plus an Unknown member)
     con.execute("DROP TABLE IF EXISTS dim_date")
     con.execute(
@@ -964,9 +1006,23 @@ def build_gold(con: sqlite3.Connection, batch: str, ts: str) -> dict:
         con,
         "dim_acquisition",
         "acq_key",
-        ["acquisition_type", "acquisition_sub_type", "acquisition_method", "competitive_flag"],
-        "SELECT DISTINCT acquisition_type, acquisition_sub_type, acquisition_method, "
-        "competitive_flag FROM silver_document",
+        [
+            "acquisition_type",
+            "acquisition_sub_type",
+            "acquisition_method",
+            "competitive_flag",
+            "scm_code",
+            "award_family",
+            "award_class",
+        ],
+        # competitive_flag is the legacy string match (it calls Fair and Reasonable
+        # competitive); award_class is the governed one (SCM code lists 14-01/15-01/16-01,
+        # references/award_methods.csv). An unmapped method is class U, caught by DQ.
+        "SELECT DISTINCT s.acquisition_type, s.acquisition_sub_type, s.acquisition_method, "
+        "s.competitive_flag, r.scm_code AS scm_code, "
+        "COALESCE(r.award_family, 'Unknown') AS award_family, "
+        "COALESCE(r.award_class, 'U') AS award_class FROM silver_document s "
+        "LEFT JOIN temp.ref_award_method r ON r.acquisition_method = s.acquisition_method",
         ts,
     )
     _build_dim(
@@ -992,8 +1048,12 @@ def build_gold(con: sqlite3.Connection, batch: str, ts: str) -> dict:
           COALESCE(dt.date_key, 0)  AS start_date_key,
           dep.dept_key, sup.supplier_key, buy.buyer_key, acq.acq_key,
           s.merchandise_amount, s.freight_tax_misc, s.grand_total,
-          s.line_count, s.associated_po_count, s.dq_line_reconciles
+          s.line_count, s.associated_po_count, s.dq_line_reconciles,
+          cf.award_class AS award_class_override,   -- references/contract_flags.csv
+          cf.flag AS contract_flag
         FROM silver_document s
+        LEFT JOIN temp.ref_contract_flag cf ON cf.business_unit = s.business_unit
+             AND cf.purchase_document = s.purchase_document
         LEFT JOIN dim_date dt  ON dt.full_date = s.start_date
         LEFT JOIN dim_department dep ON dep.business_unit = s.business_unit
         LEFT JOIN dim_supplier sup ON sup.supplier_id = s.supplier_id AND sup.supplier_name = s.supplier_name
@@ -1277,8 +1337,12 @@ def _build_marts(con):
                    COUNT(DISTINCT f.dept_key) AS department_count,
                    MIN(dd.full_date) AS first_award, MAX(dd.full_date) AS last_award,
                    SUM(f.has_associated_pos) AS contract_count,
-                   ROUND(100.0 * SUM(CASE WHEN a.competitive_flag = 'Non-Competitive'
-                         THEN f.grand_total ELSE 0 END) / NULLIF(SUM(f.grand_total), 0), 1)
+                   -- Governed classes (SCM code lists): non-competitive value over
+                   -- procurement value (classes C, L, N); class X and U are neither.
+                   ROUND(100.0 * SUM(CASE WHEN COALESCE(f.award_class_override, a.award_class)
+                         = 'N' THEN f.grand_total ELSE 0 END)
+                         / NULLIF(SUM(CASE WHEN COALESCE(f.award_class_override, a.award_class)
+                         IN ('C', 'L', 'N') THEN f.grand_total ELSE 0 END), 0), 1)
                          AS pct_noncompetitive_value
             FROM fact_document f
             JOIN dim_supplier s ON s.supplier_key = f.supplier_key
@@ -1300,9 +1364,11 @@ def _build_marts(con):
                      COUNT(DISTINCT s.supplier_id) AS registration_count,
                      COUNT(*) AS award_count, ROUND(SUM(f.grand_total), 0) AS total_value,
                      COUNT(DISTINCT f.dept_key) AS department_count,
-                     ROUND(100.0 * SUM(CASE WHEN a.competitive_flag = 'Non-Competitive'
-                           THEN f.grand_total ELSE 0 END) / NULLIF(SUM(f.grand_total), 0), 1)
-                           AS pct_noncompetitive_value
+                     ROUND(100.0 * SUM(CASE WHEN COALESCE(f.award_class_override,
+                           a.award_class) = 'N' THEN f.grand_total ELSE 0 END)
+                           / NULLIF(SUM(CASE WHEN COALESCE(f.award_class_override,
+                           a.award_class) IN ('C', 'L', 'N') THEN f.grand_total ELSE 0 END), 0),
+                           1) AS pct_noncompetitive_value
               FROM fact_document f
               JOIN dim_supplier s ON s.supplier_key = f.supplier_key
               JOIN dim_acquisition a ON a.acq_key = f.acq_key
@@ -1583,6 +1649,9 @@ def _build_marts(con):
             SELECT dep.business_unit, dep.department_name,
                    s.supplier_id, s.supplier_name, s.canonical_id, s.canonical_name,
                    aq.acquisition_type, aq.acquisition_sub_type, aq.acquisition_method,
+                   aq.scm_code, aq.award_family,
+                   COALESCE(f.award_class_override, aq.award_class) AS award_class,
+                   f.contract_flag,
                    f.purchase_document, f.first_item_title, f.status,
                    dd.full_date AS start_date, dd.year AS calendar_year, dd.fiscal_year,
                    f.grand_total, f.line_count, f.associated_po_count
@@ -1591,6 +1660,12 @@ def _build_marts(con):
             JOIN dim_department dep ON dep.dept_key = f.dept_key
             JOIN dim_acquisition aq ON aq.acq_key = f.acq_key
             LEFT JOIN dim_date dd ON dd.date_key = f.start_date_key""",
+        # Procurement only: gold_document minus award class X (interagency agreements,
+        # subvention / local assistance, leases and real estate, and reviewed pass-throughs
+        # such as a payment agent). Those are registered in SCPRS but are not purchases;
+        # totals, shares and rankings of "what the state buys" read from here.
+        "gold_procurement": """
+            SELECT * FROM gold_document WHERE award_class <> 'X'""",
         # Denormalized line items: free-text description + category + price + vendor.
         # COVERS ONLY LINE-ENRICHED DOCUMENTS (~13%) — for item-level detail, not spend
         # totals (use gold_document for those). item_description is a degenerate
@@ -1834,6 +1909,16 @@ _DQ_CHECKS = [
         "error",
         "silver_document",
         "SELECT COUNT(*) FROM silver_document WHERE instr(acquisition_type, '_') > 0",
+    ),
+    (
+        # Every acquisition method needs a governed award class (SCM code lists, via
+        # references/award_methods.csv); a new SCPRS method lands as class U until mapped,
+        # silently leaving procurement totals and competitive shares.
+        "award_methods_mapped",
+        "warn",
+        "dim_acquisition",
+        "SELECT COUNT(*) FROM dim_acquisition WHERE award_class = 'U' "
+        "AND acquisition_method <> 'Unknown'",
     ),
     (
         # The drill-down's "N/A" placeholder must never survive into silver.

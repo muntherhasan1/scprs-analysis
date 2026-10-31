@@ -44,7 +44,16 @@ Bronze is the immutable landing zone — nothing is cleaned here.
   string — from the summary *and* the drill-down, which glues sub-types for
   NON-IT Services — is split into `acquisition_type` / `acquisition_sub_type`
   (error check `acquisition_type_split`); a `competitive_flag` is derived from
-  the method. The drill-down's literal `N/A` placeholder (end date, LPA, buyer,
+  the method's wording (legacy: it calls Fair and Reasonable competitive). The
+  governed classification lives in gold: `dim_acquisition` carries each method's
+  State Contracting Manual `scm_code`, `award_family` and `award_class`
+  (`references/award_methods.csv`: C competitive, L leveraged agreement,
+  N non-competitive, X not procurement, U unknown — warn check
+  `award_methods_mapped`), `fact_document` carries a reviewed outlier's
+  `award_class_override` / `contract_flag` (`references/contract_flags.csv`), and
+  `gold_document.award_class` applies the override. `gold_procurement` =
+  `gold_document` minus class X; the supplier marts' `pct_noncompetitive_value`
+  is class N over classes C+L+N. The drill-down's literal `N/A` placeholder (end date, LPA, buyer,
   UNSPSC) becomes NULL (error check `no_na_sentinels`).
 - **Defaulting.** NULL business keys become explicit `Unknown`/`UNKNOWN` members
   (no NULL dimension keys downstream).
