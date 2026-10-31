@@ -1,0 +1,46 @@
+acquisition_method,scm_code,family,award_class
+Formal - COMPETITIVE,002,Formal competitive,C
+Public Works - COMPETITIVE,006,Formal competitive,C
+Architectural and Engineering - COMPETITIVE,001,Formal competitive,C
+Other - Special Statute (Buyer must indicate the law) - COMPETITIVE,009,Formal competitive,C
+Informal - COMPETITIVE,003,Informal competitive,C
+SB Option - COMPETITIVE,004,SB/DVBE option,C
+DVBE Option - COMPETITIVE,005,SB/DVBE option,C
+Public Works - SB Option - COMPETITIVE,007,SB/DVBE option,C
+Public Works - DVBE Option - COMPETITIVE,008,SB/DVBE option,C
+CMAS (requires offers),030,CMAS,L
+Statewide Contracts,040,Statewide and leveraged contracts,L
+Master Agreements,035,Statewide and leveraged contracts,L
+Master Agreements (requires offers),034,Statewide and leveraged contracts,L
+Software Licensing Program (requires offers),036,Statewide and leveraged contracts,L
+Cooperative Agreements,032,Statewide and leveraged contracts,L
+Cooperative Agreements (requires offers),031,Statewide and leveraged contracts,L
+IT MSA (requires offers),033,Statewide and leveraged contracts,L
+1122 Procurement Program (GSA Component) (requires offers),029,Statewide and leveraged contracts,L
+Fair and Reasonable - COMPETITIVE,012,Fair and reasonable (small purchase),N
+NON-COMPETITIVELY BID (NCB),011,Non-competitive (NCB),N
+Community Based Rehabilitation Program (CRP) - NON-COMPETITIVELY BID,013,Non-competitive (NCB),N
+Exempt by Law - Community Based Rehabilitation Program - NON-COMPETITIVELY BID,013,Non-competitive (NCB),N
+State Price Schedules (requires offers),037,Non-competitive (NCB),N
+State Price Schedules  (requires offers),037,Non-competitive (NCB),N
+Emergency - Public Contract Code - NON-COMPETITIVELY BID,014,Emergency,N
+Emergency - Non-Natural Disaster (Form 42) - NON-COMPETITIVELY BID,015,Emergency,N
+Exempt by Law - Legal Services - NON-COMPETITIVELY BID,021,Exempt by law or policy,N
+Exempt by Law - Other (buyer must indicate law) - NON-COMPETITIVELY BID,022,Exempt by law or policy,N
+Exempt by Policy - Convention and Conference Facility Contracts - NON-COMPETITIVELY BID,023,Exempt by law or policy,N
+Exempt by Policy - Proprietary - Maintenance - NON-COMPETITIVELY BID,024,Exempt by law or policy,N
+Exempt by Policy - Proprietary - Software - NON-COMPETITIVELY BID,025,Exempt by law or policy,N
+"Exempt by Policy - Proprietary - Subscriptions, Publications, Technical Manuals - NON-COMPETITIVELY BID",026,Exempt by law or policy,N
+Exempt by Policy - Other (buyer must indicate policy) - NON-COMPETITIVELY BID,028,Exempt by law or policy,N
+Exempt by Law - Interagency Agreement - NON-COMPETITIVELY BID,016,Interagency agreement,X
+Exempt by Law - Interagency Agreement - Dept of Tech - NON-COMPETITIVELY BID,017,Interagency agreement,X
+Exempt by Law - Interagency Agreement - Office of State Publishing - NON-COMPETITIVELY BID,018,Interagency agreement,X
+Exempt by Law - Correctional Training and Rehabilitation Authority (CALCTRA) - NON-COMPETITIVELY BID,019,Interagency agreement,X
+Exempt by Law - Interagency Agreement - Prison Industry Authority (PIA) - NON-COMPETITIVELY BID,019,Interagency agreement,X
+Exempt by Law - Interagency Agreement - Surplus Property - NON-COMPETITIVELY BID,020,Interagency agreement,X
+Exempt by Policy - Subvention Contracts/Local Assistance - NON-COMPETITIVELY BID,027,Assistance (subvention),X
+Operational Leases - LEASING,039,Leases and real estate,X
+Capital Leases - LEASING,038,Leases and real estate,X
+Real Estate - Right to use Lease - Operating,,Leases and real estate,X
+Real Estate - Finance Purchase - Capital,,Leases and real estate,X
+Unknown,,Unknown,U

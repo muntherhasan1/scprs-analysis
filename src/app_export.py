@@ -637,6 +637,156 @@ def load_categories(path: Path = CATEGORIES_CSV) -> list[dict]:
         ]
 
 
+AWARD_METHODS_CSV = REFERENCES / "award_methods.csv"
+CONTRACT_FLAGS_CSV = REFERENCES / "contract_flags.csv"
+EXPLORE_FROM_FY = 2022  # FY2021-22: every loaded department is complete from here
+EXPLORE_LIST_MIN = 100_000.0  # contracts listed per department; smaller ones are counted only
+# Award classes from the State Contracting Manual code lists (SCM 14-01 competitive, 15-01
+# non-competitive, 16-01 leveraged). X is not procurement and is excluded from Explore's totals
+# by default; U is an unrecorded method.
+AWARD_CLASSES = {
+    "C": "Competitive",
+    "L": "Leveraged agreement",
+    "N": "Non-competitive",
+    "X": "Not procurement",
+    "U": "Unknown",
+}
+
+
+def load_award_methods(path: Path = AWARD_METHODS_CSV) -> dict[str, dict]:
+    """Raw SCPRS acquisition_method -> {scm_code, family, award_class} (governed reference)."""
+    with open(path, encoding="utf-8", newline="") as f:
+        return {r["acquisition_method"]: r for r in csv.DictReader(f)}
+
+
+def load_contract_flags(path: Path = CONTRACT_FLAGS_CSV) -> dict[tuple[str, str], dict]:
+    """Reviewed outliers: (business_unit, purchase_document) -> class override + note."""
+    with open(path, encoding="utf-8", newline="") as f:
+        return {(r["business_unit"], r["purchase_document"]): r for r in csv.DictReader(f)}
+
+
+def _explore(con, dept_index: list[dict], methods: dict, flags: dict) -> tuple[dict, dict, dict]:
+    """explore/cube.json + explore/contracts/{bu}.json for the Explore page (beta).
+
+    The cube is columnar: one row per (fiscal year, department, acquisition type, size band,
+    award family) with contract count and value, so the page cross-filters in the browser
+    without loading 1.7M contracts. The family's class rides in `families`, and the page
+    excludes class X (not procurement) from totals by default. Contracts of EXPLORE_LIST_MIN
+    or more are listed per department, loaded only when that department is in view.
+    Returns (cube, contracts by business unit, coverage figures)."""
+    has_title = any(
+        r[1] == "first_item_title" for r in con.execute("PRAGMA table_info(gold_document)")
+    )
+    title = "first_item_title" if has_title else "NULL"
+    families: list[dict] = []
+    fam_idx: dict[str, int] = {}
+
+    def family(name: str, cls: str) -> int:
+        if name not in fam_idx:
+            fam_idx[name] = len(families)
+            families.append({"label": name, "award_class": cls})
+        return fam_idx[name]
+
+    for m in methods.values():  # file order = display order
+        family(m["family"], m["award_class"])
+    bus = [d["business_unit"] for d in dept_index if d["loaded"]]
+    dept_name = {d["business_unit"]: d["department_name"] for d in dept_index}
+    bu_idx = {bu: i for i, bu in enumerate(bus)}
+    acq_keys = list(ACQUISITION_LABELS)
+    size_keys = [k for k, *_ in SIZE_BUCKETS]
+    years: list[int] = []
+    cells: dict[tuple, list] = {}
+    contracts: dict[str, list] = defaultdict(list)
+    unmapped = 0
+    excluded_value = 0.0
+    sql = (
+        "SELECT business_unit, purchase_document, canonical_id, canonical_name, acquisition_type, "  # noqa: S608
+        f"acquisition_method, fiscal_year, start_date, grand_total, status, line_count, {title} "
+        "FROM gold_document WHERE fiscal_year >= ?"
+    )
+    for bu, doc, cid, cname, acq, meth, fy, start, total, status, lines, ttl in con.execute(
+        sql, (EXPLORE_FROM_FY,)
+    ):
+        if bu not in bu_idx:
+            continue
+        m = methods.get(meth)
+        if m is None:
+            unmapped += 1
+            m = {"family": "Unknown", "award_class": "U", "scm_code": ""}
+        cls = m["award_class"]
+        flag = flags.get((bu, doc))
+        fam = family(m["family"], cls)
+        if flag:  # a reviewed outlier's class override (e.g. a payment agent -> X)
+            cls = flag["award_class"]
+            fam = family(f"{m['family']} (reclassified: {flag['flag']})", cls)
+        if cls == "X":
+            excluded_value += max(total or 0, 0)
+        if fy not in years:
+            years.append(fy)
+        a = _base_acquisition(acq)
+        key = (
+            fy,
+            bu_idx[bu],
+            acq_keys.index(a) if a in acq_keys else acq_keys.index("Unknown"),
+            size_keys.index(_size_bucket(total) or size_keys[0]),
+            fam,
+        )
+        cell = cells.setdefault(key, [0, 0.0])
+        cell[0] += 1
+        cell[1] += total or 0
+        if (total or 0) >= EXPLORE_LIST_MIN:
+            contracts[bu].append(
+                {
+                    "purchase_document": doc,
+                    "title": ttl,
+                    "canonical_id": cid,
+                    "canonical_name": cname,
+                    "shard": _shard(cid) if cid else None,
+                    "value": _money(total),
+                    "start_date": start,
+                    "fiscal_year": fy,
+                    "acquisition_type": a,
+                    "award_method": meth,
+                    "scm_code": m.get("scm_code") or None,
+                    "family": fam,
+                    "status": status,
+                    "line_count": lines or 0,
+                    "flag": {"flag": flag["flag"], "note": flag["note"]} if flag else None,
+                }
+            )
+    years.sort()
+    rows = sorted(cells.items())
+    cube = {
+        "dimensions": {
+            "fiscal_year": [{"value": y, "label": f"FY{y - 1}-{str(y)[2:]}"} for y in years],
+            "department": [{"business_unit": bu, "department_name": dept_name[bu]} for bu in bus],
+            "acquisition_type": [{"key": k, "label": ACQUISITION_LABELS[k]} for k in acq_keys],
+            "size": [{"key": k, "label": label} for k, label, *_ in SIZE_BUCKETS],
+            "family": families,
+        },
+        "award_classes": AWARD_CLASSES,
+        # Columnar: index i of each array is one cube row; value in dollars.
+        "columns": {
+            "fiscal_year": [years.index(k[0]) for k, _ in rows],
+            "department": [k[1] for k, _ in rows],
+            "acquisition_type": [k[2] for k, _ in rows],
+            "size": [k[3] for k, _ in rows],
+            "family": [k[4] for k, _ in rows],
+            "count": [c[0] for _, c in rows],
+            "value": [round(c[1], 2) for _, c in rows],
+        },
+        "contracts_listed_from": EXPLORE_LIST_MIN,
+        "beta": True,
+    }
+    for bu in contracts:
+        contracts[bu].sort(key=lambda r: -(r["value"] or 0))
+    return (
+        cube,
+        dict(contracts),
+        {"non_procurement_value": _money(excluded_value), "unmapped_award_methods": unmapped},
+    )
+
+
 def _category_matcher(categories: list[dict]):
     """unspsc -> category key; the LONGEST matching prefix wins (8111 beats 81)."""
     prefixes = sorted(
@@ -942,6 +1092,9 @@ def export_app(
             con, flags, dept_index, sup_index, opps, today, load_categories()
         )
         cmas = _cmas(con, today)
+        explore, explore_contracts, explore_cov = _explore(
+            con, dept_index, load_award_methods(), load_contract_flags()
+        )
         cov = con.execute(
             "SELECT COUNT(*), SUM(grand_total), MIN(start_date), MAX(start_date), "
             "SUM(line_count > 0) FROM gold_document"
@@ -983,7 +1136,19 @@ def export_app(
             "earliest_start_date": cov[2],
             "latest_start_date": cov[3],
             "documents_with_line_items": cov[4] or 0,
+            # Interagency, subvention/local-assistance and lease agreements (award class X,
+            # SCM codes 016-020/027/038-039) plus reviewed pass-throughs, FY2021-22 onward:
+            # registered in SCPRS but not procurement. Explore leaves them out of its totals
+            # by default; other pages still include them and show this beside their totals.
+            "non_procurement_value": explore_cov["non_procurement_value"],
+            "note": (
+                f"{len(loaded)} of {len(dept_index)} state departments loaded; contracts from "
+                "FY2021-22 (Public Utilities Commission from 2016). Values are contract value "
+                "as registered in SCPRS, not payments, and are not yet reconciled to outside "
+                "totals for every department."
+            ),
         },
+        "explore": {"beta": True, "contracts_listed_from": EXPLORE_LIST_MIN},
         "ask_url": None,  # the chat Space is private/frozen; the MVP ships without the Ask box
     }
 
@@ -1011,6 +1176,15 @@ def export_app(
     sizes["search"] = _write(staging / "search.json", {"items": search}, generated_at)
     if cmas is not None:
         sizes["cmas"] = _write(staging / "cmas" / "agreements.json", cmas, generated_at)
+    sizes["explore_cube"] = _write(staging / "explore" / "cube.json", explore, generated_at)
+    contract_bytes = [
+        _write(
+            staging / "explore" / "contracts" / f"{bu}.json",
+            {"business_unit": bu, "items": items},
+            generated_at,
+        )
+        for bu, items in sorted(explore_contracts.items())
+    ]
     shutil.rmtree(app_dir, ignore_errors=True)
     staging.rename(app_dir)
 
@@ -1026,6 +1200,11 @@ def export_app(
         "search_bytes": sizes["search"],
         "cmas_agreements": cmas["total_count"] if cmas else 0,
         "cmas_bytes": sizes.get("cmas", 0),
+        "explore_cube_rows": len(explore["columns"]["count"]),
+        "explore_cube_bytes": sizes["explore_cube"],
+        "explore_contracts": sum(len(v) for v in explore_contracts.values()),
+        "explore_largest_contracts_bytes": max(contract_bytes, default=0),
+        "unmapped_award_methods": explore_cov["unmapped_award_methods"],
     }
     log(f"app-export: {app_dir} {counts}")
     return counts
