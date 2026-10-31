@@ -159,11 +159,16 @@ jobs:
         run: |
           set -o pipefail
           start=$SECONDS
+          # Value-first (2026-10-31): days with the most IT Services value, then
+          # the most total value, so the biggest contracts get line items first;
+          # newest-first only breaks ties. The unit rotation (health --next-bu)
+          # is unchanged.
           python -m src.model enrich "$BU" "$FROM" "$TO" \
-            --limit "$LIMIT" --newest-first --budget-minutes "$BUDGET" \
+            --limit "$LIMIT" --priority value --newest-first --budget-minutes "$BUDGET" \
             2>&1 | tee enrich.log
           {
-            echo "### Enrich — BU $BU (limit $LIMIT, budget ${BUDGET}m)"
+            echo "### Enrich — BU $BU (limit $LIMIT, budget ${BUDGET}m, value-first)"
+            grep -F "value-first:" enrich.log | head -1 || true
             echo '```'
             grep -F "days_total" enrich.log | tail -1
             echo "enrich step took $(( (SECONDS - start) / 60 ))m $(( (SECONDS - start) % 60 ))s"

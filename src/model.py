@@ -724,6 +724,29 @@ def _drilled_docs(db_path: Path, business_unit: str, iso_day: str) -> set[str]:
         con.close()
 
 
+def _day_values(db_path: Path, business_unit: str, from_iso: str, to_iso: str) -> dict:
+    """{start_date: (IT Services value, total value)} over each document's CURRENT
+    version (max version), so a superseded amount never inflates a day. Credits
+    and $0 adjustments count as 0. All values are bound parameters."""
+    con = _connect(db_path)
+    try:
+        rows = con.execute(
+            "WITH cur AS (SELECT start_date, grand_total, acquisition_type_sub_type, "
+            "ROW_NUMBER() OVER (PARTITION BY purchase_document "
+            "ORDER BY CAST(version AS INTEGER) DESC, rowid DESC) AS rn FROM purchases "
+            "WHERE business_unit = ? AND start_date BETWEEN ? AND ?) "
+            "SELECT start_date, "
+            "SUM(CASE WHEN acquisition_type_sub_type LIKE 'IT Services%' AND grand_total > 0 "
+            "THEN grand_total ELSE 0 END), "
+            "SUM(CASE WHEN grand_total > 0 THEN grand_total ELSE 0 END) "
+            "FROM cur WHERE rn = 1 GROUP BY start_date",
+            (business_unit, from_iso, to_iso),
+        ).fetchall()
+    finally:
+        con.close()
+    return {d: (it or 0, total or 0) for d, it, total in rows}
+
+
 def enrich_details(
     business_unit: str,
     from_date: str,
@@ -735,6 +758,7 @@ def enrich_details(
     newest_first: bool = False,
     acq_type: str | None = None,
     budget_minutes: float | None = None,
+    priority: str = "date",
     log=print,
 ) -> dict:
     """Drill into PO Details one active day at a time, resuming across runs.
@@ -744,6 +768,13 @@ def enrich_details(
     completed day is recorded in `details_progress`; a re-run skips finished
     days. A day that errors is left unrecorded so it retries next run.
     `newest_first` processes the most recent days first (recent data priority).
+
+    `priority="value"` orders pending days by what they hold instead of by date:
+    days with the most IT Services contract value first, then every other day by
+    total contract value (current version of each document; `newest_first` breaks
+    ties). The biggest contracts get line items first instead of waiting behind
+    years of small purchases (2026-10: 1,956 contracts >= $10M, $125B, had none).
+    A day cut mid-drill keeps its rank, so it is the first to resume.
 
     `budget_minutes` bounds the run's wall clock so it can finish cleanly ahead
     of an external kill (e.g. the CI job timeout): once spent, the run stops —
@@ -813,6 +844,17 @@ def enrich_details(
     # A reopened day is pending again; the resume skip set means only its
     # new/amended documents get drilled.
     pending = active if force else [d for d in active if d not in done or d in reopened]
+    if priority == "value" and pending:
+        scores = _day_values(db_path, business_unit, _iso(from_date), _iso(to_date))
+        # Stable sort over the date order above, so newest_first breaks ties.
+        pending.sort(key=lambda d: (-scores.get(d, (0, 0))[0], -scores.get(d, (0, 0))[1]))
+        it, total = scores.get(pending[0], (0, 0))
+        log(
+            f"value-first: top pending day {pending[0]} "
+            f"(IT Services ${it:,.0f}, total ${total:,.0f})"
+        )
+    elif priority != "date":
+        raise ValueError(f"unknown priority {priority!r} (expected 'date' or 'value')")
     log(
         f"{len(active)} active day(s); {len(active) - len(pending)} done; {len(pending)} pending"
         f" ({len(reopened & set(pending))} reopened)"
@@ -1015,6 +1057,13 @@ def _cli() -> None:
     en.add_argument("--force", action="store_true", help="Re-process days already recorded")
     en.add_argument("--newest-first", action="store_true", help="Process most recent days first")
     en.add_argument(
+        "--priority",
+        choices=("date", "value"),
+        default="date",
+        help="Day order: 'date' (by start date) or 'value' (most IT Services value first, "
+        "then most total contract value; --newest-first breaks ties)",
+    )
+    en.add_argument(
         "--acq-type",
         default=None,
         help="Only visit days with a document whose acquisition_type_sub_type matches "
@@ -1062,6 +1111,7 @@ def _cli() -> None:
                 newest_first=args.newest_first,
                 acq_type=args.acq_type,
                 budget_minutes=args.budget_minutes,
+                priority=args.priority,
             )
         )
     elif args.cmd == "refresh":
