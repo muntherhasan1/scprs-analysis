@@ -27,7 +27,8 @@ folds it in as an **optional side input** (like `supplier_enrichment.db`): skipp
 if `data/cmas.db` is absent. See `docs/CMAS.md`.
 
 `reconcile.py` is the external check: SCPRS contracts against Open FI$Cal vendor
-payments (payee coverage, paid-within-awarded, budget envelope). See
+payments (payee coverage, paid-within-awarded, budget envelope); `outliers.py` runs
+the R4 outlier review with live-SCPRS and payment evidence. See
 `docs/RECONCILIATION.md`.
 
 `app_export.py` writes the planned vendor web app's static JSON (`data/app/`)

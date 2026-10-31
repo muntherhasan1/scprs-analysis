@@ -82,3 +82,25 @@ capital outlay and Water Resources' OE&E is not a procurement proxy (2023-24 pri
 so R3 is an envelope, not a tie-out.
 
 `app_export` reports the same split in `meta.coverage.payments_reconcilable` and the coverage note.
+
+## Outlier review (R4) — `src/outliers.py`
+
+R4: any contract over 10% of its department's annual budget, or with a robust z-score over 5
+within its department × acquisition type (log10 value, median/MAD × 1.4826, groups of ≥ 30), must
+be confirmed or corrected against the SCPRS page **and** a third source before it sits in
+published totals. Contracts already reviewed with a class override (`contract_flags.csv`) are
+skipped.
+
+```bash
+python -m src.outliers run --wh data/warehouse.db --fiscal-dir data/fiscal \
+    --bu 3540 --bu 5180 --bu 8660 --live --out outlier_queue.csv --record
+```
+
+For each flag it fetches the live SCPRS summary value (one search per unit and start day) and the
+department's Open FI$Cal payments to that vendor. A verdict is proposed as `confirmed` only when
+the live value matches the stored one (±0.5%) **and** the department paid the vendor; every other
+case is `needs review: …` with the reason (not found, value differs, no payments, department not
+on FI$Cal, live check failed). `--record` appends confirmed verdicts to
+`references/outlier_reviews.csv`; human verdicts (`corrected`, `reclassified`, or `confirmed` with
+other evidence) are added by hand with their evidence. R4 passes for a department when every
+contract it currently flags has a closed verdict.
