@@ -6,14 +6,14 @@ import json
 import sqlite3
 
 from src import app_export, warehouse
-from tests.test_warehouse import _seed_eprocure, _seed_source
+from tests.test_warehouse import _seed_cmas, _seed_eprocure, _seed_source
 
 
 def _load(path):
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def _build(tmp_path, extra_purchases=()):
+def _build(tmp_path, extra_purchases=(), cmas=None):
     src, wh = tmp_path / "scprs.db", tmp_path / "warehouse.db"
     serve, epr = tmp_path / "warehouse-serve.db", tmp_path / "eprocure.db"
     _seed_source(src)  # BU 8660: doc A (v1 100 -> v2 150, Acme/S1), doc B (5000, Beta/S2)
@@ -55,7 +55,7 @@ def _build(tmp_path, extra_purchases=()):
         wh_path=wh,
         source_path=src,
         enrichment_db=tmp_path / "no_enrich.db",
-        cmas_db=tmp_path / "missing_cmas.db",
+        cmas_db=cmas or tmp_path / "missing_cmas.db",
         eprocure_db=epr,
         log=lambda *a: None,
     )
@@ -66,6 +66,7 @@ def _build(tmp_path, extra_purchases=()):
         app_dir=out,
         wh_path=wh,
         eprocure_path=epr,
+        cmas_path=cmas or tmp_path / "missing_cmas.db",
         today="2026-07-25",
         log=lambda *a: None,
     )
@@ -281,3 +282,56 @@ def test_cmas_holder_requires_an_agreement_in_term(tmp_path):
     flags = app_export._supplier_flags(con, "2026-07-25")
     assert flags["LIVE"]["cmas_holder"] is True
     assert flags["EXPIRED"]["cmas_holder"] is False
+
+
+def test_cmas_tab_lists_every_agreement_with_facets(tmp_path):
+    """cmas/agreements.json carries ALL agreements (matched to a SCPRS supplier or
+    not), derived status/enterprise flags/code families for client-side filters,
+    a supplier-page link when matched, and never the contact columns."""
+    cmas = tmp_path / "cmas.db"
+    _seed_cmas(
+        cmas,
+        [
+            ("3-01-01-1001", "Acme, Inc.", "SB", "2030-01-01"),  # matches supplier Acme
+            ("3-01-01-1002", "Zeta Unrelated Corp.", "NA", "2026-01-01"),  # expired, unmatched
+        ],
+    )
+    con = sqlite3.connect(cmas)
+    con.execute(
+        'UPDATE "Approved_Applications" SET select_applicable_product_service_codes = '
+        "'IT CONSULT-SYSTEM MGMT, IT CONSULT-PROGRAMMING, SECURITY-SMART CARDS, BRAND-CISCO', "
+        "contact_email = 'person@example.com', contact_name = 'A Person', "
+        "\"State or Country\" = 'California' WHERE \"CMAS Agreement Number\" = '3-01-01-1001'"
+    )
+    con.execute("CREATE TABLE extract_meta (extracted_at TEXT)")
+    con.execute("INSERT INTO extract_meta VALUES ('2026-07-24T06:40:00+00:00')")
+    con.commit()
+    con.close()
+    out, counts = _build(tmp_path, cmas=cmas)
+
+    assert _load(out / "meta.json")["cmas_as_of"] == "2026-07-24"
+    page = _load(out / "cmas" / "agreements.json")
+    assert counts["cmas_agreements"] == page["total_count"] == 2
+    assert page["active_count"] == 1 and page["matched_to_supplier_count"] == 1
+    acme, zeta = page["items"]
+    assert acme["status"] == "active" and zeta["status"] == "expired"
+    assert (acme["enterprise_type"], acme["small_business"], acme["dvbe"]) == ("SB", True, False)
+    assert zeta["enterprise_type"] is None  # "NA" = no SB/DVBE certification
+    assert acme["categories"] == ["IT CONSULT", "SECURITY"]  # BRAND-* is not a family
+    assert acme["brands"] == ["CISCO"]
+    assert len(acme["product_service_codes"]) == 4
+    assert acme["supplier"]["canonical_name"] and zeta["supplier"] is None
+    assert acme["supplier"]["shard"] == app_export._shard(acme["supplier"]["canonical_id"])
+    facets = page["facets"]
+    assert {"value": "IT CONSULT", "count": 1} in facets["category"]
+    assert facets["state"] == [{"value": "California", "count": 1}]
+    assert facets["brand"] == [{"value": "CISCO", "count": 1}]
+    assert {f["value"] for f in facets["enterprise_type"]} == {"SB", "None"}
+    text = (out / "cmas" / "agreements.json").read_text(encoding="utf-8")
+    assert "person@example.com" not in text and "A Person" not in text
+
+
+def test_no_cmas_store_means_no_cmas_file(tmp_path):
+    out, counts = _build(tmp_path)
+    assert _load(out / "meta.json")["cmas_as_of"] is None
+    assert counts["cmas_agreements"] == 0
