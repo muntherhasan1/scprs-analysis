@@ -122,9 +122,36 @@ def test_award_window_picks_up_contracts_older_than_the_store_policy(tmp_path):
         ],
     )
     rows = reconcile.contracts(con)
-    assert reconcile.reconcile("5180", payments, rows)["R2"] == 0.0
+    assert reconcile.reconcile("5180", payments, rows, award_from="2021-07-01")["R2"] == 0.0
     widened = reconcile.reconcile("5180", payments, rows, award_from="2016-07-01")
     assert widened["R2"] == 1.0
+
+
+def test_award_window_defaults_to_the_units_earliest_stored_contract(tmp_path):
+    """No explicit window: R2 counts every award the unit's stored history holds (a 2019
+    contract still running pays out in FY2023-24), and nothing from another unit."""
+    payments = reconcile.load_payments(
+        [
+            _fiscal_csv(
+                tmp_path / "Vendor_5180_DSS_FY23.csv",
+                [
+                    ("AVIATION CO", "5340580", OPS, SO, "200"),
+                    ("OTHER CO", "5340580", OPS, SO, "100"),
+                ],
+            )
+        ]
+    )
+    con = _store(
+        tmp_path / "s.db",
+        [
+            ("5180", "OLD", "1", "2019-03-01", "2026-12-31", 900.0, "AVIATION CO"),
+            ("5180", "NEW", "1", "2023-08-01", "2024-06-30", 50.0, "OTHER CO"),  # paid 2x award
+            ("1111", "ELSE", "1", "2015-01-01", None, 1e9, "OTHER CO"),  # another unit: ignored
+        ],
+    )
+    r = reconcile.reconcile("5180", payments, reconcile.contracts(con))
+    assert r["award_window"][0] == "2019-03-01"
+    assert r["R2"] == pytest.approx(200 / 300)  # AVIATION within its award; OTHER CO over
 
 
 def test_contracts_resolve_the_current_version(tmp_path):
