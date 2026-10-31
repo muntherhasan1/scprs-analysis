@@ -78,7 +78,9 @@ member.
 
 **Marts (views):** `gold_document` (COMPLETE document-grain mart — one row per
 purchase document with grand_total + raw/canonical supplier + acquisition
-taxonomy + department + `start_date`/`calendar_year`/`fiscal_year`; the primary
+taxonomy + department + `first_item_title` (the summary's description of the
+first item — what the contract is for, on every document) +
+`start_date`/`calendar_year`/`fiscal_year`; the primary
 source for spend/supplier/category/time, since `gold_line_item` covers only the
 ~13% of documents that were line-enriched), `gold_supplier_spend`,
 `gold_monthly_spend`,
