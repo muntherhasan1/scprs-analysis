@@ -68,11 +68,94 @@ PAYEE_EXCLUSIONS = {
         r"FOREST SERVICE|OFFICE OF EMERGENCY SERVICES|CONSERVATION CORPS|DEPARTMENT OF TECHNOLOGY|"
         r"UNIVERSITY OF CALIFORNIA|CALIFORNIA STATE UNIVERSITY|SECRETARY OF STATE|"
         r"STATE TREASURER|HIGHWAY PATROL|MILITARY DEPARTMENT|PRISON INDUSTRY)\b"
+        # State agencies abbreviated "DEPT <name>": CAL FIRE paid "DEPT FORESTRY FIRE PROTECT"
+        # (itself) $5.7M, which only "DEPT OF" missed.
+        r"|^DEPT\b"
     ),
     "redacted payees": re.compile(r"^CONFIDENTIAL\b"),
 }
 R2_TOP = 50
 R2_TOLERANCE = 1.10
+
+# Exception mechanisms: why a payee may be paid above its recorded award (or with no award)
+# for reasons that are NOT a procurement anomaly. They LABEL exceptions; they never remove a
+# payment from R1/R2 scope or change a test's result (an outside counsel under contract also
+# bills to the legal accounts). Keyed on the payee's dominant FI$Cal account, checked in order.
+LOCAL_GOVERNMENT = re.compile(
+    r"\b(CITY|COUNTY|CNTY|TOWN OF|FIRE (DEPT|DEPARTMENT|DIST|DISTRICT|AUTHORITY|PROTECTION)|"
+    r"FIRE PROT|SPECIAL DISTRICT)\b"
+)
+INTERDEPARTMENTAL_CONSULTING = "5340330"  # Consult & Prof Svcs-Interdept
+LEGAL_ACCOUNTS = frozenset({"5340300", "5340510", "5340520", "5340530", "5340540"})
+OTHER_SERVICES = "5390890"  # Other Items of Expense - Svcs
+MECHANISMS = (
+    "local agency reimbursement",  # e.g. wildfire mutual aid: paid by incident, not contract value
+    "legal award or settlement",
+    "postage",
+    "telecom or utilities under statewide agreements",
+    "statutory award (CPUC intervenor compensation)",
+)
+EXPLAINED = (*MECHANISMS, "contract in another department")
+
+
+def mechanism(vendor: str, account: str, business_unit: str) -> str | None:
+    """The likely non-procurement mechanism behind an exception, from the payee's dominant
+    account, or None (the exception stays unexplained)."""
+    account = str(account)
+    if account == INTERDEPARTMENTAL_CONSULTING and LOCAL_GOVERNMENT.search(vendor):
+        return MECHANISMS[0]
+    if account in LEGAL_ACCOUNTS:
+        return MECHANISMS[1]
+    if account.startswith("5306"):  # Postage
+        return MECHANISMS[2]
+    if account.startswith(("5304", "5326")):  # Communications, Utilities
+        return MECHANISMS[3]
+    is_cpuc = business_unit == "8660"
+    if is_cpuc and account == OTHER_SERVICES and not LOCAL_GOVERNMENT.search(vendor):
+        # Public Utilities Code 1801-1812: awards to consumer advocates (e.g. The Utility
+        # Reform Network), set by commission decision, not a contract.
+        return MECHANISMS[4]
+    return None
+
+
+def classify_payees(
+    totals,
+    dominant_account: dict[str, str],
+    awarded: dict[str, float],
+    mine: set[str],
+    anywhere: set[str],
+    business_unit: str,
+) -> dict[str, str]:
+    """Every in-scope payee -> 'within award', a MECHANISMS label, 'contract in another
+    department', or one of the two unexplained buckets."""
+    out = {}
+    for vendor, paid in totals.items():
+        if paid <= 0:
+            continue
+        if awarded.get(vendor, 0) > 0 and paid <= R2_TOLERANCE * awarded[vendor]:
+            out[vendor] = "within award"
+            continue
+        label = mechanism(vendor, dominant_account.get(vendor, ""), business_unit)
+        if label:
+            out[vendor] = label
+        elif vendor in mine:
+            out[vendor] = "unexplained: paid above recorded award"
+        elif vendor in anywhere:
+            out[vendor] = "contract in another department"
+        else:
+            out[vendor] = "unexplained: no contract anywhere"
+    return out
+
+
+def exception_summary(totals, labels: dict[str, str]) -> dict:
+    """Dollars and payee count per label, plus the unexplained share of in-scope dollars."""
+    by: dict[str, dict] = defaultdict(lambda: {"value": 0.0, "payees": 0})
+    for vendor, label in labels.items():
+        by[label]["value"] += float(totals[vendor])
+        by[label]["payees"] += 1
+    total = sum(b["value"] for b in by.values())
+    unexplained = sum(b["value"] for k, b in by.items() if k.startswith("unexplained"))
+    return {"by_label": dict(by), "unexplained_share": unexplained / total if total else None}
 
 
 def end_year(start_year: int) -> int:
@@ -228,6 +311,16 @@ def reconcile(
         ):
             awarded[c["vendor"]] += max(c["value"] or 0, 0)
     r2, r2_rows = paid_within_awarded(totals, awarded)
+    dominant = (
+        scope.groupby(["vendor", "account"])["amount"]
+        .sum()
+        .reset_index()
+        .sort_values("amount", ascending=False)
+        .drop_duplicates("vendor")
+        .set_index("vendor")["account"]
+        .to_dict()
+    )
+    labels = classify_payees(totals, dominant, awarded, mine, anywhere, business_unit)
     bridge["in-scope payments"] = float(totals.sum())
     bridge["paid to vendors with a contract in this department"] = float(
         totals[totals.index.isin(mine)].sum()
@@ -239,6 +332,15 @@ def reconcile(
         "R1_any_department": coverage(totals, anywhere),
         "R2": r2,
         "R2_rows": r2_rows,
+        "exceptions": exception_summary(totals, labels),
+        "top_unexplained": sorted(
+            (
+                [v, float(totals[v]), lab]
+                for v, lab in labels.items()
+                if lab.startswith("unexplained")
+            ),
+            key=lambda x: -x[1],
+        )[:15],
         "award_window": [award_from, award_to],
         "annualized_by_fy": annualized(
             [c for c in all_contracts if c["business_unit"] == business_unit]
@@ -298,7 +400,8 @@ def _cli() -> None:
         r = out[bu]
         print(
             f"{bu}: R1 dept {r['R1_department']:.1%}  any dept {r['R1_any_department']:.1%}  "
-            f"R2 {r['R2']:.1%}  (award window {args.award_from}..{args.award_to})"
+            f"R2 {r['R2']:.1%}  unexplained {r['exceptions']['unexplained_share']:.1%} of $  "
+            f"(award window {r['award_window'][0]}..{r['award_window'][1]})"
         )
     if args.out:
         args.out.write_text(json.dumps(out, indent=1, default=str), encoding="utf-8")
