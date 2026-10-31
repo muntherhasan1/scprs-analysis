@@ -3,10 +3,10 @@
 # mcp, but imported directly at boot, so capped here too)
 # plus matplotlib for the generate_chart / generate_report tools. None of the
 # pipeline's heavy deps (pandas, playwright, …) are required.
-mcp>=1.28.1,<2  # 2.0.0 removed mcp.server.fastmcp -> Space RUNTIME_ERROR; see requirements.txt
-starlette>=0.52.1,<2  # Route/responses imported by serve_http
-uvicorn>=0.31.1,<1  # uvicorn.run in serve_http
-matplotlib>=3.11.0,<4  # chart rendering (Agg backend) for generate_chart/generate_report
+mcp>=1.30.0,<2  # 2.0.0 removed mcp.server.fastmcp -> Space RUNTIME_ERROR; see requirements.txt
+starlette>=1.10.0,<2  # Route/responses imported by serve_http
+uvicorn>=0.54.0,<1  # uvicorn.run in serve_http
+matplotlib>=3.11.2,<4  # chart rendering (Agg backend) for generate_chart/generate_report
 pillow>=13.0.0  # matplotlib dep; 13.0 fixes the 2026-10 pillow CVE batch (pip-audit gated)
-huggingface_hub>=1.23.0,<2  # CommitScheduler for the optional tool-call audit log (query_log.py)
-sentry-sdk>=2.66.0,<3  # optional error tracking (src/observability.py); no-op unless SENTRY_DSN set
+huggingface_hub>=2.3.0,<3  # CommitScheduler for the optional tool-call audit log (query_log.py)
+sentry-sdk>=2.73.0,<3  # optional error tracking (src/observability.py); no-op unless SENTRY_DSN set
