@@ -1,5 +1,7 @@
 """Offline tests for the PO Details drill-down parser and loader."""
 
+import pytest
+
 from src import model, scprs
 
 # Minimal HTML with the drill-down span ids: header + 1 line + 1 associated PO.
@@ -291,8 +293,7 @@ def test_enrich_passes_already_drilled_docs_as_skip_set(tmp_path, monkeypatch):
         ],
     )
     con.executemany(
-        "INSERT INTO document_details (business_unit, purchase_document, version) "
-        "VALUES (?, ?, ?)",
+        "INSERT INTO document_details (business_unit, purchase_document, version) VALUES (?, ?, ?)",
         [("8660", "DONE", "2"), ("8660", "STALE", "1")],
     )
     con.commit()
@@ -339,3 +340,64 @@ def test_build_details_delete_scoped_to_business_unit(tmp_path, monkeypatch):
     }
     con.close()
     assert bus == {"1111", "2222"}  # BU 2222's reload did NOT delete BU 1111's shared-doc rows
+
+
+def test_enrich_value_priority_puts_it_services_then_big_days_first(tmp_path, monkeypatch):
+    """--priority value: days with the most IT Services value first, then the rest
+    by total value, using each document's CURRENT version; date breaks ties."""
+    db = tmp_path / "v.db"
+    con = model._connect(db)
+    model._ensure_schema(con)
+    con.executemany(
+        "INSERT INTO purchases (business_unit, purchase_document, version, start_date, "
+        "grand_total, acquisition_type_sub_type) VALUES ('8660', ?, ?, ?, ?, ?)",
+        [
+            ("A", "1", "2021-01-05", 5_000.0, "IT Services"),  # small IT day
+            ("B", "1", "2021-02-10", 9_000_000.0, "NON-IT Services"),  # biggest non-IT day
+            ("C", "1", "2021-03-15", 2_000_000.0, "IT Services_Cloud"),  # biggest IT day
+            ("C2", "1", "2021-03-15", 1.0, "NON-IT Goods"),
+            # superseded v1 was huge; current v2 is small -> must not jump the queue
+            ("D", "1", "2021-04-20", 50_000_000.0, "NON-IT Goods"),
+            ("D", "2", "2021-04-20", 10.0, "NON-IT Goods"),
+            ("E", "1", "2021-05-25", 10.0, "NON-IT Goods"),  # ties D at $10 -> date decides
+            ("F", "1", "2021-06-30", -400.0, "NON-IT Goods"),  # credit counts as $0
+        ],
+    )
+    con.commit()
+    con.close()
+    calls = []
+    monkeypatch.setattr(
+        model,
+        "build_details_db",
+        lambda bu, f, t, *, db_path, log=print, **k: (
+            calls.append(t) or {"documents": 1, "lines": 1, "pos": 0}
+        ),
+    )
+    model.enrich_details(
+        "8660",
+        "01/01/2021",
+        "12/31/2021",
+        db_path=db,
+        priority="value",
+        newest_first=True,
+        log=lambda *a: None,
+    )
+    assert calls == [
+        "03/15/2021",  # IT $2M
+        "01/05/2021",  # IT $5K
+        "02/10/2021",  # non-IT $9M
+        "05/25/2021",  # $10, newer of the tie
+        "04/20/2021",  # $10 at its current version (v1's $50M ignored)
+        "06/30/2021",  # credit -> $0
+    ]
+
+    with pytest.raises(ValueError):
+        model.enrich_details(
+            "8660",
+            "01/01/2021",
+            "12/31/2021",
+            db_path=db,
+            force=True,
+            priority="biggest",
+            log=lambda *a: None,
+        )
