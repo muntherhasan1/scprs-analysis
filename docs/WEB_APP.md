@@ -1,5 +1,13 @@
 # Natural-language web app (ask the warehouse in plain English)
 
+> **Retired 2026-10-31.** The Space `munther-hasan/scprs-warehouse-chat` is
+> **paused, not deleted**, and is no longer restarted by the refresh pipeline.
+> Contract Lens (see [VENDOR_APP.md](VENDOR_APP.md)) is the product. The code
+> (`src/nl_query.py`, `src/web_app.py`, `deploy/hf-chat/`) is kept so it can be
+> revived: resume the Space in the HF UI, re-add it to `DEFAULT_SPACES` in
+> `src/data_sync.py` and `$Spaces` in `scripts/refresh_pipeline.ps1`, and
+> redeploy with `deploy/hf-chat/deploy.py` to pick up current code.
+
 A public web page where **anyone with the link** types a question in plain
 English and gets a short answer, the SQL behind it, and the underlying rows — no
 login, no client to install. This is the broad-reach counterpart to the

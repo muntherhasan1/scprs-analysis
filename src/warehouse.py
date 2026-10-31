@@ -32,6 +32,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import os
 import re
 import sqlite3
 from datetime import datetime
@@ -48,6 +49,8 @@ class DwBuildError(RuntimeError):
 SOURCE_DB = scprs.DATA_DIR / "scprs.db"
 WAREHOUSE_DB = scprs.DATA_DIR / "warehouse.db"
 SERVE_DB = scprs.DATA_DIR / "warehouse-serve.db"  # slim, serving-only copy (gold + star)
+# dw_document_history alone, persisted between CI rebuilds (export_history / seed_history)
+HISTORY_DB = scprs.DATA_DIR / "warehouse-history.db"
 ENRICHMENT_DB = scprs.DATA_DIR / "supplier_enrichment.db"  # web-researched supplier profiles
 CMAS_DB = scprs.DATA_DIR / "cmas.db"  # CMAS master-agreement contractors (src/cmas.py)
 EPROCURE_DB = (
@@ -1959,13 +1962,135 @@ def capture_document_history(con: sqlite3.Connection, batch: str, ts: str) -> in
           SELECT 1 FROM dw_document_history h
           WHERE h.business_unit = b.business_unit
             AND h.purchase_document = b.purchase_document
-            AND h.version = b.version
+            AND h.version IS b.version  -- IS: a NULL version must match itself
             AND h.content_sig = b.sig)
         """,  # noqa: S608 - signature is a fixed internal expression; values are bound
         (batch, ts),
     )
     con.commit()
     return con.execute("SELECT COUNT(*) FROM dw_document_history").fetchone()[0] - before
+
+
+class HistoryError(RuntimeError):
+    """The persisted contract history could not be seeded or would shrink on export."""
+
+
+def _history_rows(path: Path) -> int | None:
+    """Row count of ``dw_document_history`` in the SQLite file ``path``; None when the
+    file or the table is absent."""
+    if not Path(path).exists():
+        return None
+    con = sqlite3.connect(f"file:{Path(path).as_posix()}?mode=ro", uri=True)
+    try:
+        if not con.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='dw_document_history'"
+        ).fetchone():
+            return None
+        return con.execute("SELECT COUNT(*) FROM dw_document_history").fetchone()[0]
+    finally:
+        con.close()
+
+
+def seed_history(con: sqlite3.Connection, history_path: Path, log=print) -> int:
+    """Merge a persisted ``dw_document_history`` (``export_history``'s file) into ``con``.
+
+    CI rebuilds warehouse.db from nothing each run, so without this the append-only
+    history would restart every build and the change log would only ever hold one
+    snapshot. Rows already present (same document, version and signature) are
+    skipped, so seeding into a warehouse that kept its own history is safe. A
+    missing file means "no history yet" (first run) and seeds nothing; a file
+    without the table is corrupt and raises. Returns the rows inserted.
+    """
+    history_path = Path(history_path)
+    if not history_path.exists():
+        log(f"history seed: {history_path.name} absent — starting history fresh")
+        return 0
+    if _history_rows(history_path) is None:
+        raise HistoryError(f"{history_path} has no dw_document_history table")
+    _ensure_control(con)
+    before = con.execute("SELECT COUNT(*) FROM dw_document_history").fetchone()[0]
+    con.execute("ATTACH DATABASE ? AS hist", (str(history_path),))
+    try:
+        # Keep the original surrogate keys when the target is empty (the CI case),
+        # so history_sk stays stable across rebuilds; otherwise let them renumber.
+        cols = (
+            "business_unit, purchase_document, version, grand_total, status, start_date, "
+            "end_date, supplier_id, supplier_name, acquisition, content_sig, batch_id, "
+            "observed_at"
+        )
+        if before == 0:
+            cols = "history_sk, " + cols
+        con.execute(
+            f"""
+            INSERT INTO dw_document_history ({cols})
+            SELECT {cols} FROM hist.dw_document_history s
+            WHERE NOT EXISTS (
+              SELECT 1 FROM main.dw_document_history h
+              WHERE h.business_unit = s.business_unit
+                AND h.purchase_document = s.purchase_document
+                AND h.version IS s.version
+                AND h.content_sig = s.content_sig)
+            ORDER BY s.history_sk
+            """  # noqa: S608 - fixed internal column list
+        )
+        con.commit()
+    except Exception:
+        con.rollback()  # an open transaction would block the DETACH below
+        raise
+    finally:
+        con.execute("DETACH DATABASE hist")
+    added = con.execute("SELECT COUNT(*) FROM dw_document_history").fetchone()[0] - before
+    log(f"history seed: +{added} row(s) from {history_path.name}")
+    return added
+
+
+def export_history(wh_path: Path = WAREHOUSE_DB, out_path: Path = HISTORY_DB, log=print) -> int:
+    """Write ONLY ``dw_document_history`` to ``out_path`` so it can be persisted
+    between CI runs (``serve-export`` drops it from the serve DB). Returns the rows
+    written.
+
+    Shrink guard: history is append-only, so if ``out_path`` already holds a history
+    (in CI, the copy this run seeded from) with MORE rows than the new export, the
+    export is refused and the existing file is left untouched — publishing it would
+    erase recorded contract changes.
+    """
+    wh_path, out_path = Path(wh_path), Path(out_path)
+    rows = _history_rows(wh_path)
+    if rows is None:
+        raise HistoryError(f"{wh_path} has no dw_document_history — build the warehouse first")
+    prior = _history_rows(out_path)
+    if prior is not None and rows < prior:
+        raise HistoryError(
+            f"refusing to export {rows:,} history rows over {out_path.name}'s {prior:,}: "
+            "dw_document_history is append-only, so this build lost history (was it seeded?)"
+        )
+    tmp = out_path.with_name(out_path.name + ".tmp")
+    tmp.unlink(missing_ok=True)
+    con = sqlite3.connect(wh_path)
+    try:
+        ddl = [
+            sql
+            for (sql,) in con.execute(
+                "SELECT sql FROM sqlite_master WHERE tbl_name='dw_document_history' "
+                "AND sql IS NOT NULL ORDER BY type DESC"  # table before its index
+            )
+        ]
+        out = sqlite3.connect(tmp)  # same table + index DDL as the warehouse
+        try:
+            for s in ddl:
+                out.execute(s)
+            out.commit()
+        finally:
+            out.close()
+        con.execute("ATTACH DATABASE ? AS out", (str(tmp),))
+        con.execute("INSERT INTO out.dw_document_history SELECT * FROM main.dw_document_history")
+        con.commit()
+        con.execute("DETACH DATABASE out")
+    finally:
+        con.close()
+    os.replace(tmp, out_path)
+    log(f"history export: {rows:,} row(s) -> {out_path.name} (was {prior or 0:,})")
+    return rows
 
 
 def run_dq(con: sqlite3.Connection, batch: str, ts: str) -> list[dict]:
@@ -2003,6 +2128,7 @@ def build_all(
     enrichment_db: Path = ENRICHMENT_DB,
     cmas_db: Path = CMAS_DB,
     eprocure_db: Path = EPROCURE_DB,
+    seed_history_db: Path | None = None,
     log=print,
 ) -> dict:
     import time
@@ -2041,6 +2167,9 @@ def build_all(
             "bronze", lambda: build_bronze(con, batch, ts, enrichment_db, cmas_db, eprocure_db)
         )
         con.commit()
+        if seed_history_db is not None:
+            # before capture, so the signature gate sees prior runs' snapshots
+            _timed("history_seed", lambda: seed_history(con, seed_history_db, log=log))
         appended = _timed("history", lambda: capture_document_history(con, batch, ts))
         counts["dw_document_history_appended"] = appended
         log(f"[{batch}] history: +{appended} snapshot(s)")
@@ -2287,7 +2416,18 @@ def export_mart_csvs(
 def _cli() -> None:
     ap = argparse.ArgumentParser(description="SCPRS medallion warehouse (bronze/silver/gold).")
     sub = ap.add_subparsers(dest="cmd", required=True)
-    sub.add_parser("build", help="Build all layers from data/scprs.db")
+    bld = sub.add_parser("build", help="Build all layers from data/scprs.db")
+    bld.add_argument(
+        "--seed-history",
+        default=None,
+        metavar="PATH",
+        help="merge a persisted dw_document_history (export-history's file) before capture",
+    )
+    exh = sub.add_parser(
+        "export-history",
+        help="Write dw_document_history alone to a file for persistence between CI runs",
+    )
+    exh.add_argument("--out", default=str(HISTORY_DB))
     sub.add_parser("dq", help="Run data-quality checks against the current warehouse")
     sub.add_parser("info", help="Show layer row counts and last batch")
     sub.add_parser(
@@ -2297,7 +2437,9 @@ def _cli() -> None:
     args = ap.parse_args()
 
     if args.cmd == "build":
-        build_all()
+        build_all(seed_history_db=Path(args.seed_history) if args.seed_history else None)
+    elif args.cmd == "export-history":
+        export_history(out_path=Path(args.out))
     elif args.cmd == "serve-export":
         export_serve_db()
         export_mart_csvs()

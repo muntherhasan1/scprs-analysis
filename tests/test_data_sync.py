@@ -680,3 +680,268 @@ def test_publish_app_cli_prefers_app_token(monkeypatch, tmp_path):
     )
     data_sync._cli()
     assert captured == {"app_dir": tmp_path, "repo": "acme/app", "passed": "app-write"}
+
+
+# ------------------------------------------------------- persisted contract history
+
+
+def _fake_history_api(monkeypatch, *, blob="blob-h1", info_error=None, commits=None):
+    """Fake HfApi: dataset HEAD + the history file's blob id (None = absent)."""
+    import huggingface_hub
+
+    class FakeApi:
+        def __init__(self, token=None):
+            pass
+
+        def dataset_info(self, repo, token=None):
+            if info_error:
+                raise info_error
+
+            class Info:
+                sha = "headsha"
+
+            return Info()
+
+        def get_paths_info(self, repo, paths, revision=None, repo_type=None, token=None):
+            return [_PathInfo(blob)] if blob else []
+
+        def create_commit(self, **kw):
+            if commits is not None:
+                commits.append(kw)
+
+            class Info:
+                commit_url = "https://hf/commit/both"
+
+            return Info()
+
+    monkeypatch.setattr(huggingface_hub, "HfApi", FakeApi)
+
+
+def test_fetch_history_absent_starts_fresh(tmp_path, monkeypatch):
+    _fake_history_api(monkeypatch, blob=None)
+    dest = tmp_path / "warehouse-history.db"
+    dest.write_bytes(b"stale local copy")
+    assert data_sync.fetch_history_db(dest, "acme/wh", token="t") is False  # noqa: S106
+    assert not dest.exists()  # never seed from a stale local file
+    assert data_sync._rev_sidecar(dest).read_text() == "absent 0"
+
+
+def test_fetch_history_fails_closed_when_dataset_unreadable(tmp_path, monkeypatch):
+    _fake_history_api(monkeypatch, info_error=RuntimeError("401 Unauthorized"))
+    with pytest.raises(data_sync.WarehouseFetchError, match="Refusing to start history fresh"):
+        data_sync.fetch_history_db(tmp_path / "h.db", "acme/wh", token="t")  # noqa: S106
+
+
+def test_fetch_history_fails_closed_when_download_fails(tmp_path, monkeypatch):
+    import huggingface_hub
+
+    _fake_history_api(monkeypatch, blob="blob-h1")
+
+    def boom(**kw):
+        raise RuntimeError("403 Forbidden")
+
+    monkeypatch.setattr(huggingface_hub, "hf_hub_download", boom)
+    dest = tmp_path / "h.db"
+    with pytest.raises(data_sync.WarehouseFetchError):
+        data_sync.fetch_history_db(dest, "acme/wh", token="t")  # noqa: S106
+    assert not dest.exists()
+
+
+def test_fetch_history_downloads_at_head_and_records_blob(tmp_path, monkeypatch):
+    import huggingface_hub
+
+    remote = _history_file(tmp_path / "remote.db", 3)
+    seen = {}
+
+    def fake_download(**kw):
+        seen.update(kw)
+        return str(remote)
+
+    _fake_history_api(monkeypatch, blob="blob-h1")
+    monkeypatch.setattr(huggingface_hub, "hf_hub_download", fake_download)
+    dest = tmp_path / "h.db"
+    assert data_sync.fetch_history_db(dest, "acme/wh", token="t") is True  # noqa: S106
+    assert dest.read_bytes() == remote.read_bytes()
+    assert seen["revision"] == "headsha"
+    assert data_sync._rev_sidecar(dest).read_text() == "blob-h1 3"  # blob + rows fetched
+
+
+def _history_file(path, rows):
+    """A minimal persisted-history SQLite file holding ``rows`` rows."""
+    import sqlite3
+
+    con = sqlite3.connect(path)
+    con.execute("CREATE TABLE dw_document_history (history_sk INTEGER PRIMARY KEY, x TEXT)")
+    con.executemany("INSERT INTO dw_document_history (x) VALUES (?)", [("r",)] * rows)
+    con.commit()
+    con.close()
+    return path
+
+
+def test_publish_with_history_is_one_cas_commit_and_spends_sidecar(tmp_path, monkeypatch):
+    serve = tmp_path / "warehouse-serve.db"
+    serve.write_bytes(b"s")
+    hist = _history_file(tmp_path / "warehouse-history.db", 5)
+    data_sync._rev_sidecar(hist).write_text("blob-h1 3")  # fetched 3 rows; build added 2
+    commits = []
+    _fake_history_api(monkeypatch, blob="blob-h1", commits=commits)
+    url = data_sync.publish_serve_db(serve, "acme/wh", token="t", history_path=hist)  # noqa: S106
+    assert url == "https://hf/commit/both"
+    assert len(commits) == 1
+    paths = {op.path_in_repo for op in commits[0]["operations"]}
+    assert paths == {"warehouse-serve.db", "warehouse-history.db"}
+    # Pinned to the HEAD the guard checked: a commit landing in between makes the
+    # Hub reject ours instead of being overwritten.
+    assert commits[0]["parent_commit"] == "headsha"
+    assert not data_sync._rev_sidecar(hist).exists()
+
+
+def test_publish_skips_unchanged_history_and_uploads_serve_alone(tmp_path, monkeypatch):
+    # Most refreshes append no history rows: re-uploading the identical ~0.6 GB
+    # file four times a day only grows the dataset (every revision is kept).
+    serve = tmp_path / "warehouse-serve.db"
+    serve.write_bytes(b"s")
+    hist = _history_file(tmp_path / "warehouse-history.db", 3)
+    data_sync._rev_sidecar(hist).write_text("blob-h1 3")
+    commits, uploads = [], []
+    _fake_history_api(monkeypatch, blob="blob-h1", commits=commits)
+
+    def fake_upload(path, repo, filename, token, message, parent_commit=None):
+        uploads.append(filename)
+        return "https://hf/commit/serve"
+
+    monkeypatch.setattr(data_sync, "_upload_db", fake_upload)
+    url = data_sync.publish_serve_db(serve, "acme/wh", token="t", history_path=hist)  # noqa: S106
+    assert url == "https://hf/commit/serve"
+    assert uploads == ["warehouse-serve.db"] and commits == []
+    assert not data_sync._rev_sidecar(hist).exists()  # spent either way
+
+
+def test_publish_with_history_refuses_without_fetch_or_on_change(tmp_path, monkeypatch):
+    serve = tmp_path / "warehouse-serve.db"
+    serve.write_bytes(b"s")
+    hist = _history_file(tmp_path / "warehouse-history.db", 5)
+    commits = []
+    _fake_history_api(monkeypatch, blob="blob-h2", commits=commits)
+    with pytest.raises(data_sync.WarehouseFetchError, match="not fetched this run"):
+        data_sync.publish_serve_db(serve, "acme/wh", token="t", history_path=hist)  # noqa: S106
+    data_sync._rev_sidecar(hist).write_text("blob-h1 3")  # dataset moved on to h2 since
+    with pytest.raises(data_sync.WarehouseFetchError, match="lost-update guard"):
+        data_sync.publish_serve_db(serve, "acme/wh", token="t", history_path=hist)  # noqa: S106
+    assert commits == []
+
+
+def test_publish_cli_with_history_passes_history_path(monkeypatch):
+    monkeypatch.setenv("HF_WAREHOUSE_TOKEN", "dataset-write")
+    captured = {}
+
+    def recorder(serve_path, repo, token=None, history_path=None):
+        captured.update(history=history_path)
+        return "https://hf/commit/abc"
+
+    monkeypatch.setattr(data_sync, "publish_serve_db", recorder)
+    monkeypatch.setattr(
+        sys, "argv", ["data_sync", "publish", "--with-history", "--dataset", "acme/data"]
+    )
+    data_sync._cli()
+    assert captured["history"].name == "warehouse-history.db"
+
+
+def test_publish_mirrors_the_marts_feed(tmp_path, monkeypatch):
+    """A mart dropped from the export must also leave marts/ (else Power BI keeps
+    reading its frozen last file with no error)."""
+    serve = tmp_path / "warehouse-serve.db"
+    serve.write_bytes(b"s")
+    (tmp_path / "marts").mkdir()
+    (tmp_path / "marts" / "gold_x.csv").write_text("a\n1\n")
+    folders = []
+
+    class FakeApi:
+        def __init__(self, token=None):
+            pass
+
+        def upload_folder(self, **kw):
+            folders.append(kw)
+
+    import huggingface_hub
+
+    monkeypatch.setattr(huggingface_hub, "HfApi", FakeApi)
+    monkeypatch.setattr(data_sync, "_upload_db", lambda *a, **k: "https://hf/commit/serve")
+    data_sync.publish_serve_db(serve, "acme/wh", token="t")  # noqa: S106
+    assert folders[0]["path_in_repo"] == "marts"
+    assert folders[0]["delete_patterns"] == folders[0]["allow_patterns"]
+    assert set(folders[0]["delete_patterns"]) == {"*.csv", "star/*.parquet"}
+
+
+def _warehouse_history(path, docs):
+    """A warehouse.db whose dw_document_history holds one row per (doc, total)."""
+    import sqlite3
+
+    from src import warehouse
+
+    con = sqlite3.connect(path)
+    warehouse._ensure_control(con)
+    for doc, total in docs:
+        con.execute(
+            "INSERT INTO dw_document_history (business_unit, purchase_document, version, "
+            "grand_total, content_sig, batch_id, observed_at) "
+            "VALUES ('0001', ?, 0, ?, ?, 'b', '2026-07-09T00:00:00')",
+            (doc, total, f"0|{total}"),
+        )
+    con.commit()
+    con.close()
+    return path
+
+
+def _fake_merge_hub(monkeypatch, remote, commits):
+    import shutil
+
+    import huggingface_hub
+
+    _fake_history_api(monkeypatch, blob="blob-h1", commits=commits)
+
+    def fake_download(**kw):
+        out = remote.with_name("dl.db")
+        shutil.copyfile(remote, out)
+        return str(out)
+
+    monkeypatch.setattr(huggingface_hub, "hf_hub_download", fake_download)
+
+
+def test_merge_history_dry_run_counts_and_publishes_nothing(tmp_path, monkeypatch):
+    # Dataset: A unchanged (same signature, so the laptop's earlier row stands)
+    # and a later change to B -> merged = laptop A, laptop B, dataset B.
+    local = _warehouse_history(tmp_path / "laptop.db", [("A", 10), ("B", 20)])
+    remote = _warehouse_history(tmp_path / "remote.db", [("A", 10), ("B", 200)])
+    commits = []
+    _fake_merge_hub(monkeypatch, remote, commits)
+    counts = data_sync.merge_history(
+        local,
+        "acme/wh",
+        token="t",  # noqa: S106 - fake
+        work_dir=tmp_path / "w",
+    )
+    assert counts == {
+        "dataset_rows": 2,
+        "local_rows": 2,
+        "merged_rows": 3,
+        "added_to_dataset": 1,
+    }
+    assert commits == []  # dry run by default
+
+
+def test_merge_history_apply_is_a_history_only_cas_commit(tmp_path, monkeypatch):
+    local = _warehouse_history(tmp_path / "laptop.db", [("A", 10)])
+    remote = _warehouse_history(tmp_path / "remote.db", [("B", 200)])
+    commits = []
+    _fake_merge_hub(monkeypatch, remote, commits)
+    counts = data_sync.merge_history(
+        local,
+        "acme/wh",
+        token="t",  # noqa: S106 - fake
+        work_dir=tmp_path / "w",
+        apply=True,
+    )
+    assert counts["merged_rows"] == 2 and counts["commit"] == "https://hf/commit/both"
+    assert [op.path_in_repo for op in commits[0]["operations"]] == ["warehouse-history.db"]
+    assert commits[0]["parent_commit"] == "headsha"
