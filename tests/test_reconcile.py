@@ -199,3 +199,90 @@ def test_store_query_is_read_only_safe(tmp_path):
     _store(path, [("5180", "A", "1", "2023-08-01", None, 1.0, "ACME")]).close()
     con = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
     assert len(reconcile.contracts(con, "5180")) == 1
+
+
+@pytest.mark.parametrize(
+    "vendor, account, bu, expected",
+    [
+        ("CITY OF SAN JOSE FIRE DEPT", "5340330", "3540", "local agency reimbursement"),
+        ("ALAMEDA COUNTY FIRE DEPARTMENT", "5340330", "3540", "local agency reimbursement"),
+        ("SACRAMENTO METRO FIRE DIST", "5340330", "3540", "local agency reimbursement"),
+        ("CITY OF LONG BEACH", "5340580", "3540", None),  # local government, not interdept acct
+        ("ACME CONSULTING", "5340330", "3540", None),  # interdept account, not local government
+        ("HEINRICH LAW IOLTA TRUST", "5340300", "3540", "legal award or settlement"),
+        ("SIERRA PACIFIC INDUSTRIES", "5340510", "3540", "legal award or settlement"),
+        ("US POSTAL SERVICE", "5306100", "8660", "postage"),
+        ("VERIZON WIRELESS", "5304700", "5180", "telecom or utilities under statewide agreements"),
+        (
+            "PACIFIC GAS ELECTRIC",
+            "5326100",
+            "8660",
+            "telecom or utilities under statewide agreements",
+        ),
+        (
+            "UTILITY REFORM NETWORK",
+            "5390890",
+            "8660",
+            "statutory award (CPUC intervenor compensation)",
+        ),
+        ("UTILITY REFORM NETWORK", "5390890", "3540", None),  # intervenor rule is CPUC-only
+        ("COUNTY OF MARIN", "5390890", "8660", None),  # a local agency is not an intervenor
+        ("AMENTUM SERVICES", "5302000", "3540", None),
+    ],
+)
+def test_exception_mechanisms(vendor, account, bu, expected):
+    assert reconcile.mechanism(vendor, account, bu) == expected
+
+
+def test_dept_abbreviated_state_agency_is_a_government_payee():
+    """CAL FIRE paid itself as "DEPT FORESTRY FIRE PROTECT"; "DEPTFORD" is not an agency."""
+    assert reconcile.exclusion("DEPT FORESTRY FIRE PROTECT", "5390900") == "government payees"
+    assert reconcile.exclusion("DEPTFORD HOLDINGS", "5340580") is None
+
+
+def test_exceptions_are_labeled_without_changing_r1_or_r2(tmp_path):
+    """Every in-scope payee lands in exactly one bucket; mechanism labels explain exceptions but
+    never move dollars out of scope, so R1/R2 equal the unlabeled computation."""
+    payments = reconcile.load_payments(
+        [
+            _fiscal_csv(
+                tmp_path / "Vendor_3540_CF_FY23.csv",
+                [
+                    ("ACME CONSULTING", "5340580", OPS, SO, "100"),  # within award (95)
+                    ("CITY OF ANAHEIM", "5340330", OPS, SO, "40"),  # over award, mutual aid
+                    ("SIERRA PACIFIC INDUSTRIES", "5340510", OPS, SO, "30"),  # no award, legal
+                    ("BIG VENDOR", "5340580", OPS, SO, "50"),  # over award, unexplained
+                    ("HORNE", "5340580", OPS, SO, "20"),  # contract in another dept
+                    ("MYSTERY LLC", "5340580", OPS, SO, "10"),  # no contract anywhere
+                ],
+            )
+        ]
+    )
+    con = _store(
+        tmp_path / "s.db",
+        [
+            ("3540", "A", "1", "2022-08-01", None, 95.0, "ACME CONSULTING"),
+            ("3540", "C", "1", "2022-08-01", None, 10.0, "CITY OF ANAHEIM"),
+            ("3540", "B", "1", "2022-08-01", None, 20.0, "BIG VENDOR"),
+            ("1111", "H", "1", "2022-08-01", None, 99.0, "HORNE"),
+        ],
+    )
+    r = reconcile.reconcile("3540", payments, reconcile.contracts(con))
+    by = {k: v["value"] for k, v in r["exceptions"]["by_label"].items()}
+    assert by == {
+        "within award": 100,
+        "local agency reimbursement": 40,
+        "legal award or settlement": 30,
+        "unexplained: paid above recorded award": 50,
+        "contract in another department": 20,
+        "unexplained: no contract anywhere": 10,
+    }
+    assert sum(by.values()) == r["bridge"]["in-scope payments"] == 250
+    assert r["exceptions"]["unexplained_share"] == pytest.approx(60 / 250)
+    assert [v for v, _, _ in r["top_unexplained"]] == [
+        reconcile.normalize_name("BIG VENDOR"),
+        reconcile.normalize_name("MYSTERY LLC"),
+    ]
+    # Labels don't touch the tests: R2 counts only ACME within award, as before.
+    assert r["R2"] == pytest.approx(100 / 250)
+    assert r["R1_department"] == pytest.approx(190 / 250)  # ACME, ANAHEIM, BIG
