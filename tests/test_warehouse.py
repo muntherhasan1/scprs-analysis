@@ -1548,3 +1548,87 @@ def test_superseded_registration_is_counted_once(tmp_path, monkeypatch):
         assert failed["document_grain_parity"] == 0 and failed["superseded_target_present"] == 0
     finally:
         con.close()
+
+
+def test_assistance_rule_reclassifies_public_recipients_only(tmp_path, monkeypatch):
+    """references/assistance_rules.csv: Education's special-statute (SCM 009) records paid to a
+    public recipient become class X with the rule's flag; a company, a private school and other
+    departments are untouched, and a reviewed per-contract flag beats the rule."""
+    flags = tmp_path / "flags.csv"
+    flags.write_text(
+        "business_unit,purchase_document,award_class,flag,note,reviewed\n"
+        "6100,REVIEWED,Q,value quarantined: implausible registered value,n,2026-10-31\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(warehouse, "CONTRACT_FLAGS_CSV", flags)
+    src, wh = tmp_path / "scprs.db", tmp_path / "warehouse.db"
+    _seed_source(src)
+    con = sqlite3.connect(src)
+    statute = "Other - Special Statute (Buyer must indicate the law) - COMPETITIVE"
+    con.executemany(
+        "INSERT INTO purchases (business_unit, purchase_document, version, grand_total, "
+        "start_date, acquisition_type_sub_type, acquisition_method, supplier_id, supplier_name, "
+        "status, department_name) VALUES (?, ?, '1', 100.0, '2023-08-01', 'NON-IT Services', "
+        "?, ?, ?, 'Active', 'Dept')",
+        [
+            ("6100", "TREAS", statute, "T1", "TREASURER OF LOS ANGELES CNTY"),
+            ("6100", "DIST", statute, "T2", "ELK GROVE UNIFIED SCHOOL DIST"),
+            ("6100", "VENDOR", statute, "T3", "CATAPULT LEARNING WEST LLC"),  # a company
+            ("6100", "PRIVATE", statute, "T4", "SHADE CANYON SCHOOL"),  # a private school
+            ("6100", "REVIEWED", statute, "T5", "TREASURER OF KERN COUNTY"),
+            ("6100", "OTHERCODE", "Formal - COMPETITIVE", "T6", "TREASURER OF FRESNO COUNTY"),
+            ("8660", "OTHERDEPT", statute, "T7", "TREASURER OF MARIN COUNTY"),
+        ],
+    )
+    con.commit()
+    con.close()
+    warehouse.build_all(
+        wh_path=wh,
+        source_path=src,
+        enrichment_db=tmp_path / "no_enrich.db",
+        cmas_db=tmp_path / "missing_cmas.db",
+        log=lambda *a: None,
+    )
+    con = sqlite3.connect(wh)
+    try:
+        got = {
+            d: (c, f)
+            for d, c, f in con.execute(
+                "SELECT purchase_document, award_class, contract_flag FROM gold_document"
+            )
+        }
+        rule_flag = "assistance to local agencies (K-12 apportionments and grants)"
+        assert got["TREAS"] == ("X", rule_flag) and got["DIST"] == ("X", rule_flag)
+        assert got["VENDOR"] == ("C", None) and got["PRIVATE"] == ("C", None)
+        assert got["REVIEWED"][0] == "Q"  # the reviewed flag wins over the rule
+        assert got["OTHERCODE"][1] is None and got["OTHERDEPT"][1] is None
+        proc = {r[0] for r in con.execute("SELECT purchase_document FROM gold_procurement")}
+        assert {"VENDOR", "PRIVATE"} <= proc and not {"TREAS", "DIST", "REVIEWED"} & proc
+        # Explore sees the same overrides the warehouse applied (rule and reviewed alike).
+        from src import app_export
+
+        ex = app_export.explore_flags(con, flags)
+        assert ex[("6100", "TREAS")]["award_class"] == "X"
+        assert ex[("6100", "REVIEWED")] == {
+            "award_class": "Q",
+            "flag": "value quarantined: implausible registered value",
+            "note": "n",
+        }
+        assert ("6100", "VENDOR") not in ex
+    finally:
+        con.close()
+
+
+def test_assistance_rules_reference_is_well_formed():
+    """Each governed rule compiles, names a class that leaves the totals, and cites a source."""
+    import csv
+    import re
+
+    with open(warehouse.ASSISTANCE_RULES_CSV, encoding="utf-8", newline="") as f:
+        rules = list(csv.DictReader(f))
+    assert rules
+    for r in rules:
+        re.compile(r["payee_pattern"])
+        re.compile(r["exclude_pattern"] or "x")
+        assert r["award_class"] == "X" and r["flag"] and "http" in r["evidence"]
+        assert len(r["scm_code"]) == 3 and r["business_unit"].isdigit()

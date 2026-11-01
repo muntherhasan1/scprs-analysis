@@ -77,8 +77,9 @@ MART_DESCRIPTIONS: dict[str, str] = {
         "competition class (State Contracting Manual codes): C competitive, L leveraged "
         "agreement (CMAS, statewide contracts), N non-competitive (incl. Fair and Reasonable), "
         "X not procurement (interagency, assistance, leases, reviewed pass-through "
-        "administrators and benefit payments), Q value quarantined (implausible registered "
-        "value, see contract_flag), U unknown — use it, not "
+        "administrators, benefit payments, K-12 apportionments to county treasurers and "
+        "districts), Q value quarantined (implausible registered value, see contract_flag), "
+        "U unknown — use it, not "
         "competitive_flag, for competitive or sole-source shares."
     ),
     "gold_procurement": (
