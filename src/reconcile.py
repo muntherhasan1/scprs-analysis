@@ -39,6 +39,7 @@ from collections import defaultdict
 from datetime import date
 from pathlib import Path
 
+from . import registrations
 from .supplier_master import normalize_name
 
 FISCAL_COLUMNS = [
@@ -233,7 +234,9 @@ def contracts(
     aliases: dict[str, str] | None = None,
 ) -> list[dict]:
     """Current version of each document (max version), optionally for one unit; `vendor` is
-    the supplier's normalized, aliased name (the key payees are matched on)."""
+    the supplier's normalized, aliased name (the key payees are matched on). Legacy records
+    superseded by a prefixed re-registration (src/registrations.py) are left out, as in the
+    warehouse facts, so an agreement's award is counted once."""
     aliases = load_name_aliases() if aliases is None else aliases
     sql = (
         "SELECT business_unit, purchase_document, CAST(version AS INTEGER), start_date, "
@@ -247,6 +250,20 @@ def contracts(
     for bu, doc, ver, sd, ed, tot, sup in rows:
         if (bu, doc) not in best or (ver or 0) >= best[(bu, doc)][0]:
             best[(bu, doc)] = (ver or 0, sd, ed, tot or 0.0, sup or "")
+    superseded = {
+        (p["business_unit"], p["purchase_document"])
+        for p in registrations.superseded_pairs(
+            [
+                {
+                    "business_unit": bu,
+                    "purchase_document": doc,
+                    "supplier_name": v[4],
+                    "start_date": v[1],
+                }
+                for (bu, doc), v in best.items()
+            ]
+        )
+    }
     return [
         {
             "business_unit": bu,
@@ -257,6 +274,7 @@ def contracts(
             "vendor": match_name(sup, aliases),
         }
         for (bu, doc), (_, sd, ed, tot, sup) in best.items()
+        if (bu, doc) not in superseded
     ]
 
 

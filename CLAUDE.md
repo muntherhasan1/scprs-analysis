@@ -116,6 +116,11 @@ at `(document, version)` grain — a document can be re-drilled at several versi
 (max version present) before showing/aggregating. When touching any query over
 `document_details`/`document_lines`/`document_pos` or the silver tables, preserve
 current-version resolution or you'll double-count.
+A second double-count lives across document numbers: CAL FIRE re-registered its
+2016-2018 agreements under prefixed numbers (`7CA03777` and `35407CA03777`), both
+still in SCPRS. `src/registrations.py` pairs them and the gold facts drop the legacy
+record into `gold_superseded_registration` — aggregate over the facts/marts, not
+silver, or reapply that rule (`reconcile.contracts` does).
 
 **`model.py` enrichment is resumable and incremental.** `enrich` only visits
 distinct `start_date`s that already exist in `purchases` (so build the summary

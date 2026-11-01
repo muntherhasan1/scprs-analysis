@@ -85,6 +85,13 @@ MART_DESCRIPTIONS: dict[str, str] = {
         "totals, rankings and shares; use gold_document only when asked about everything "
         "registered in SCPRS."
     ),
+    "gold_superseded_registration": (
+        "Legacy SCPRS records left out of every total because the same agreement is "
+        "registered again under a department-prefixed number (superseded_by; CAL FIRE's "
+        "2016-2018 FI$Cal conversion). grand_total is the legacy value, superseded_by_total "
+        "the counted one; rule says why. Use to explain a document missing from gold_document "
+        "or a department total lower than a raw SCPRS sum."
+    ),
     "gold_supplier_acquisition_profile": (
         "Supplier spend by acquisition_type — e.g. 'IT Services', 'IT Goods', "
         "'NON-IT Services', 'NON-IT Goods', 'Telecom'. The mart for "
