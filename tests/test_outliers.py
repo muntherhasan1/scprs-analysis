@@ -7,6 +7,7 @@ import pandas as pd
 import pytest
 
 from src import outliers
+from src.supplier_master import normalize_name
 
 
 def _doc(doc, value, bu="3540", acq="NON-IT Services", fy=2024, flag=None, start="2023-08-01"):
@@ -89,11 +90,11 @@ def test_live_value_takes_the_current_version_and_reports_misses():
 
 def test_paid_to_vendor_matches_normalized_names_and_marks_missing_data():
     pay = pd.DataFrame(
-        {"vendor": [outliers.normalize_name("VENDOR A, INC."), "OTHER"], "amount": [70.0, 5.0]}
+        {"vendor": [normalize_name("VENDOR A, INC."), "OTHER"], "amount": [70.0, 5.0]}
     )
     flags = [_doc("A", 1.0), _doc("A", 1.0, bu="2660")]
     flags[0]["supplier_name"] = "Vendor A Inc"
-    outliers.paid_to_vendor(flags, {"3540": pay, "2660": None})
+    outliers.paid_to_vendor(flags, {"3540": pay, "2660": None}, aliases={})
     assert flags[0]["paid_to_vendor"] == 70.0
     assert flags[1]["paid_to_vendor"] is None  # department has no FI$Cal payments
 
@@ -125,3 +126,24 @@ def test_record_reviews_and_r4_status(tmp_path):
         f.write("3540,B,corrected,value fixed in SCPRS,2026-11-01\n")
     status = outliers.r4_status([_doc("A", 1.0), _doc("B", 1.0)], outliers.load_reviews(path))
     assert status["3540"]["R4_pass"] is True
+
+
+def test_name_aliases_match_one_entity_under_two_names():
+    """A contract registered to KERN COUNTY FIRE DEPT is paid as COUNTY OF KERN: the alias maps
+    the supplier onto the payee key, on both sides, without moving anyone else's payments."""
+    from src import reconcile
+
+    aliases = {normalize_name("KERN COUNTY FIRE DEPT"): normalize_name("COUNTY OF KERN")}
+    pay = pd.DataFrame(
+        {"vendor": [normalize_name("COUNTY OF KERN"), "OTHER"], "amount": [40.0, 5.0]}
+    )
+    flags = [_doc("K", 1.0)]
+    flags[0]["supplier_name"] = flags[0]["canonical_name"] = "KERN COUNTY FIRE DEPT"
+    outliers.paid_to_vendor(flags, {"3540": pay}, aliases=aliases)
+    assert flags[0]["paid_to_vendor"] == 40.0
+    outliers.paid_to_vendor(flags, {"3540": pay}, aliases={})
+    assert flags[0]["paid_to_vendor"] == 0.0  # unaliased, the payment is not found
+    assert reconcile.match_name("County of Kern", aliases) == normalize_name("COUNTY OF KERN")
+    # The governed table loads and every row names two different entities' keys.
+    governed = reconcile.load_name_aliases()
+    assert governed and all(k != v for k, v in governed.items())

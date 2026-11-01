@@ -86,6 +86,11 @@ FISCAL_DEFERRED_CSV = REFERENCES / "fiscal_deferred.csv"
 # Budget Act actual expenditures (all funds) by unit and fiscal year (end-year label), each row
 # with its source; the R3 envelope.
 BUDGET_ACTUALS_CSV = REFERENCES / "budget_actuals.csv"
+# One entity under two names (a renamed company, a county paid as "COUNTY OF X" on a contract
+# registered to its fire department): each row maps `name` onto `same_as`, applied to BOTH the
+# contract suppliers and the FI$Cal payees, each with its evidence. Mapping both sides keeps
+# the other name's own contracts and payments where they were.
+NAME_ALIASES_CSV = REFERENCES / "name_aliases.csv"
 NOT_ON_FISCAL = "not on FI$Cal: vendor payments not published"
 NO_FILES = "no FI$Cal vendor files found"
 
@@ -190,9 +195,25 @@ def exclusion(vendor: str, account: str) -> str | None:
     return None
 
 
-def load_payments(paths: list[Path], start_years: set[int] | None = None):
+def load_name_aliases(path: Path = NAME_ALIASES_CSV) -> dict[str, str]:
+    """normalized name -> normalized name it is the same entity as."""
+    if not path.exists():
+        return {}
+    with open(path, encoding="utf-8", newline="") as f:
+        return {normalize_name(r["name"]): normalize_name(r["same_as"]) for r in csv.DictReader(f)}
+
+
+def match_name(name: str, aliases: dict[str, str]) -> str:
+    """The key a contract supplier or payee is matched on: its normalized name, aliased."""
+    n = normalize_name(name or "")
+    return aliases.get(n, n)
+
+
+def load_payments(
+    paths: list[Path], start_years: set[int] | None = None, aliases: dict[str, str] | None = None
+):
     """Concatenate FI$Cal vendor files into one frame with `amount`, `fy` (end-year label)
-    and `vendor` (normalized name). `start_years` keeps only those FI$Cal years."""
+    and `vendor` (normalized, aliased name). `start_years` keeps only those FI$Cal years."""
     import pandas as pd
 
     frames = [pd.read_csv(p, usecols=FISCAL_COLUMNS, dtype=str) for p in paths]
@@ -201,12 +222,19 @@ def load_payments(paths: list[Path], start_years: set[int] | None = None):
     df["fy"] = df["fiscal_year_begin"].astype(int).map(end_year)
     if start_years is not None:
         df = df[df["fiscal_year_begin"].astype(int).isin(start_years)]
-    df["vendor"] = df["VENDOR_NAME"].fillna("").map(normalize_name)
+    aliases = load_name_aliases() if aliases is None else aliases
+    df["vendor"] = df["VENDOR_NAME"].fillna("").map(lambda n: match_name(n, aliases))
     return df
 
 
-def contracts(con: sqlite3.Connection, business_unit: str | None = None) -> list[dict]:
-    """Current version of each document (max version), optionally for one unit."""
+def contracts(
+    con: sqlite3.Connection,
+    business_unit: str | None = None,
+    aliases: dict[str, str] | None = None,
+) -> list[dict]:
+    """Current version of each document (max version), optionally for one unit; `vendor` is
+    the supplier's normalized, aliased name (the key payees are matched on)."""
+    aliases = load_name_aliases() if aliases is None else aliases
     sql = (
         "SELECT business_unit, purchase_document, CAST(version AS INTEGER), start_date, "
         "end_date, grand_total, supplier_name FROM purchases"
@@ -226,7 +254,7 @@ def contracts(con: sqlite3.Connection, business_unit: str | None = None) -> list
             "start": sd,
             "end": ed,
             "value": tot,
-            "vendor": normalize_name(sup),
+            "vendor": match_name(sup, aliases),
         }
         for (bu, doc), (_, sd, ed, tot, sup) in best.items()
     ]

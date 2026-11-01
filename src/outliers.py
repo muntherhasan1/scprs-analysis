@@ -32,7 +32,6 @@ from datetime import date
 from pathlib import Path
 
 from . import reconcile
-from .supplier_master import normalize_name
 
 BUDGET_SHARE_LIMIT = 0.10
 ROBUST_Z_LIMIT = 5.0
@@ -99,17 +98,21 @@ def flag_outliers(docs: list[dict], actuals: dict[str, dict[int, dict]]) -> list
     return sorted(out, key=lambda r: -(r["grand_total"] or 0))
 
 
-def paid_to_vendor(flags: list[dict], payments_by_bu: dict[str, object]) -> None:
+def paid_to_vendor(
+    flags: list[dict], payments_by_bu: dict[str, object], aliases: dict[str, str] | None = None
+) -> None:
     """Fill `paid_to_vendor`: the department's net FI$Cal payments (all accounts) to the flag's
-    supplier, matched on the normalized supplier or canonical name. None = no payment data."""
+    supplier, matched on the normalized, aliased supplier or canonical name (the payments'
+    `vendor` key from `reconcile.load_payments`). None = no payment data."""
+    aliases = reconcile.load_name_aliases() if aliases is None else aliases
     for f in flags:
         pay = payments_by_bu.get(f["business_unit"])
         if pay is None:
             f["paid_to_vendor"] = None
             continue
         names = {
-            normalize_name(f["supplier_name"] or ""),
-            normalize_name(f["canonical_name"] or ""),
+            reconcile.match_name(f["supplier_name"], aliases),
+            reconcile.match_name(f["canonical_name"], aliases),
         }
         names.discard("")
         f["paid_to_vendor"] = float(pay.loc[pay["vendor"].isin(names), "amount"].sum())
