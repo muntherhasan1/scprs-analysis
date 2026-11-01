@@ -169,3 +169,28 @@ The governed rule moves Education's SCM 009 records with a public recipient to c
 that are companies or nonprofits (about $0.6B: Catapult, FACTS, After School All-Stars, YMCA…)
 and private schools stay procurement. 2026-10-31: 15,544 records, $22.4B; procurement $160.2B →
 $137.7B; Education's competitive share 97.1% → 61.6%; other departments unchanged.
+
+### Same-value duplicate registrations (2026-10-31)
+
+149 pairs of $10M+ records shared department, supplier and exact value ($5.7B), but most are not
+duplicates: 80 pairs with different numbers and start dates are repeat agreements (e.g. annual
+renewals), and 89 of 110 Caltrans `…400`/`…401` pairs carry different values (a real second
+encumbrance). Only pairs verified against an outside source, or with decisive internal evidence,
+were recorded in `references/superseded_registrations.csv`:
+
+- **Caltrans, 21 identical twins** (`…400`/`…401`, plus `…400*`): Caltrans' award records list one
+  contract per number, and one SCPRS record is the awarded bid plus the usual 5–10% contingency and
+  supplemental work (PD-04; median 1.07×), so the twin doubles it. `05-1J8604` was left alone —
+  Caltrans awarded it to another contractor at another amount.
+- **Corrections `21-00147`**: one Management Solutions staffing contract (State Auditor 2024-114,
+  maximum $567.6M); amendment records `-01`/`-02` repeated the $425.7M total. `21-00129-01`
+  (San Fernando Subacute) follows the same pattern (internal evidence).
+- **Social Services**: Golden State Stimulus SL-11811 and its term-extension record (also a
+  pass-through — ~$711M paid to SSP/CAPI recipients — so class X); a CalFresh E&T agreement keyed
+  twice. **Parks**: contract C24073001 registered by two buyers. **High-Speed Rail**: HSR24-42
+  twice (HSR24-45 is a separate record). **State Hospitals**: the generic "FY 21.22" staffing
+  records that repeat the Napa share of two statewide contracts (State Auditor caps).
+
+Not duplicates or unresolved, left counted: CAL FIRE's three Air Methods orders (≈ one Firehawk
+each), State Hospitals' AmerisourceBergen and CALPIA pairs, and the third hospital share of each
+staffing contract. Effect: 30 records, procurement $137.7B → $134.4B.

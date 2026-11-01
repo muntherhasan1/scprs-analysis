@@ -83,3 +83,13 @@ def test_a_superseding_document_is_never_itself_dropped():
 
 def test_governed_review_file_loads():
     assert isinstance(registrations.load_reviewed(), list)
+
+
+def test_reviewed_pairs_are_well_formed():
+    """Every hand-reviewed pair names two different documents, says why, and is listed once."""
+    rows = registrations.load_reviewed()
+    keys = [(r["business_unit"], r["purchase_document"]) for r in rows]
+    assert len(keys) == len(set(keys))
+    for r in rows:
+        assert r["purchase_document"] != r["superseded_by"], r
+        assert len(r["evidence"]) > 40 and r["reviewed"][:2] == "20", r
