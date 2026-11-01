@@ -1720,10 +1720,12 @@ def _build_marts(con):
             LEFT JOIN dim_date dd ON dd.date_key = f.start_date_key""",
         # Procurement only: gold_document minus award class X (interagency agreements,
         # subvention / local assistance, leases and real estate, and reviewed pass-throughs
-        # such as a payment agent). Those are registered in SCPRS but are not purchases;
-        # totals, shares and rankings of "what the state buys" read from here.
+        # such as a payment agent) and class Q (a reviewed contract whose registered value is
+        # implausible, quarantined until corrected; references/contract_flags.csv). Those are
+        # registered in SCPRS but not counted; totals, shares and rankings of "what the state
+        # buys" read from here.
         "gold_procurement": """
-            SELECT * FROM gold_document WHERE award_class <> 'X'""",
+            SELECT * FROM gold_document WHERE award_class NOT IN ('X', 'Q')""",
         # Denormalized line items: free-text description + category + price + vendor.
         # COVERS ONLY LINE-ENRICHED DOCUMENTS (~13%) — for item-level detail, not spend
         # totals (use gold_document for those). item_description is a degenerate

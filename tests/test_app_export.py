@@ -374,6 +374,12 @@ def test_explore_cube_ties_to_gold_and_lists_large_contracts(tmp_path):
     assert cube2["dimensions"]["family"][big["family"]]["award_class"] == "X"
     assert big["flag"]["flag"] == "pass-through" and cov["non_procurement_value"] == 250_000.0
 
+    # A quarantined value (class Q) is in no Explore total and no listing.
+    flags = {("8660", "BIG"): {"award_class": "Q", "flag": "value quarantined", "note": "n"}}
+    cube3, contracts3, cov3 = app_export._explore(con, dept_index, methods, flags)
+    assert sum(cube3["columns"]["value"]) == 5_000.0 and "8660" not in contracts3
+    assert cov3["quarantined_value"] == 250_000.0 and cov3["non_procurement_value"] == 0.0
+
 
 def test_award_methods_reference_is_well_formed():
     """Every governed mapping row has a known class and a 3-digit SCM code (or none)."""
@@ -383,6 +389,17 @@ def test_award_methods_reference_is_well_formed():
     for method, r in rows.items():
         assert r["award_class"] in app_export.AWARD_CLASSES, method
         assert r["scm_code"] == "" or (len(r["scm_code"]) == 3 and r["scm_code"].isdigit()), method
+
+
+def test_contract_flags_reference_is_well_formed():
+    """Every reviewed override moves a contract out of the totals (X or Q), says why, and cites
+    a public source; no contract is flagged twice."""
+    flags = app_export.load_contract_flags()
+    assert flags
+    for key, r in flags.items():
+        assert r["award_class"] in {"X", "Q"}, key
+        assert r["flag"] and "http" in r["note"], key
+        assert r["reviewed"][:2] == "20", key
 
 
 def test_payments_coverage_splits_checkable_and_deferred_departments():
@@ -399,9 +416,17 @@ def test_payments_coverage_splits_checkable_and_deferred_departments():
     assert app_export.payments_coverage({}, deferred)["value_share_checkable"] is None
 
 
-def test_department_pages_use_procurement_totals_and_governed_shares(tmp_path):
+def test_department_pages_use_procurement_totals_and_governed_shares(tmp_path, monkeypatch):
     """Totals and shares exclude class X (interagency, assistance, leases), which is reported
-    beside them; competitive share = C / (C + L + N) with Fair and Reasonable as N."""
+    beside them, and class Q (a reviewed implausible value), which is listed with its reason;
+    competitive share = C / (C + L + N) with Fair and Reasonable as N."""
+    flags = tmp_path / "flags.csv"
+    flags.write_text(
+        "business_unit,purchase_document,award_class,flag,note,reviewed\n"
+        "8660,BAD,Q,value quarantined: implausible registered value,n,2026-10-31\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(warehouse, "CONTRACT_FLAGS_CSV", flags)
     src, wh = tmp_path / "scprs.db", tmp_path / "warehouse.db"
     serve, out = tmp_path / "warehouse-serve.db", tmp_path / "app"
     _seed_source(src)  # 8660: A (Formal -> C, current v2 = 150), B (NCB -> N, 5000)
@@ -415,6 +440,7 @@ def test_department_pages_use_procurement_totals_and_governed_shares(tmp_path):
             ("FR", 850.0, "Fair and Reasonable - COMPETITIVE"),  # N
             ("CM", 4000.0, "CMAS (requires offers)"),  # L
             ("IA", 1_000_000.0, "Exempt by Law - Interagency Agreement - NON-COMPETITIVELY BID"),
+            ("BAD", 9e9, "Exempt by Law - Other (buyer must indicate law) - NON-COMPETITIVELY BID"),
         ],
     )
     con.commit()
@@ -442,6 +468,9 @@ def test_department_pages_use_procurement_totals_and_governed_shares(tmp_path):
     assert page["competitive_share_pct"] == 1.5
     assert page["leveraged_share_pct"] == 40.0 and page["noncompetitive_share_pct"] == 58.5
     assert page["non_procurement"] == {"document_count": 1, "total_value": 1_000_000.0}
+    (bad,) = page["quarantined"]
+    assert (bad["purchase_document"], bad["registered_value"]) == ("BAD", 9e9)
+    assert bad["reason"].startswith("value quarantined")
     flags = {m["award_class"]: m["competitive_flag"] for m in page["acquisition_mix"]}
     assert flags == {"C": "Competitive", "L": "Leveraged", "N": "Non-Competitive"}
     assert sum(y["total_value"] for y in page["spend_by_fiscal_year"]) == 10_000

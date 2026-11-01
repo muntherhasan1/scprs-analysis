@@ -52,7 +52,8 @@ Bronze is the immutable landing zone — nothing is cleaned here.
   `award_methods_mapped`), `fact_document` carries a reviewed outlier's
   `award_class_override` / `contract_flag` (`references/contract_flags.csv`), and
   `gold_document.award_class` applies the override. `gold_procurement` =
-  `gold_document` minus class X; the supplier marts' `pct_noncompetitive_value`
+  `gold_document` minus class X and class Q (a reviewed contract whose registered
+  value is implausible, quarantined until SCPRS is corrected — override only); the supplier marts' `pct_noncompetitive_value`
   is class N over classes C+L+N. The drill-down's literal `N/A` placeholder (end date, LPA, buyer,
   UNSPSC) becomes NULL (error check `no_na_sentinels`).
 - **Superseded registrations.** One agreement stored under a legacy number and again

@@ -76,12 +76,15 @@ MART_DESCRIPTIONS: dict[str, str] = {
         "document) — search it with LIKE for keyword questions. award_class is the governed "
         "competition class (State Contracting Manual codes): C competitive, L leveraged "
         "agreement (CMAS, statewide contracts), N non-competitive (incl. Fair and Reasonable), "
-        "X not procurement (interagency, assistance, leases), U unknown — use it, not "
+        "X not procurement (interagency, assistance, leases, reviewed pass-through "
+        "administrators and benefit payments), Q value quarantined (implausible registered "
+        "value, see contract_flag), U unknown — use it, not "
         "competitive_flag, for competitive or sole-source shares."
     ),
     "gold_procurement": (
         "gold_document minus award_class X (interagency agreements, subvention/local "
-        "assistance, leases, reviewed pass-throughs). Use for 'how much does the state buy' "
+        "assistance, leases, reviewed pass-throughs) and Q (quarantined values). Use for "
+        "'how much does the state buy' "
         "totals, rankings and shares; use gold_document only when asked about everything "
         "registered in SCPRS."
     ),
