@@ -57,12 +57,22 @@ exceptions into explained and unexplained so a reviewer can focus on the residue
 
 Caveats: "contract in another department" can mask a real gap when the other department's
 contract is unrelated (2026-10-31: Horne — Consumer Affairs' license-processing contract, while
-Social Services' own agreement 22-3100 is unregistered). Renamed vendors read as unexplained until
-aliased (DynCorp → Amentum, $45.6M at CAL FIRE).
+Social Services' own agreement 22-3100 is unregistered).
 
 First run (2026-10-31, CAL FIRE / Social Services / PUC, FY2022-23..2024-25, $4.14B in scope):
 91.6% of dollars within award, 4.0% local agency reimbursement, 1.6% other labeled mechanisms,
-2.7% unexplained (about 1.6% once DynCorp is aliased).
+2.7% unexplained.
+
+### Name aliases (`references/name_aliases.csv`)
+
+One entity under two names — a renamed company, or a county paid as `COUNTY OF X` on a contract
+registered to its fire department — reads as an unpaid contract plus an unexplained payee. Each
+row maps `name` onto `same_as` with its evidence, and `reconcile.match_name` applies it to **both**
+the contract suppliers and the FI$Cal payees, so the other name's own contracts and payments stay
+where they were. `outliers.paid_to_vendor` uses the same key. Rows so far: DynCorp International →
+Amentum Services (renamed; $45.6M paid to DynCorp in FY2022-23 on the aviation contract),
+Kern County Fire Dept → County of Kern. Effect (2026-10-31, same files): CAL FIRE R2 97.2% →
+99.5%, its unexplained share 3.0% → 1.7%; Social Services and PUC unchanged.
 
 ## Departments not on FI$Cal, and the budget envelope (R3)
 
@@ -104,3 +114,17 @@ on FI$Cal, live check failed). `--record` appends confirmed verdicts to
 `references/outlier_reviews.csv`; human verdicts (`corrected`, `reclassified`, or `confirmed` with
 other evidence) are added by hand with their evidence. R4 passes for a department when every
 contract it currently flags has a closed verdict.
+
+First run (2026-10-31, CAL FIRE / Social Services / PUC; FI$Cal FY2018-19..2025-26 for CAL FIRE
+and PUC): 184 flagged, all by robust z; **175 confirmed, 3 reclassified, 6 open**. The
+reclassified are PUC Federal Funding Account broadband grants already in class X (not in
+procurement totals, not yet disbursed). Open, for a human verdict: Rosenbauer fire apparatus
+($32.8M, Sept 2025) and Advanced Fire Control ($3.0M, June 2026) with no payments yet; two BME Fire
+Trucks orders ($12.2M, $2.7M) absent from the live day's export though BME was paid $6.3M; two
+2016 PUC DDTP phone purchases paid through the program administrator.
+
+The review also surfaced CAL FIRE **legacy duplicate registrations**: 219 agreements from
+2016–2018 stored both under the legacy number (`7CA03777`, version 0, end 2020-06-30) and again
+under the department-prefixed number (`35407CA03777`, amended and extended) with the same supplier
+and start day — $317.7M of legacy value counted twice (the five 2017 contract-county fire
+agreements are $220.8M of it). Both records are live in SCPRS; a dedupe rule is pending.
