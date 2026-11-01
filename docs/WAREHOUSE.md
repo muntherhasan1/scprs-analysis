@@ -51,7 +51,10 @@ Bronze is the immutable landing zone — nothing is cleaned here.
   N non-competitive, X not procurement, U unknown — warn check
   `award_methods_mapped`), `fact_document` carries a reviewed outlier's
   `award_class_override` / `contract_flag` (`references/contract_flags.csv`), and
-  `gold_document.award_class` applies the override. `gold_procurement` =
+  `gold_document.award_class` applies the override. Pattern rules in
+  `references/assistance_rules.csv` (department + SCM code + public-recipient name pattern,
+  each with its evidence) add overrides for whole classes of records — e.g. Education's
+  K-12 apportionments paid to county treasurers — and never override a reviewed flag. `gold_procurement` =
   `gold_document` minus class X and class Q (a reviewed contract whose registered
   value is implausible, quarantined until SCPRS is corrected — override only); the supplier marts' `pct_noncompetitive_value`
   is class N over classes C+L+N. The drill-down's literal `N/A` placeholder (end date, LPA, buyer,

@@ -156,3 +156,16 @@ researched against public sources and recorded with its citation:
 Effect on the warehouse: procurement $200.2B → $160.2B; Non-IT Services $118.6B → $78.5B;
 competitive share at Health Care Services 4.5% → 19.2%, State Hospitals 37.4% → 46.2%, Social
 Services 31.2% → 39.1%, High-Speed Rail 60.7% → 80.8%.
+
+### Education's K-12 local assistance (`references/assistance_rules.csv`)
+
+The Department of Education registers K-12 entitlements and grants (IDEA 611, After School / Prop
+49, Prop 98 programs, CTE incentive grants) under "Other – Special Statute – COMPETITIVE" (SCM
+009), paid to county treasurers, districts, county offices of education, charter schools,
+cities, counties and First 5 commissions — so they read as *competitive procurement*, and county
+treasurers held 8 of the top-10 supplier slots. The State Controller pays school apportionments
+by warrant to each county treasurer for the districts (Education Code 14041): local assistance.
+The governed rule moves Education's SCM 009 records with a public recipient to class X; payees
+that are companies or nonprofits (about $0.6B: Catapult, FACTS, After School All-Stars, YMCA…)
+and private schools stay procurement. 2026-10-31: 15,544 records, $22.4B; procurement $160.2B →
+$137.7B; Education's competitive share 97.1% → 61.6%; other departments unchanged.

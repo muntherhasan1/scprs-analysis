@@ -709,6 +709,23 @@ def load_award_methods(path: Path = AWARD_METHODS_CSV) -> dict[str, dict]:
         return {r["acquisition_method"]: r for r in csv.DictReader(f)}
 
 
+def explore_flags(con, path: Path = CONTRACT_FLAGS_CSV) -> dict[tuple[str, str], dict]:
+    """Every class override the warehouse applied (reviewed contracts and pattern rules), from
+    the serve DB's gold_document, with the reviewed note where one exists."""
+    notes = load_contract_flags(path)
+    return {
+        (bu, doc): {
+            "award_class": cls,
+            "flag": flag,
+            "note": notes.get((bu, doc), {}).get("note", ""),
+        }
+        for bu, doc, cls, flag in con.execute(
+            "SELECT business_unit, purchase_document, award_class, contract_flag "
+            "FROM gold_document WHERE contract_flag IS NOT NULL"
+        )
+    }
+
+
 def load_contract_flags(path: Path = CONTRACT_FLAGS_CSV) -> dict[tuple[str, str], dict]:
     """Reviewed outliers: (business_unit, purchase_document) -> class override + note."""
     with open(path, encoding="utf-8", newline="") as f:
@@ -1173,7 +1190,7 @@ def export_app(
         )
         cmas = _cmas(con, today)
         explore, explore_contracts, explore_cov = _explore(
-            con, dept_index, load_award_methods(), load_contract_flags()
+            con, dept_index, load_award_methods(), explore_flags(con)
         )
         value_by_bu = {
             bu: v or 0.0

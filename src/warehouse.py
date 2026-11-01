@@ -891,6 +891,10 @@ def build_silver(con: sqlite3.Connection, batch: str, ts: str) -> dict:
 REFERENCES_DIR = Path(__file__).resolve().parent.parent / "references"
 AWARD_METHODS_CSV = REFERENCES_DIR / "award_methods.csv"
 CONTRACT_FLAGS_CSV = REFERENCES_DIR / "contract_flags.csv"
+# Rules that reclassify a whole pattern rather than one reviewed contract: a department,
+# an SCM code and a public-recipient name pattern (e.g. the Department of Education's
+# K-12 apportionments paid to county treasurers) -> a class, each with its evidence.
+ASSISTANCE_RULES_CSV = REFERENCES_DIR / "assistance_rules.csv"
 
 
 def _load_award_references(con: sqlite3.Connection) -> None:
@@ -927,6 +931,33 @@ def _load_award_references(con: sqlite3.Connection) -> None:
                 for r in csv.DictReader(f)
             ],
         )
+    _apply_assistance_rules(con)
+
+
+def _apply_assistance_rules(con: sqlite3.Connection) -> None:
+    """Add rule-matched documents to temp.ref_contract_flag. A reviewed per-contract flag
+    (inserted first) always wins; the rule only fills documents that have none. Matching is
+    on the silver document's business unit, its method's SCM code and its supplier name."""
+    if not ASSISTANCE_RULES_CSV.exists():
+        return
+    with open(ASSISTANCE_RULES_CSV, encoding="utf-8", newline="") as f:
+        rules = list(csv.DictReader(f))
+    for r in rules:
+        include = re.compile(r["payee_pattern"])
+        exclude = re.compile(r["exclude_pattern"]) if r["exclude_pattern"] else None
+        rows = con.execute(
+            "SELECT s.purchase_document, s.supplier_name FROM silver_document s "
+            "JOIN temp.ref_award_method m ON m.acquisition_method = s.acquisition_method "
+            "WHERE s.business_unit = ? AND m.scm_code = ?",
+            (r["business_unit"], r["scm_code"]),
+        ).fetchall()
+        hits = [
+            (r["business_unit"], doc, r["award_class"], r["flag"])
+            for doc, name in rows
+            if include.search((name or "").upper())
+            and not (exclude and exclude.search((name or "").upper()))
+        ]
+        con.executemany("INSERT OR IGNORE INTO temp.ref_contract_flag VALUES (?, ?, ?, ?)", hits)
 
 
 def _build_superseded(con: sqlite3.Connection) -> None:
