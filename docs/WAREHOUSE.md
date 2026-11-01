@@ -55,6 +55,19 @@ Bronze is the immutable landing zone — nothing is cleaned here.
   `gold_document` minus class X; the supplier marts' `pct_noncompetitive_value`
   is class N over classes C+L+N. The drill-down's literal `N/A` placeholder (end date, LPA, buyer,
   UNSPSC) becomes NULL (error check `no_na_sentinels`).
+- **Superseded registrations.** One agreement stored under a legacy number and again
+  under its department-prefixed re-registration (CAL FIRE's FI$Cal conversion:
+  `7CA03777` v0 and `35407CA03777`, amended and extended — both live in SCPRS) is
+  counted once. `src/registrations.py` pairs them (prefixed number = unit code +
+  legacy number, optional `FY…` suffix; same start day; same normalized supplier),
+  plus hand-reviewed near-pairs in `references/superseded_registrations.csv`
+  (same agreement number and subject; a renamed or successor supplier, or a start
+  day that moved). The legacy record is left out of `fact_document`, `fact_line`
+  and `fact_associated_po` — so out of every mart and total — and kept in the
+  table `gold_superseded_registration` with what supersedes it and why. Error
+  checks: `document_grain_parity` counts fact + superseded against bronze;
+  `superseded_target_present` requires every superseding document in the fact.
+  `reconcile.contracts` applies the same rule to the operational store.
 - **Defaulting.** NULL business keys become explicit `Unknown`/`UNKNOWN` members
   (no NULL dimension keys downstream).
 - **Quality flags.** `dq_line_reconciles` marks whether an enriched document's

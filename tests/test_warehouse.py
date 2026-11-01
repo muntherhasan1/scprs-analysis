@@ -1488,3 +1488,60 @@ def test_governed_award_classes_and_procurement_view(tmp_path, monkeypatch):
         assert pct == pytest.approx(round(100 * 100 / 450, 1))
     finally:
         con.close()
+
+
+def test_superseded_registration_is_counted_once(tmp_path, monkeypatch):
+    """A legacy record re-registered under its department-prefixed number (src/registrations.py)
+    leaves every fact and mart, stays visible in gold_superseded_registration labelled with its
+    re-registration, and the grain-parity and target checks pass."""
+    from src import registrations
+
+    monkeypatch.setattr(registrations, "REVIEWED_CSV", tmp_path / "none.csv")
+    src, wh = tmp_path / "scprs.db", tmp_path / "warehouse.db"
+    _seed_source(src)
+    con = sqlite3.connect(src)
+    con.executemany(
+        "INSERT INTO purchases (business_unit, purchase_document, version, grand_total, "
+        "start_date, acquisition_type_sub_type, acquisition_method, supplier_id, supplier_name, "
+        "status, department_name) VALUES ('3540', ?, ?, ?, '2017-07-01', 'NON-IT Services', "
+        "'Exempt by Policy - Other (buyer must indicate policy) - NON-COMPETITIVELY BID', "
+        "?, ?, 'Active', 'CAL FIRE')",
+        [
+            ("7CA03777", "0", 58.0, "K1", "KERN COUNTY FIRE DEPT"),
+            ("35407CA03777", "3", 62.0, "K2", "Kern County Fire Dept."),
+            ("7CA03780", "0", 20.0, "O1", "ORANGE COUNTY FIRE AUTHORITY"),
+            ("35407CA03780", "2", 0.0, "O2", "COUNTY OF ORANGE HEALTH"),  # other supplier: kept
+        ],
+    )
+    con.commit()
+    con.close()
+    warehouse.build_all(
+        wh_path=wh,
+        source_path=src,
+        enrichment_db=tmp_path / "no_enrich.db",
+        cmas_db=tmp_path / "missing_cmas.db",
+        log=lambda *a: None,
+    )
+    con = sqlite3.connect(wh)
+    try:
+        docs = {r[0] for r in con.execute("SELECT purchase_document FROM gold_document")}
+        assert "7CA03777" not in docs and {"35407CA03777", "7CA03780", "35407CA03780"} <= docs
+        (sup,) = con.execute(
+            "SELECT purchase_document, superseded_by, grand_total, superseded_by_total, rule "
+            "FROM gold_superseded_registration"
+        ).fetchall()
+        assert sup[:4] == ("7CA03777", "35407CA03777", 58.0, 62.0)
+        assert sup[4] == registrations.RULE
+        cal_fire = con.execute(
+            "SELECT SUM(grand_total) FROM gold_document WHERE business_unit = '3540'"
+        ).fetchone()[0]
+        assert cal_fire == 62.0 + 20.0 + 0.0  # the agreement once, at its amended value
+        failed = dict(
+            con.execute(
+                "SELECT check_name, failed_count FROM dw_dq_results WHERE batch_id = "
+                "(SELECT MAX(batch_id) FROM dw_dq_results)"
+            )
+        )
+        assert failed["document_grain_parity"] == 0 and failed["superseded_target_present"] == 0
+    finally:
+        con.close()

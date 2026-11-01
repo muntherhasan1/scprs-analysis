@@ -127,4 +127,7 @@ The review also surfaced CAL FIRE **legacy duplicate registrations**: 219 agreem
 2016–2018 stored both under the legacy number (`7CA03777`, version 0, end 2020-06-30) and again
 under the department-prefixed number (`35407CA03777`, amended and extended) with the same supplier
 and start day — $317.7M of legacy value counted twice (the five 2017 contract-county fire
-agreements are $220.8M of it). Both records are live in SCPRS; a dedupe rule is pending.
+agreements are $220.8M of it). Both records are live in SCPRS. Since PR #187 the warehouse and
+`reconcile.contracts` count each such agreement once (`src/registrations.py`; see
+docs/WAREHOUSE.md, "Superseded registrations"), with 70 hand-reviewed near-pairs in
+`references/superseded_registrations.csv`.

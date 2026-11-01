@@ -38,7 +38,7 @@ import sqlite3
 from datetime import datetime
 from pathlib import Path
 
-from . import eprocure, scprs, supplier_master
+from . import eprocure, registrations, scprs, supplier_master
 
 
 class DwBuildError(RuntimeError):
@@ -929,8 +929,57 @@ def _load_award_references(con: sqlite3.Connection) -> None:
         )
 
 
+def _build_superseded(con: sqlite3.Connection) -> None:
+    """gold_superseded_registration: legacy documents re-registered under a prefixed number
+    (src/registrations.py). They are kept here, labelled with what supersedes them, and left
+    out of every fact so no total counts the agreement twice. A TABLE, not a view, so it
+    reaches the serve DB (silver is not copied there)."""
+    rows = [
+        dict(
+            zip(
+                ("business_unit", "purchase_document", "supplier_name", "start_date"),
+                r,
+                strict=True,
+            )
+        )
+        for r in con.execute(
+            "SELECT business_unit, purchase_document, supplier_name, start_date FROM silver_document"
+        )
+    ]
+    pairs = registrations.superseded_pairs(rows)
+    con.execute("DROP TABLE IF EXISTS temp.ref_superseded")
+    con.execute(
+        "CREATE TEMP TABLE ref_superseded (business_unit TEXT, purchase_document TEXT, "
+        "superseded_by TEXT, rule TEXT, PRIMARY KEY (business_unit, purchase_document))"
+    )
+    con.executemany(
+        "INSERT INTO temp.ref_superseded VALUES (?, ?, ?, ?)",
+        [
+            (p["business_unit"], p["purchase_document"], p["superseded_by"], p["rule"])
+            for p in pairs
+        ],
+    )
+    con.execute("DROP TABLE IF EXISTS gold_superseded_registration")
+    con.execute(
+        """
+        CREATE TABLE gold_superseded_registration AS
+        SELECT s.business_unit, s.department_name, s.purchase_document, s.version,
+               s.supplier_name, s.acquisition_method, s.start_date, s.status,
+               s.first_item_title, s.grand_total,
+               x.superseded_by, k.version AS superseded_by_version,
+               k.grand_total AS superseded_by_total, x.rule
+        FROM temp.ref_superseded x
+        JOIN silver_document s ON s.business_unit = x.business_unit
+             AND s.purchase_document = x.purchase_document
+        JOIN silver_document k ON k.business_unit = x.business_unit
+             AND k.purchase_document = x.superseded_by
+        """
+    )
+
+
 def build_gold(con: sqlite3.Connection, batch: str, ts: str) -> dict:
     _load_award_references(con)
+    _build_superseded(con)
     # -- dim_date (spine over the observed date range, plus an Unknown member)
     con.execute("DROP TABLE IF EXISTS dim_date")
     con.execute(
@@ -1062,6 +1111,9 @@ def build_gold(con: sqlite3.Connection, batch: str, ts: str) -> dict:
              AND acq.acquisition_sub_type = s.acquisition_sub_type
              AND acq.acquisition_method = s.acquisition_method
              AND acq.competitive_flag = s.competitive_flag
+        WHERE NOT EXISTS (SELECT 1 FROM temp.ref_superseded x   -- counted once, see
+             WHERE x.business_unit = s.business_unit         -- gold_superseded_registration
+               AND x.purchase_document = s.purchase_document)
         """
     )
 
@@ -1089,6 +1141,9 @@ def build_gold(con: sqlite3.Connection, batch: str, ts: str) -> dict:
              AND acq.acquisition_method = s.acquisition_method
              AND acq.competitive_flag = s.competitive_flag
         LEFT JOIN dim_unspsc uns ON uns.unspsc = l.unspsc AND uns.unspsc_description = l.unspsc_description
+        WHERE NOT EXISTS (SELECT 1 FROM temp.ref_superseded x   -- counted once, see
+             WHERE x.business_unit = l.business_unit         -- gold_superseded_registration
+               AND x.purchase_document = l.purchase_document)
         """
     )
 
@@ -1110,6 +1165,9 @@ def build_gold(con: sqlite3.Connection, batch: str, ts: str) -> dict:
              AND s.purchase_document = a.purchase_document
         LEFT JOIN dim_date dt ON dt.full_date = a.start_date
         LEFT JOIN dim_department dep ON dep.business_unit = a.business_unit
+        WHERE NOT EXISTS (SELECT 1 FROM temp.ref_superseded x   -- counted once, see
+             WHERE x.business_unit = a.business_unit         -- gold_superseded_registration
+               AND x.purchase_document = a.purchase_document)
         """
     )
 
@@ -1845,14 +1903,26 @@ _DQ_CHECKS = [
     ),
     (
         # Bronze -> gold end to end: every summary document lands in fact_document
-        # exactly once. (Comparing against silver_document could never fail --
-        # silver is built from that very set; a dim join that fans out or drops a
+        # exactly once, or in gold_superseded_registration (a legacy duplicate of a
+        # document that is in the fact). (Comparing against silver_document could never
+        # fail -- silver is built from that very set; a dim join that fans out or drops a
         # document only shows up in the fact.)
         "document_grain_parity",
         "error",
-        "distinct bronze docs vs fact_document",
+        "distinct bronze docs vs fact_document + gold_superseded_registration",
         "SELECT ABS((SELECT COUNT(*) FROM (SELECT DISTINCT business_unit, purchase_document "
-        "FROM bronze_purchases)) - (SELECT COUNT(*) FROM fact_document))",
+        "FROM bronze_purchases)) - (SELECT COUNT(*) FROM fact_document) "
+        "- (SELECT COUNT(*) FROM gold_superseded_registration))",
+    ),
+    (
+        # A superseded legacy record is dropped only because its re-registration is
+        # counted instead: that document must be in the fact.
+        "superseded_target_present",
+        "error",
+        "gold_superseded_registration",
+        "SELECT COUNT(*) FROM gold_superseded_registration x WHERE NOT EXISTS "
+        "(SELECT 1 FROM gold_document g WHERE g.business_unit = x.business_unit "
+        "AND g.purchase_document = x.superseded_by)",
     ),
     (
         "fact_document_dept_fk",

@@ -166,6 +166,31 @@ def test_contracts_resolve_the_current_version(tmp_path):
     assert only["value"] == 10.0
 
 
+def test_contracts_count_a_re_registered_agreement_once(tmp_path, monkeypatch):
+    """A legacy record superseded by its prefixed re-registration is left out of the awards,
+    as in the warehouse facts (src/registrations.py)."""
+    from src import registrations
+
+    monkeypatch.setattr(registrations, "REVIEWED_CSV", tmp_path / "none.csv")
+    con = _store(
+        tmp_path / "s.db",
+        [
+            ("3540", "7CA03777", "0", "2017-07-01", "2020-06-30", 58.0, "KERN COUNTY FIRE DEPT"),
+            (
+                "3540",
+                "35407CA03777",
+                "3",
+                "2017-07-01",
+                "2020-12-31",
+                62.0,
+                "KERN COUNTY FIRE DEPT",
+            ),
+        ],
+    )
+    (only,) = reconcile.contracts(con, aliases={})
+    assert (only["document"], only["value"]) == ("35407CA03777", 62.0)
+
+
 def test_annualized_spreads_by_day_across_fiscal_years():
     rows = [
         {"start": "2023-01-01", "end": "2024-12-31", "value": 731.0},  # 731 days
