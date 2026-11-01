@@ -131,3 +131,28 @@ agreements are $220.8M of it). Both records are live in SCPRS. Since PR #187 the
 `reconcile.contracts` count each such agreement once (`src/registrations.py`; see
 docs/WAREHOUSE.md, "Superseded registrations"), with 70 hand-reviewed near-pairs in
 `references/superseded_registrations.csv`.
+
+### Largest exempt contracts (2026-10-31)
+
+"Exempt by Law/Policy – Other" (SCM 022/028) was 4.7% of procurement documents but 40% of value,
+and 25 contracts held $42.5B (21%) — all Non-IT Services, so they inflated that market by a third,
+filled half the top-15 supplier list and set four departments' competitive share. Each was
+researched against public sources and recorded with its citation:
+
+- **16 → class X** (`contract_flags.csv`): 11 pass-through administrators whose value is mostly
+  grant money they distribute (Advocates for Human Potential ×5 — BHCIP, Bond BHCIP, Bridge
+  Housing, DSH IST infrastructure, CCE; BDO CCE; FCCC stipends ×2; PCG CalAIM PATH; CIBHS and
+  Sacramento COE CYBHI grants), 3 benefit-payment agreements (San Diego PACE capitation; the
+  Sacramento and Fresno DMC-ODS county plans) and 2 assistance agreements (HSR's Link US funding
+  agreement with LA Metro; CDSS TANF transfer to the Student Aid Commission).
+- **7 stay procurement** (`outlier_reviews.csv`, `confirmed`): Kooth, LA County felony IST beds,
+  Wellpath/CHRS EASS, LA County licensing surveys, MacLean and Color COVID testing, AECOM-Fluor —
+  whose FY23/24 funding record (`0000002932`, $358M) duplicates the contract and is now superseded.
+- **2 → class Q, value quarantined**: Gainwell's Medi-Cal fiscal-intermediary record ($22.9B; public
+  figures ≈ $710M) and Kings County's jail competency program ($1,605,320,000 — almost certainly
+  $1,605,320 entered 1,000×). Class Q is excluded from procurement totals and from Explore, and
+  listed on department pages (`quarantined`) with its reason, until SCPRS is corrected.
+
+Effect on the warehouse: procurement $200.2B → $160.2B; Non-IT Services $118.6B → $78.5B;
+competitive share at Health Care Services 4.5% → 19.2%, State Hospitals 37.4% → 46.2%, Social
+Services 31.2% → 39.1%, High-Speed Rail 60.7% → 80.8%.

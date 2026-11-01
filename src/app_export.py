@@ -234,6 +234,15 @@ def _departments(
             "FROM gold_document WHERE award_class = 'X' GROUP BY business_unit",
         )
     }
+    # Reviewed contracts whose registered value is implausible (class Q): out of every total
+    # until corrected, listed per department with the reason.
+    quarantined = defaultdict(list)
+    for r in _rows(
+        con,
+        "SELECT business_unit, purchase_document, canonical_name, grand_total, contract_flag "
+        "FROM gold_document WHERE award_class = 'Q' ORDER BY grand_total DESC",
+    ):
+        quarantined[r["business_unit"]].append(r)
     demand = defaultdict(list)
     for r in _rows(
         con,
@@ -284,6 +293,15 @@ def _departments(
                 "document_count": npv["document_count"] if npv else 0,
                 "total_value": _money(npv["total_value"]) if npv else 0.0,
             }
+            page["quarantined"] = [
+                {
+                    "purchase_document": q["purchase_document"],
+                    "canonical_name": q["canonical_name"],
+                    "registered_value": _money(q["grand_total"]),
+                    "reason": q["contract_flag"],
+                }
+                for q in quarantined.get(bu, [])
+            ]
             page["spend_by_fiscal_year"] = [
                 {
                     "fiscal_year": r["fiscal_year"],
@@ -664,6 +682,7 @@ AWARD_CLASS_FLAG = {
     "L": "Leveraged",
     "N": "Non-Competitive",
     "X": "Not procurement",
+    "Q": "Value quarantined",
     "U": "Other",
 }
 CONTRACT_FLAGS_CSV = REFERENCES / "contract_flags.csv"
@@ -671,12 +690,15 @@ EXPLORE_FROM_FY = 2022  # FY2021-22: every loaded department is complete from he
 EXPLORE_LIST_MIN = 100_000.0  # contracts listed per department; smaller ones are counted only
 # Award classes from the State Contracting Manual code lists (SCM 14-01 competitive, 15-01
 # non-competitive, 16-01 leveraged). X is not procurement and is excluded from Explore's totals
-# by default; U is an unrecorded method.
+# by default; U is an unrecorded method. Q (a reviewed override only) is a contract whose
+# registered value is implausible: it is left out of Explore entirely and reported as
+# quarantined_value, so no total carries it until SCPRS is corrected.
 AWARD_CLASSES = {
     "C": "Competitive",
     "L": "Leveraged agreement",
     "N": "Non-competitive",
     "X": "Not procurement",
+    "Q": "Value quarantined",
     "U": "Unknown",
 }
 
@@ -749,6 +771,7 @@ def _explore(con, dept_index: list[dict], methods: dict, flags: dict) -> tuple[d
     contracts: dict[str, list] = defaultdict(list)
     unmapped = 0
     excluded_value = 0.0
+    quarantined_value = 0.0
     sql = (
         "SELECT business_unit, purchase_document, canonical_id, canonical_name, acquisition_type, "  # noqa: S608
         f"acquisition_method, fiscal_year, start_date, grand_total, status, line_count, {title} "
@@ -769,6 +792,9 @@ def _explore(con, dept_index: list[dict], methods: dict, flags: dict) -> tuple[d
         if flag:  # a reviewed outlier's class override (e.g. a payment agent -> X)
             cls = flag["award_class"]
             fam = family(f"{m['family']} (reclassified: {flag['flag']})", cls)
+        if cls == "Q":  # implausible registered value: in no Explore total
+            quarantined_value += max(total or 0, 0)
+            continue
         if cls == "X":
             excluded_value += max(total or 0, 0)
         if fy not in years:
@@ -833,7 +859,11 @@ def _explore(con, dept_index: list[dict], methods: dict, flags: dict) -> tuple[d
     return (
         cube,
         dict(contracts),
-        {"non_procurement_value": _money(excluded_value), "unmapped_award_methods": unmapped},
+        {
+            "non_procurement_value": _money(excluded_value),
+            "quarantined_value": _money(quarantined_value),
+            "unmapped_award_methods": unmapped,
+        },
     )
 
 
@@ -1200,6 +1230,9 @@ def export_app(
             # registered in SCPRS but not procurement. Explore leaves them out of its totals
             # by default; other pages still include them and show this beside their totals.
             "non_procurement_value": explore_cov["non_procurement_value"],
+            # Reviewed contracts whose registered value is implausible (class Q), FY2021-22
+            # onward: in no total until corrected (department pages list them).
+            "quarantined_value": explore_cov["quarantined_value"],
             "note": (
                 f"{len(loaded)} of {len(dept_index)} state departments loaded; contracts from "
                 "FY2021-22 (Public Utilities Commission from 2016). Values are contract value "

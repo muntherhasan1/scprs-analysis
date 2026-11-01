@@ -1423,7 +1423,8 @@ def test_governed_award_classes_and_procurement_view(tmp_path, monkeypatch):
     flags = tmp_path / "flags.csv"
     flags.write_text(
         "business_unit,purchase_document,award_class,flag,note,reviewed\n"
-        "8660,AGENT,X,payment agent pass-through,n,2026-10-31\n",
+        "8660,AGENT,X,payment agent pass-through,n,2026-10-31\n"
+        "8660,BAD,Q,value quarantined: implausible registered value,n,2026-10-31\n",
         encoding="utf-8",
     )
     monkeypatch.setattr(warehouse, "CONTRACT_FLAGS_CSV", flags)
@@ -1445,6 +1446,7 @@ def test_governed_award_classes_and_procurement_view(tmp_path, monkeypatch):
                 "Exempt by Law - Other (buyer must indicate law) - NON-COMPETITIVELY BID",
             ),
             ("NEW", 7.0, "A Method SCPRS Added Tomorrow"),  # unmapped -> U
+            ("BAD", 9e9, "Exempt by Law - Other (buyer must indicate law) - NON-COMPETITIVELY BID"),
         ],
     )
     con.commit()
@@ -1473,6 +1475,7 @@ def test_governed_award_classes_and_procurement_view(tmp_path, monkeypatch):
         )
         proc = {r[0] for r in con.execute("SELECT purchase_document FROM gold_procurement")}
         assert "IA" not in proc and "AGENT" not in proc and {"FR", "CM", "NEW"} <= proc
+        assert cls["BAD"] == "Q" and "BAD" not in proc  # quarantined: kept, never counted
         failed = dict(
             con.execute(
                 "SELECT check_name, failed_count FROM dw_dq_results WHERE batch_id = "
