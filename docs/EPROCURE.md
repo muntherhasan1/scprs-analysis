@@ -190,6 +190,72 @@ the run's window that did not refresh is carried forward from the published
 store (see **CI refresh**), so its rows can be a week or more older than the
 rest — read `events_meta.extracted_at` per slice, never one run timestamp.
 
+## Bid detail pages
+
+Each open bid's detail page carries what the event grid doesn't. Per bid:
+
+- **Type of work:** UNSPSC codes, each with its description.
+- **Contractor license classes:** CSLB classes such as `B` or `C-15`.
+- **Service-area counties.**
+- **A pre-bid conference:** Mandatory / Non Mandatory, with date, time,
+  location and comments. Some say attendance is required to bid.
+- **The rest:** the description, the published date (the Posted grid has
+  none), the event version and Format/Type ("Sell Event / RFx").
+
+`python -m src.eprocure extract-details [--budget-minutes N] [--limit N]`
+reads them into `event_details` and three child tables
+(`event_detail_unspsc`, `event_detail_licenses`,
+`event_detail_service_areas`), one row per code, class or county. Bids no
+department code would load for are recorded in `event_detail_misses` and
+retried after 7 days.
+
+Mechanism (recon 2026-11-15, all verified live):
+
+- **Direct link works headless.**
+  `https://caleprocure.ca.gov/event/{business unit}/{event id}` loads with
+  the normal Chrome UA (HeadlessChrome gets the WAF 403). It 302s to
+  `pages/Events-BS3/event-details.aspx?…&BUSINESS_UNIT=…`. A wrong unit or id
+  lands on `pages/error.aspx` ("Oops!"), so a candidate unit is tested against
+  the site itself.
+- **Stable field labels.** Fields render under stable `data-if-label`s
+  (`eventId`, `unspscClassification`, `contractorTblType`,
+  `serviceAreaCounty`, `conferenceText`, …).
+- **Speed.** Pages render in 1.5–4 s, and one context serves many in
+  sequence. All ~376 Posted bids take under 10 minutes.
+- **Department codes.** The grid carries no business unit, and a grid row
+  doesn't navigate when clicked headless. So candidates come from
+  `references/departments.csv` by exact name, and every unit a name maps to
+  is tried, because some names map to several: Franchise Tax Board
+  1730/7730, Department of Education 6100/6110, Resources Recycling &
+  Recovery 3500/3970. `references/eprocure_department_aliases.csv` covers
+  eProcure spellings with no FI$Cal match: California Military Department →
+  8940, Covered California → 4800, Bus & Consumer Services Agency →
+  0515/1000. The unit that loaded is stored on the read, and the warehouse
+  can use it where the name match is ambiguous or absent. DAAs have no FI$Cal
+  unit and stay unread.
+- **No buyer contact.** Name, phone and email are on the page but never
+  stored (public slice, same as CMAS).
+
+Contract:
+
+- **Idempotent per bid:** one transaction replaces that bid's rows.
+- **Order:** never-read bids first, then the oldest reads.
+- **Budget:** `--budget-minutes` stops cleanly between pages (exit 0,
+  `complete: False`).
+- **Failure stop:** 8 page loads in a row failing raises (the site or WAF
+  refusing us), and failure evidence is captured per failed page.
+
+Workflows:
+
+- **Daily (`eprocure-solicitations.yml`).** Reads detail pages after the
+  Posted slice, with a 25-minute budget and `continue-on-error`. The gate
+  refuses to publish if a read for a still-open bid disappeared. The last
+  step fails the run if reading failed: the Posted slice and banked reads
+  are still published.
+- **Weekly (`eprocure-refresh.yml`).** Rebuilds `eprocure.db` from empty, so
+  its carry step copies the published reads for bids still open
+  (`carry_forward_event_details`).
+
 ## Follow-ups (tracked, not in this change)
 
 - **Deep Historical archive (2015+)**: would need fetch-then-mutate publishes

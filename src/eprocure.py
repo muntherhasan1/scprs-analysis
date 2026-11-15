@@ -827,6 +827,429 @@ def carry_forward_events(
 # ------------------------------------------------------------------------- CLI
 
 
+# --------------------------------------------------------- CSCR event details
+# Each open bid's detail page (recon 2026-11-15) carries what the event grid
+# doesn't: UNSPSC codes (type of work), contractor license classes, service-area
+# counties, a mandatory/non-mandatory pre-bid conference, the description, the
+# published date and the event version. Mechanism, all verified live:
+# - https://caleprocure.ca.gov/event/{business unit}/{event id} works headless
+#   with the normal Chrome UA (the WAF 403s HeadlessChrome). It 302s to
+#   pages/Events-BS3/event-details.aspx?...&BUSINESS_UNIT=...; a wrong business
+#   unit or id lands on pages/error.aspx ("Oops!"), so a candidate unit can be
+#   tested against the site itself.
+# - The overlay renders every field under a stable data-if-label (eventId,
+#   unspscClassification, contractorTblType, serviceAreaCounty, conferenceText,
+#   ...). Pages render in 2-4 s; one context serves many pages in sequence.
+# - The event grid carries no business unit, and a grid row doesn't navigate
+#   headless when clicked. So the unit comes from the FI$Cal department list
+#   by name (every candidate when a name maps to several, e.g. Franchise Tax
+#   Board 1730/7730) plus references/eprocure_department_aliases.csv for
+#   eProcure spellings that match no FI$Cal name, each confirmed by the page
+#   loading.
+# Buyer contact name, phone and email are on the page but never stored.
+EVENT_DETAIL_URL = "https://caleprocure.ca.gov/event/{bu}/{event_id}"
+REFERENCES = Path(__file__).resolve().parent.parent / "references"
+DEPARTMENTS_CSV = REFERENCES / "departments.csv"
+ALIASES_CSV = REFERENCES / "eprocure_department_aliases.csv"
+# An unresolvable department (no unit loads) is retried after this many days.
+_MISS_RETRY_DAYS = 7
+# This many page loads in a row that time out or error means the site (or the
+# WAF) is refusing us: stop instead of burning the budget on a dead session.
+_MAX_CONSECUTIVE_FAILURES = 8
+_CONTEXT_PAGES = 100  # recycle the browser context after this many pages
+
+_DETAIL_READ = """() => {
+  const clean = s => (s || '').replace(/\\s+/g, ' ').trim();
+  const one = (label, root = document) => {
+    const e = root.querySelector(`[data-if-label='${label}']`);
+    return e ? clean(e.innerText) : null;
+  };
+  const all = label => [...document.querySelectorAll(`[data-if-label='${label}']`)]
+    .map(e => clean(e.innerText));
+  const conf = document.querySelector("[data-if-label='conferenceRow']") || document;
+  const desc = document.querySelector("[data-if-label='descriptiondetails']");
+  return {
+    event_id: one('eventId'), event_name: one('eventName'), dept: one('dept'),
+    format1: one('format1'), format2: one('format2'),
+    published: one('eventStartDate'), version: one('eventVersion'), end: one('eventEndDate'),
+    description: desc ? desc.innerText.trim() : null,
+    conference: one('conferenceText', conf), conf_date: one('dateText', conf),
+    conf_time: one('timeText', conf), conf_location: one('locationText', conf),
+    conf_comments: one('commentsText', conf),
+    unspsc: all('unspscClassification'), unspsc_desc: all('unspscDescription'),
+    license: all('contractorTblType'), license_desc: all('contractorTblDescription'),
+    area_id: all('serviceAreaID'), county: all('serviceAreaCounty'),
+  };
+}"""
+_DETAIL_READY = (
+    "() => location.href.includes('error.aspx') || "
+    "!!(document.querySelector(\"[data-if-label='eventId']\") || {}).innerText"
+)
+
+
+def _iso_mdy(text: str | None) -> str | None:
+    """'10/02/2026  3:30PM PDT' or '10/21/2026' -> '2026-10-02'; None if no date."""
+    m = _EVENT_DT.search(text or "")
+    return f"{m.group(3)}-{m.group(1)}-{m.group(2)}" if m else None
+
+
+def parse_event_detail(raw: dict) -> dict:
+    """Normalize one detail-page read (``_DETAIL_READ``) into stored fields.
+
+    Pure, so the parsing is unit-tested without a browser. Blank strings become
+    None; a pre-bid conference is mandatory True/False only when the page says
+    "Mandatory" / "Non Mandatory" (None when the section is N/A)."""
+
+    def blank(v):
+        v = (v or "").strip()
+        return v or None
+
+    conf = (blank(raw.get("conference")) or "").upper()
+    mandatory = {"MANDATORY": 1, "NON MANDATORY": 0, "NON-MANDATORY": 0}.get(conf)
+    version = blank(raw.get("version"))
+    fmt = " / ".join(f for f in (blank(raw.get("format1")), blank(raw.get("format2"))) if f)
+    return {
+        "format_type": fmt or None,
+        "published_date": _iso_mdy(raw.get("published")),
+        "event_version": int(version) if version and version.isdigit() else None,
+        "end_text": blank(raw.get("end")),
+        "description": blank(raw.get("description")),
+        "prebid_mandatory": mandatory,
+        "prebid_date": _iso_mdy(raw.get("conf_date")),
+        "prebid_time": blank(raw.get("conf_time")),
+        "prebid_location": blank(raw.get("conf_location")),
+        "prebid_comments": blank(raw.get("conf_comments")),
+        "unspsc": [
+            (c.strip(), blank(d))
+            for c, d in zip(raw.get("unspsc") or [], raw.get("unspsc_desc") or [], strict=False)
+            if c and c.strip()
+        ],
+        "licenses": [
+            (t.strip(), blank(d))
+            for t, d in zip(raw.get("license") or [], raw.get("license_desc") or [], strict=False)
+            if t and t.strip()
+        ],
+        "service_areas": [
+            (blank(a), c.strip())
+            for a, c in zip(raw.get("area_id") or [], raw.get("county") or [], strict=False)
+            if c and c.strip()
+        ],
+    }
+
+
+_DETAIL_COLUMNS = (
+    "format_type",
+    "published_date",
+    "event_version",
+    "end_text",
+    "description",
+    "prebid_mandatory",
+    "prebid_date",
+    "prebid_time",
+    "prebid_location",
+    "prebid_comments",
+)
+
+
+def _ensure_detail_tables(con: sqlite3.Connection) -> None:
+    con.execute(
+        "CREATE TABLE IF NOT EXISTS event_details (department_name TEXT, event_id TEXT, "
+        "business_unit TEXT, "
+        + ", ".join(
+            f"{c} {'INTEGER' if c in ('event_version', 'prebid_mandatory') else 'TEXT'}"
+            for c in _DETAIL_COLUMNS
+        )
+        + ", fetched_at TEXT, PRIMARY KEY (department_name, event_id))"
+    )
+    for table, cols in (
+        ("event_detail_unspsc", "unspsc TEXT, unspsc_description TEXT"),
+        ("event_detail_licenses", "license_type TEXT, license_description TEXT"),
+        ("event_detail_service_areas", "area_id TEXT, county TEXT"),
+    ):
+        con.execute(
+            f"CREATE TABLE IF NOT EXISTS {table} (department_name TEXT, event_id TEXT, "  # noqa: S608 - internal constants
+            f"ord INTEGER, {cols})"
+        )
+    # Events no candidate business unit would load for (e.g. a DAA with no FI$Cal
+    # unit), so the daily run doesn't retry them every time.
+    con.execute(
+        "CREATE TABLE IF NOT EXISTS event_detail_misses (department_name TEXT, event_id TEXT, "
+        "tried_units TEXT, checked_at TEXT, PRIMARY KEY (department_name, event_id))"
+    )
+
+
+def write_event_detail(
+    con: sqlite3.Connection,
+    department_name: str,
+    event_id: str,
+    business_unit: str,
+    detail: dict,
+    fetched_at: str,
+) -> None:
+    """Replace one event's detail rows in a single transaction (idempotent)."""
+    key = (department_name, event_id)
+    with con:
+        for table in (
+            "event_details",
+            "event_detail_unspsc",
+            "event_detail_licenses",
+            "event_detail_service_areas",
+            "event_detail_misses",
+        ):
+            con.execute(f"DELETE FROM {table} WHERE department_name = ? AND event_id = ?", key)  # noqa: S608 - internal constants
+        con.execute(
+            f"INSERT INTO event_details (department_name, event_id, business_unit, "  # noqa: S608 - internal constants
+            f"{', '.join(_DETAIL_COLUMNS)}, fetched_at) "
+            f"VALUES ({', '.join('?' * (len(_DETAIL_COLUMNS) + 4))})",
+            (*key, business_unit, *(detail[c] for c in _DETAIL_COLUMNS), fetched_at),
+        )
+        for table, rows in (
+            ("event_detail_unspsc", detail["unspsc"]),
+            ("event_detail_licenses", detail["licenses"]),
+            ("event_detail_service_areas", detail["service_areas"]),
+        ):
+            con.executemany(
+                f"INSERT INTO {table} VALUES (?, ?, ?, ?, ?)",  # noqa: S608 - internal constants
+                [(*key, i, *row) for i, row in enumerate(rows)],
+            )
+
+
+def _record_detail_miss(
+    con, department_name: str, event_id: str, tried: list[str], at: str
+) -> None:
+    with con:
+        con.execute(
+            "INSERT OR REPLACE INTO event_detail_misses VALUES (?, ?, ?, ?)",
+            (department_name, event_id, " ".join(tried), at),
+        )
+
+
+def load_unit_candidates(
+    departments_csv: Path = DEPARTMENTS_CSV, aliases_csv: Path = ALIASES_CSV
+) -> dict[str, list[str]]:
+    """Normalized department name -> candidate business units, aliases first.
+
+    Every unit a FI$Cal name maps to is a candidate (the page decides which is
+    right), so an ambiguous name such as Franchise Tax Board (1730, 7730) still
+    resolves."""
+    import csv
+
+    out: dict[str, list[str]] = {}
+
+    def add(name: str, unit: str) -> None:
+        units = out.setdefault(" ".join(name.upper().split()), [])
+        if unit and unit not in units:
+            units.append(unit)
+
+    if aliases_csv.exists():
+        with open(aliases_csv, encoding="utf-8", newline="") as f:
+            for r in csv.DictReader(f):
+                add(r["eprocure_department_name"], r["business_unit"].strip())
+    with open(departments_csv, encoding="utf-8", newline="") as f:
+        for r in csv.DictReader(f):
+            add(r["name"], r["code"].strip())
+    return out
+
+
+def _detail_queue(con: sqlite3.Connection, today: str) -> list[tuple[str, str]]:
+    """Posted events to read: never-read first, then the oldest reads; recently
+    missed events (no unit loaded) are skipped until _MISS_RETRY_DAYS pass."""
+    return [
+        (r[0], r[1])
+        for r in con.execute(
+            """
+            SELECT e.department_name, e.event_id
+            FROM events e
+            LEFT JOIN event_details d
+                   ON d.department_name = e.department_name AND d.event_id = e.event_id
+            LEFT JOIN event_detail_misses m
+                   ON m.department_name = e.department_name AND m.event_id = e.event_id
+            WHERE e.slice_key = 'posted'
+              AND (m.checked_at IS NULL OR julianday(?) - julianday(m.checked_at) >= ?)
+            GROUP BY e.department_name, e.event_id
+            ORDER BY MAX(d.fetched_at IS NOT NULL), MAX(d.fetched_at), MIN(e.end_date), e.event_id
+            """,
+            (today, _MISS_RETRY_DAYS),
+        )
+    ]
+
+
+def extract_event_details(
+    db_path: Path = DB_PATH,
+    *,
+    budget_minutes: float | None = None,
+    limit: int | None = None,
+    headless: bool = True,
+    timeout_ms: int = 60_000,
+) -> dict:
+    """Read the detail page of every currently Posted event into ``db_path``.
+
+    Resumable: each event is written as soon as it is read, never-read events go
+    first, then the oldest reads. ``budget_minutes`` stops cleanly between pages
+    and returns with ``complete`` False (exit 0); a run of page failures raises.
+    Returns a summary dict."""
+    from time import monotonic
+    from urllib.parse import quote
+
+    con = sqlite3.connect(db_path)
+    try:
+        _ensure_detail_tables(con)
+        today = datetime.now(timezone.utc).date().isoformat()
+        queue = _detail_queue(con, today)
+        if limit is not None:
+            queue = queue[:limit]
+        candidates = load_unit_candidates()
+        resolved: dict[str, str] = {
+            dept: bu
+            for dept, bu in con.execute(
+                "SELECT department_name, business_unit FROM event_details "
+                "GROUP BY department_name HAVING COUNT(DISTINCT business_unit) = 1"
+            )
+        }
+        stats = Counter()
+        failed: list[str] = []
+        t0, streak = monotonic(), 0
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=headless, args=_CHROMIUM_ARGS)
+            ctx = page = watch = None
+            try:
+                for n, (dept, eid) in enumerate(queue):
+                    if budget_minutes is not None and (monotonic() - t0) / 60 > budget_minutes:
+                        stats["skipped_budget"] = len(queue) - n
+                        break
+                    if n % _CONTEXT_PAGES == 0:
+                        if ctx:
+                            ctx.close()
+                        ctx = browser.new_context(user_agent=_BROWSER_UA)
+                        page = ctx.new_page()
+                        watch = PageWatch(page, f"event-details-{n}")
+                    norm = " ".join(dept.upper().split())
+                    units = [u for u in [resolved.get(dept), *candidates.get(norm, [])] if u]
+                    units = list(dict.fromkeys(units))
+                    tried, read = [], None
+                    for bu in units:
+                        tried.append(bu)
+                        url = EVENT_DETAIL_URL.format(
+                            bu=quote(bu, safe=""), event_id=quote(eid, safe="")
+                        )
+                        try:
+                            page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
+                            page.wait_for_function(_DETAIL_READY, timeout=timeout_ms)
+                            page.wait_for_timeout(800)  # tables render just after the header
+                        except PWTimeout as e:
+                            streak += 1
+                            watch.capture(e)
+                            if streak >= _MAX_CONSECUTIVE_FAILURES:
+                                raise EprocureError(
+                                    f"{streak} detail pages in a row failed to load — the site "
+                                    "or its firewall is refusing us; stopping (events read so "
+                                    "far are banked)"
+                                ) from e
+                            failed.append(f"{dept} {eid} @ {bu}")
+                            read = "failed"
+                            break
+                        streak = 0
+                        if "error.aspx" in page.url:
+                            continue  # wrong unit for this event: try the next candidate
+                        raw = page.evaluate(_DETAIL_READ)
+                        if (raw.get("event_id") or "").strip() != eid.strip():
+                            continue
+                        write_event_detail(
+                            con,
+                            dept,
+                            eid,
+                            bu,
+                            parse_event_detail(raw),
+                            datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                        )
+                        resolved[dept] = bu
+                        stats["read"] += 1
+                        read = "ok"
+                        break
+                    if read is None:
+                        _record_detail_miss(con, dept, eid, tried, today)
+                        stats["missed"] += 1
+                    if (n + 1) % 50 == 0:
+                        print(f"event details: {n + 1}/{len(queue)} — {dict(stats)}")
+            finally:
+                if ctx:
+                    ctx.close()
+                browser.close()
+        posted, with_detail = con.execute(
+            "SELECT COUNT(DISTINCT e.department_name || '|' || e.event_id), "
+            "COUNT(DISTINCT d.department_name || '|' || d.event_id) FROM events e "
+            "LEFT JOIN event_details d ON d.department_name = e.department_name "
+            "AND d.event_id = e.event_id WHERE e.slice_key = 'posted'"
+        ).fetchone()
+    finally:
+        con.close()
+    summary = {
+        "queued": len(queue),
+        "read": stats["read"],
+        "missed": stats["missed"],
+        "failed": len(failed),
+        "skipped_budget": stats["skipped_budget"],
+        "posted_events": posted,
+        "posted_with_details": with_detail,
+        "complete": not stats["skipped_budget"] and not failed,
+        "minutes": round((monotonic() - t0) / 60, 1),
+    }
+    print(f"event details: {summary}")
+    for f in failed[:10]:
+        print(f"event details: FAILED {f}")
+    return summary
+
+
+_DETAIL_TABLES = (
+    "event_details",
+    "event_detail_unspsc",
+    "event_detail_licenses",
+    "event_detail_service_areas",
+    "event_detail_misses",
+)
+
+
+def carry_forward_event_details(db_path: Path, prev_path: Path, fetch_prev) -> dict:
+    """Copy the published detail reads into a freshly built store.
+
+    The weekly registry refresh starts from an empty ``eprocure.db``; without
+    this its publish would erase every detail read the daily job banked. Only
+    events in the new store's Posted slice are carried, and an event the new
+    store already holds is left as it is. ``fetch_prev(prev_path)`` is called
+    when ``prev_path`` doesn't exist yet."""
+    if not prev_path.exists() and not fetch_prev(prev_path):
+        return {"carried": 0, "reason": "no published store to carry from"}
+    con = sqlite3.connect(db_path)
+    try:
+        _ensure_detail_tables(con)
+        con.execute("ATTACH DATABASE ? AS prev", (f"file:{prev_path}?mode=ro",))
+        if not _has_table(con, "prev", "event_details"):
+            return {"carried": 0, "reason": "published store has no detail reads yet"}
+        # Fix the set of events to carry BEFORE copying: once event_details is
+        # copied, the child tables' keys would no longer look missing.
+        con.execute("DROP TABLE IF EXISTS temp.carry_keys")
+        con.execute(
+            "CREATE TEMP TABLE carry_keys AS "
+            "SELECT department_name, event_id FROM main.events WHERE slice_key = 'posted' "
+            "EXCEPT SELECT department_name, event_id FROM main.event_details"
+        )
+        carried = 0
+        with con:
+            for table in _DETAIL_TABLES:
+                if not _has_table(con, "prev", table):
+                    continue
+                cur = con.execute(
+                    f"INSERT OR IGNORE INTO main.{table} SELECT p.* FROM prev.{table} p "  # noqa: S608 - internal constants
+                    "JOIN temp.carry_keys k ON k.department_name = p.department_name "
+                    "AND k.event_id = p.event_id"
+                )
+                if table == "event_details":
+                    carried = cur.rowcount
+        return {"carried": carried, "reason": "copied from the published store"}
+    finally:
+        con.close()
+
+
 def extract_registry(
     db_path: Path = DB_PATH,
     out_dir: Path = DATA_DIR,
@@ -882,6 +1305,19 @@ def _cli() -> None:
         help="Stop cleanly between slices once this wall-clock budget is spent",
     )
     ev.add_argument("--show", action="store_true", help="Run browser headed (visible)")
+    dt = sub.add_parser(
+        "extract-details",
+        help="Posted events' detail pages (UNSPSC, licenses, areas, pre-bid) -> eprocure.db",
+    )
+    dt.add_argument("--db", type=Path, default=DB_PATH)
+    dt.add_argument(
+        "--budget-minutes",
+        type=float,
+        default=None,
+        help="Stop cleanly between pages once this wall-clock budget is spent (exit 0)",
+    )
+    dt.add_argument("--limit", type=int, default=None, help="Read at most this many events")
+    dt.add_argument("--show", action="store_true", help="Run browser headed (visible)")
 
     args = ap.parse_args()
     if args.cmd == "extract-registry":
@@ -895,6 +1331,10 @@ def _cli() -> None:
             include_posted=not args.no_posted,
             headless=not args.show,
             budget_minutes=args.budget_minutes,
+        )
+    elif args.cmd == "extract-details":
+        extract_event_details(
+            args.db, budget_minutes=args.budget_minutes, limit=args.limit, headless=not args.show
         )
 
 

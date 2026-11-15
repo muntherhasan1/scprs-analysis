@@ -178,7 +178,19 @@ _HINTS: dict[str, dict[str, str]] = {
         "Gate": (
             "Either the registry/Historical slices changed (this job must touch only "
             "Posted — a code bug) or Posted shrank below 50% of the previous slice "
-            "(likely a broken search). Nothing was published."
+            "(likely a broken search). Nothing was published. Or a bid detail read "
+            "for a still-open bid disappeared (a code bug in the detail store)."
+        ),
+        "Read bid detail pages": (
+            "Reading open bids' detail pages on caleprocure.ca.gov failed — usually "
+            "8 page loads in a row timed out (the site or its firewall refusing Actions' "
+            "IPs). Reads banked before the failure were published with the Posted slice; "
+            "the next run resumes with never-read bids first. See `docs/EPROCURE.md` → "
+            "Bid detail pages."
+        ),
+        "Fail the run if bid detail": (
+            "The Posted slice and the detail reads banked so far WERE published; this "
+            "step only surfaces that reading detail pages failed earlier in the run."
         ),
     },
     "MCP image": {
