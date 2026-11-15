@@ -107,6 +107,9 @@ def test_app_export_follows_the_data_contract(tmp_path):
     assert daa["dvbe_only"] is True and daa["sb_or_dvbe"] is False
     assert puc["business_unit"] == "8660" and puc["department_loaded"] is True
     assert puc["sb_only"] is True and puc["dvbe_only"] is False
+    # A direct Cal eProcure link needs the business unit; no match, no link.
+    assert puc["eprocure_url"] == "https://caleprocure.ca.gov/event/8660/26-001"
+    assert daa["eprocure_url"] is None
 
     # Loaded department: current-version totals, shares by canonical supplier.
     puc_page = _load(out / "departments" / "8660.json")
@@ -118,6 +121,7 @@ def test_app_export_follows_the_data_contract(tmp_path):
     fy = puc_page["spend_by_fiscal_year"]
     assert [y["fiscal_year"] for y in fy] == [2021] and fy[0]["partial"] is True
     assert [o["event_id"] for o in puc_page["open_opportunities"]] == ["26-001"]
+    assert puc_page["open_opportunities"][0]["eprocure_url"] == puc["eprocure_url"]
     assert {m["acquisition_type"] for m in puc_page["market_concentration"]} == {
         "IT Services",
         "NON-IT Services",
@@ -620,3 +624,15 @@ def test_export_survives_a_serve_db_published_before_titles(tmp_path):
     doc_a = next(c for c in acme["recent_contracts"] if c["purchase_document"] == "A")
     assert doc_a["title"] is None
     assert doc_a["department_name"] == "Public Utilities Commission"
+
+
+def test_eprocure_url_shapes():
+    """/event/{bu}/{event id}, confirmed in a browser for every ID shape posted
+    on 2026-11-15; a space inside an ID ("IFB 2175") is percent-encoded."""
+    url = app_export._eprocure_url
+    assert url("8955", "0000040541") == "https://caleprocure.ca.gov/event/8955/0000040541"
+    assert url("2660", "11A4467") == "https://caleprocure.ca.gov/event/2660/11A4467"
+    assert url("4300", "IFB 2175") == "https://caleprocure.ca.gov/event/4300/IFB%202175"
+    assert url("4300", " 26-165 ") == "https://caleprocure.ca.gov/event/4300/26-165"
+    assert url(None, "26-001") is None
+    assert url("8660", "  ") is None
