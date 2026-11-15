@@ -164,7 +164,7 @@ jobs:
             fi
           done <<'EOF'
           CMAS refresh (Wave 2)|57|CMAS agreements are not being refreshed
-          eProcure registry refresh|180|SB/DVBE certifications and solicitations are going stale
+          eProcure registry refresh|180|SB/DVBE certifications or its event slices are going stale
           eProcure solicitations refresh|57|the vendor app's open solicitations are going stale
           Operational backup|180|the operational store has no fresh cold backup
           EOF
@@ -207,6 +207,7 @@ jobs:
           [ -n "$F1" ] && body="$body"$'\n'"- $F1"
           [ -n "$F2" ] && body="$body"$'\n'"- $F2"
           [ -n "$F3" ] && body="$body"$'\n'"- $F3"
+          [ -n "$F4" ] && body="$body"$'\n'"- $F4"
           body="$body"$'\n\n'"This fires when the pipeline stops running or stops reaching the Spaces — the failure class workflow_run triage cannot see. A stale enrich age points at the Enrich workflow; a stale serve commit points at Warehouse refresh; a stale summary refresh points at Summary refresh; a stale CMAS / eProcure / backup age points at that workflow (its cron slots are being skipped or its runs fail)."$'\n\n'"Run: $RUN_URL"
           existing=$(gh issue list --label "$ALERT_LABEL" --state open \
             --json number --jq '.[0].number')
