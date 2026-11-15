@@ -1,7 +1,7 @@
 # Vendor web app — static JSON export
 
-`src/app_export.py` writes the data behind the planned vendor/small-business web
-app: a static site that reads precomputed JSON, so the front end never sums,
+`src/app_export.py` writes the data behind **Contract Lens**, the vendor/small-business
+web app: a static site that reads precomputed JSON, so the front end never sums,
 dedupes or joins. The field-level spec (schema v1) is the "Data contract" tab of
 the product brief (Claude Doc, linked from the PR that added this module).
 
@@ -74,4 +74,17 @@ The step is dormant until set up:
    `HF_APP_TOKEN` Actions secret.
 3. Set the `APP_DATASET` Actions variable to the dataset id.
 
-Not wired yet: the static Space that serves the site.
+## Serving (Contract Lens)
+
+The site is live at <https://munther-hasan-contract-lens.static.hf.space>
+(Space `munther-hasan/contract-lens`, SDK static, free). Its source is the
+Lovable-built front end in the private `muntherhasan1/contract-lens` repo, whose
+`deploy-hf-space.yml` builds it with `VITE_STATIC_SPA=1` and replaces the Space's
+files on every push to its `main`. The browser reads this dataset directly
+(`…/datasets/<APP_DATASET>/resolve/main/…`), so a `publish-app` refresh reaches
+the site with no redeploy. Two consequences for the export:
+
+- **Paths and field names are the API.** Renaming a file or field here breaks the
+  live site on the next publish; change the front end first or keep both.
+- **Links are hash routes** (`/index.html#/department/2660`): a static Space
+  answers every path but `/` with a 404, so there is no path-style deep link.
