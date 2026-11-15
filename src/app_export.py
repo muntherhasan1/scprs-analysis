@@ -770,10 +770,7 @@ def _explore(con, dept_index: list[dict], methods: dict, flags: dict) -> tuple[d
     excludes class X (not procurement) from totals by default. Contracts of EXPLORE_LIST_MIN
     or more are listed per department, loaded only when that department is in view.
     Returns (cube, contracts by business unit, coverage figures)."""
-    has_title = any(
-        r[1] == "first_item_title" for r in con.execute("PRAGMA table_info(gold_document)")
-    )
-    title = "first_item_title" if has_title else "NULL"
+    title = _title_column(con)
     families: list[dict] = []
     fam_idx: dict[str, int] = {}
 
@@ -988,26 +985,34 @@ def _slices(
                 "partial": _fy_partial(r["fiscal_year"], *cov, today),
             }
         )
+    for r in q(_Q_DEPTS):
+        depts[r.pop("k")].append(r)
+    for r in q(_Q_SUPPLIERS):
+        sups[r.pop("k")].append(r)
     fy_totals = {
         (k, row["fiscal_year"]): row["total_value"] or 0
         for k, rows in by_fy.items()
         for row in rows
     }
+    # Streamed and filtered to the listed suppliers: the query yields every
+    # supplier-year (up to ~3M rows: 237K page-suppliers x 13 years, 2026-11), but
+    # only TOP_N per page ship.
+    listed = {(k, s["canonical_id"]) for k, rows in sups.items() for s in rows[:TOP_N]}
     sup_fy: dict[tuple[str, str], list[dict]] = defaultdict(list)
-    for r in q(_Q_SUPPLIER_FY):
-        k, fy, v = r["k"], r["fiscal_year"], r["total_value"] or 0
+    for k, cid, fy, v in con.execute(_Q_SUPPLIER_FY.format(t=table)):
+        if (k, cid) not in listed:
+            continue
+        v = v or 0
         total_fy = fy_totals.get((k, fy)) or 0
-        sup_fy[(k, r["canonical_id"])].append(
+        sup_fy[(k, cid)].append(
             {
                 "fiscal_year": fy,
                 "total_value": _money(v),
-                "share_pct": round(100 * v / total_fy, 2) if total_fy else None,
+                # No share of a net-credit or $0 year: a positive value over a
+                # negative total would read as a negative share.
+                "share_pct": round(100 * v / total_fy, 2) if total_fy > 0 else None,
             }
         )
-    for r in q(_Q_DEPTS):
-        depts[r.pop("k")].append(r)
-    for r in q(_Q_SUPPLIERS):
-        sups[r.pop("k")].append(r)
     for r in q(_Q_CROSS):
         cross[r.pop("k")].append(r)
 
