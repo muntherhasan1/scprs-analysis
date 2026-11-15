@@ -1415,6 +1415,54 @@ def test_gold_document_carries_the_current_versions_first_item_title(tmp_path):
     assert titles["B"] is None
 
 
+def test_gold_document_carries_the_current_versions_end_date(tmp_path):
+    """The term end rides on gold_document as a plain ISO date: dim_date spans
+    the observed start dates only, and terms run years past them. It follows the
+    current version; non-ISO text becomes NULL; both that and a term ending
+    before it starts are counted by warn checks."""
+    src, wh = tmp_path / "scprs.db", tmp_path / "warehouse.db"
+    _seed_source(src)  # doc A at v1 and v2 (starts 2021-02-18), doc B at v1
+    con = sqlite3.connect(src)
+    con.executemany(
+        "UPDATE purchases SET end_date = ? WHERE purchase_document = ? AND version = ?",
+        [("2022-06-30", "A", "1"), ("2031-06-30", "A", "2"), ("June 2025", "B", "1")],
+    )
+    con.execute(
+        "INSERT INTO purchases (business_unit, purchase_document, version, grand_total, "
+        "start_date, end_date, acquisition_type_sub_type, acquisition_method, supplier_id, "
+        "supplier_name, status, department_name) VALUES ('8660', 'E', '1', 10.0, "
+        "'2021-05-01', '2021-04-01', 'IT Goods', 'Formal - COMPETITIVE', 'S1', 'Acme', "
+        "'Active', 'PUC')"
+    )
+    con.commit()
+    con.close()
+    warehouse.build_all(
+        wh_path=wh,
+        source_path=src,
+        enrichment_db=tmp_path / "no_enrich.db",
+        cmas_db=tmp_path / "missing_cmas.db",
+        log=lambda *a: None,
+    )
+    con = sqlite3.connect(wh)
+    try:
+        ends = dict(con.execute("SELECT purchase_document, end_date FROM gold_document"))
+        (last_day,) = con.execute("SELECT MAX(full_date) FROM lv_dim_date").fetchone()
+        dq = dict(
+            con.execute(
+                "SELECT check_name, failed_count FROM dw_dq_results WHERE batch_id = "
+                "(SELECT MAX(batch_id) FROM dw_dq_results)"
+            )
+        )
+        procurement = dict(con.execute("SELECT purchase_document, end_date FROM gold_procurement"))
+    finally:
+        con.close()
+    assert ends == {"A": "2031-06-30", "B": None, "E": "2021-04-01"}
+    assert last_day < "2031-06-30"  # a dim_date key would have collapsed to Unknown
+    assert procurement["A"] == "2031-06-30"
+    assert dq["document_end_date_not_iso"] == 1  # B's "June 2025"
+    assert dq["document_ends_before_start"] == 1  # E
+
+
 def test_governed_award_classes_and_procurement_view(tmp_path, monkeypatch):
     """gold_document carries each method's SCM class/family/code (references/award_methods.csv),
     a reviewed outlier's override wins (references/contract_flags.csv), gold_procurement drops
