@@ -15,7 +15,7 @@ def _load(path):
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def _build(tmp_path, extra_purchases=(), cmas=None, titles=None, source_sql=()):
+def _build(tmp_path, extra_purchases=(), cmas=None, titles=None, source_sql=(), details=()):
     src, wh = tmp_path / "scprs.db", tmp_path / "warehouse.db"
     serve, epr = tmp_path / "warehouse-serve.db", tmp_path / "eprocure.db"
     _seed_source(src)  # BU 8660: doc A (v1 100 -> v2 150, Acme/S1), doc B (5000, Beta/S2)
@@ -70,6 +70,14 @@ def _build(tmp_path, extra_purchases=(), cmas=None, titles=None, source_sql=()):
     con = sqlite3.connect(epr)
     con.execute("CREATE TABLE events_meta (slice_key, banner_total, rows, extracted_at)")
     con.execute("INSERT INTO events_meta VALUES ('posted', 3, 3, '2026-07-25T05:22:01+00:00')")
+    if details:  # [(department_name, event_id, business_unit, raw detail-page read)]
+        from src import eprocure
+
+        eprocure._ensure_detail_tables(con)
+        for dept, eid, bu, raw in details:
+            eprocure.write_event_detail(
+                con, dept, eid, bu, eprocure.parse_event_detail(raw), "2026-07-25T06:00:00+00:00"
+            )
     con.commit()
     con.close()
     warehouse.build_all(
@@ -720,3 +728,96 @@ def test_eprocure_url_shapes():
     assert url("4300", " 26-165 ") == "https://caleprocure.ca.gov/event/4300/26-165"
     assert url(None, "26-001") is None
     assert url("8660", "  ") is None
+
+
+def test_open_bids_carry_detail_pages_and_filter_counts(tmp_path):
+    """With a bid's detail page read: type of work (UNSPSC codes -> product
+    categories and spelled-out work types), license classes, counties, the
+    pre-bid conference and the published date, plus precomputed filter counts.
+    A bid not read yet keeps empty detail fields."""
+    raw = {
+        "format1": "Sell Event",
+        "format2": "RFx",
+        "published": "07/01/2026 9:00AM PDT",
+        "version": "2",
+        "conference": "Mandatory",
+        "conf_date": "07/20/2026",
+        "conf_time": "10:00AM",
+        "conf_location": "505 Van Ness Ave",
+        "conf_comments": "Attendance is required to bid.",
+        "description": "Rate case support. " + "x" * 800,
+        "unspsc": ["81112200", "72102100"],
+        "unspsc_desc": [
+            "Computer services - Software maintenance & support",
+            "Building facility construction & maint srvcs - Pest control",
+        ],
+        "license": ["C-20"],
+        "license_desc": ["Warm-Air Heating Contractor"],
+        "area_id": ["038"],
+        "county": ["San Francisco"],
+    }
+    out, _ = _build(tmp_path, details=[("Public Utilities Commission", "26-001", "8660", raw)])
+    doc = _load(out / "opportunities.json")
+    assert doc["details_read_count"] == 1
+    bids = {o["event_id"]: o for o in doc["items"]}
+    puc = bids["26-001"]
+    assert puc["details_read"] is True and puc["published_date"] == "2026-07-01"
+    assert puc["amended"] is True  # event version 2
+    assert puc["categories"] == ["it-services", "construction"]
+    assert puc["work_types"] == ["Software maintenance & support", "Pest control"]
+    assert puc["unspsc"][1] == {
+        "code": "72102100",
+        "description": "Building facility construction & maint srvcs - Pest control",
+    }
+    assert puc["licenses"] == [{"code": "C-20", "description": "Warm-Air Heating Contractor"}]
+    assert puc["service_area"] == ["San Francisco"]
+    assert puc["prebid_conference"] == {
+        "mandatory": True,
+        "date": "2026-07-20",
+        "time": "10:00AM",
+        "location": "505 Van Ness Ave",
+        "comments": "Attendance is required to bid.",
+    }
+    assert len(puc["description"]) == app_export.BID_DESCRIPTION_MAX + 1  # cut, with "…"
+    # Not read yet: empty, never guessed.
+    daa = bids["26-002"]
+    assert daa["details_read"] is False and daa["prebid_conference"] is None
+    assert daa["categories"] == daa["work_types"] == daa["licenses"] == daa["service_area"] == []
+    assert daa["amended"] is None
+    # The department page and dashboard reuse the same bid rows.
+    page = _load(out / "departments" / "8660.json")
+    assert page["open_opportunities"][0]["work_types"] == puc["work_types"]
+    f = doc["facets"]
+    assert f["categories"][0]["bid_count"] == 1 and {c["key"] for c in f["categories"]} == {
+        "it-services",
+        "construction",
+    }
+    assert {"label": "Pest control", "bid_count": 1} in f["work_types"]
+    assert f["licenses"] == [
+        {"code": "C-20", "description": "Warm-Air Heating Contractor", "bid_count": 1}
+    ]
+    assert f["counties"] == [{"county": "San Francisco", "bid_count": 1}]
+    assert f["mandatory_prebid_count"] == 1
+
+
+def test_bid_type_and_work_type_wording():
+    assert app_export._bid_type("RFQ #2026061 - SB Option- 3DATX Mini PEMS", 0) == "RFQ"
+    assert app_export._bid_type("IFB 2175", 0) == "IFB"
+    assert app_export._bid_type("RFP-IT-2026-214-RB-LAN WAN MSA", 0) == "RFP"
+    assert app_export._bid_type("CSU Preferred Lender RFI", 0) == "RFI"
+    assert app_export._bid_type("Renewable Diesel", 1) == "RFI"  # Format/Type said so
+    assert app_export._bid_type("Janitorial Services", 0) is None  # never guessed
+    assert app_export._bid_type("Sprifq sprinklers", 0) is None  # whole tokens only
+    assert (
+        app_export._work_type(
+            "Special trade construction & maint srvcs - Floor laying - Resilient floor laying"
+        )
+        == "Floor laying"
+    )
+    assert (
+        app_export._work_type("Building facility maintenance & repair services")
+        == "Building facility maintenance & repair services"
+    )
+    assert app_export._work_type("Heavy equip maint srvcs - Repair") == "Repair"
+    assert app_export._work_type("Facility maint srvcs") == "Facility maintenance services"
+    assert app_export._work_type(None) is None

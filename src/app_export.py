@@ -32,7 +32,7 @@ import json
 import re
 import shutil
 import sqlite3
-from collections import defaultdict
+from collections import Counter, defaultdict
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import quote
@@ -130,30 +130,197 @@ def _eprocure_url(business_unit: str | None, event_id: str | None) -> str | None
     return f"https://caleprocure.ca.gov/event/{bu}/{eid}"
 
 
-def _opportunities(con, today: str, loaded: set[str]) -> list[dict]:
+# Bid type from the title's own token (departments put it there: "RFQ #2026061",
+# "IFB 2175", "RFP-IT-2026-214"); a detail page's Format/Type of "Request For
+# Information" wins. Anything else is left null rather than guessed.
+_BID_TYPES = {
+    "RFQ": "Request for Quotation",
+    "IFB": "Invitation for Bid",
+    "RFP": "Request for Proposal",
+    "RFO": "Request for Offer",
+    "RFI": "Request for Information",
+}
+_BID_TYPE_TOKEN = re.compile(r"\b(RFQ|IFB|RFP|RFO|RFI)\b", re.I)
+# eProcure's UNSPSC descriptions abbreviate ("Special trade construction & maint
+# srvcs - Floor laying"); spelled out for display.
+_UNSPSC_ABBREVIATIONS = {
+    "srvcs": "services",
+    "srvc": "service",
+    "svcs": "services",
+    "maint": "maintenance",
+    "mgmt": "management",
+    "equip": "equipment",
+    "mfg": "manufacturing",
+}
+BID_DESCRIPTION_MAX = 600  # characters of a bid's description shipped to the app
+
+
+def _bid_type(event_name: str | None, is_information_request) -> str | None:
+    if is_information_request:
+        return "RFI"
+    m = _BID_TYPE_TOKEN.search(event_name or "")
+    return m.group(1).upper() if m else None
+
+
+def _work_type(description: str | None) -> str | None:
+    """A UNSPSC description's class-level name, spelled out: eProcure writes
+    "Family - Class[ - Commodity]", so the second part names the kind of work
+    ("Floor laying", "Pest control"); a family-level code falls back to the first."""
+    parts = [x.strip() for x in (description or "").split(" - ") if x.strip()]
+    if not parts:
+        return None
+    name = parts[1] if len(parts) > 1 else parts[0]
+    words = [_UNSPSC_ABBREVIATIONS.get(w.lower(), w) for w in name.split()]
+    out = " ".join(words)
+    return out[:1].upper() + out[1:]
+
+
+def _has_columns(con, table: str, cols: tuple[str, ...]) -> bool:
+    have = {r[1] for r in con.execute(f"PRAGMA table_info({table})")}  # noqa: S608 - internal name
+    return set(cols) <= have
+
+
+def _child_rows(con, table: str, cols: str) -> dict[tuple[str, str], list[tuple]]:
+    """{(department_name, event_id): [rows in page order]} from a detail mart, or
+    {} on a serve DB built before the mart existed."""
+    if not con.execute(
+        "SELECT 1 FROM sqlite_master WHERE name = ? AND type IN ('table', 'view')", (table,)
+    ).fetchone():
+        return {}
+    out: dict[tuple[str, str], list[tuple]] = defaultdict(list)
+    for r in con.execute(
+        f"SELECT department_name, event_id, {cols} FROM {table} "  # noqa: S608 - internal constants
+        "ORDER BY department_name, event_id, ord"
+    ):
+        out[(r[0], r[1])].append(tuple(r[2:]))
+    return out
+
+
+_DETAIL_OPP_COLUMNS = (
+    "published_date",
+    "event_version",
+    "is_information_request",
+    "prebid_mandatory",
+    "prebid_date",
+    "prebid_time",
+    "prebid_location",
+    "prebid_comments",
+    "description",
+    "details_read_at",
+)
+
+
+def _opportunities(
+    con, today: str, loaded: set[str], categories: list[dict] | None = None
+) -> list[dict]:
+    """Open bids, soonest close first. With bid detail pages read (scprs-analysis
+    eprocure extract-details), each also says what kind of work it is (UNSPSC
+    codes -> product categories and work types), the license classes and
+    counties it names, its pre-bid conference and its bid type; those fields are
+    null / empty for a bid not read yet (``details_read`` is false)."""
+    detail = _has_columns(con, "gold_eprocure_posted_opportunity", _DETAIL_OPP_COLUMNS)
+    extra = (", " + ", ".join(_DETAIL_OPP_COLUMNS)) if detail else ""
     rows = _rows(
         con,
-        "SELECT event_id, event_name, department_name, business_unit, bid_close_date, "
-        "sb_only, dvbe_only, sb_or_dvbe FROM gold_eprocure_posted_opportunity "
+        "SELECT event_id, event_name, department_name, business_unit, bid_close_date, "  # noqa: S608 - fixed column choice
+        f"sb_only, dvbe_only, sb_or_dvbe{extra} FROM gold_eprocure_posted_opportunity "
         "WHERE bid_close_date >= ? ORDER BY bid_close_date, event_name",
         (today,),
     )
-    return [
-        {
-            "event_id": r["event_id"],
-            "event_name": r["event_name"],
-            "department_name": r["department_name"],
-            "business_unit": r["business_unit"],
-            "department_loaded": r["business_unit"] in loaded,
-            "bid_close_date": r["bid_close_date"],
-            "sb_only": bool(r["sb_only"]),
-            "dvbe_only": bool(r["dvbe_only"]),
-            # Set aside for SB *or* DVBE bidders ("SB/DVBE ONLY") — neither flag above.
-            "sb_or_dvbe": bool(r["sb_or_dvbe"]),
-            "eprocure_url": _eprocure_url(r["business_unit"], r["event_id"]),
-        }
-        for r in rows
-    ]
+    codes = _child_rows(con, "gold_eprocure_event_unspsc", "unspsc, unspsc_description")
+    licenses = _child_rows(con, "gold_eprocure_event_license", "license_type, license_description")
+    areas = _child_rows(con, "gold_eprocure_event_service_area", "county")
+    match = _category_matcher(categories) if categories else None
+    items = []
+    for r in rows:
+        key = (r["department_name"], r["event_id"])
+        read = bool(r.get("details_read_at"))
+        unspsc = [{"code": c, "description": d} for c, d in codes.get(key, [])]
+        mandatory = r.get("prebid_mandatory")
+        description = r.get("description")
+        items.append(
+            {
+                "event_id": r["event_id"],
+                "event_name": r["event_name"],
+                "department_name": r["department_name"],
+                "business_unit": r["business_unit"],
+                "department_loaded": r["business_unit"] in loaded,
+                "bid_close_date": r["bid_close_date"],
+                "sb_only": bool(r["sb_only"]),
+                "dvbe_only": bool(r["dvbe_only"]),
+                # Set aside for SB *or* DVBE bidders ("SB/DVBE ONLY") — neither flag above.
+                "sb_or_dvbe": bool(r["sb_or_dvbe"]),
+                "eprocure_url": _eprocure_url(r["business_unit"], r["event_id"]),
+                "bid_type": _bid_type(r["event_name"], r.get("is_information_request")),
+                "is_information_request": bool(r.get("is_information_request")),
+                "details_read": read,
+                "published_date": r.get("published_date"),
+                "amended": (r.get("event_version") or 1) > 1 if read else None,
+                "description": (
+                    description[:BID_DESCRIPTION_MAX].rstrip() + "…"
+                    if description and len(description) > BID_DESCRIPTION_MAX
+                    else description
+                ),
+                "categories": (
+                    list(dict.fromkeys(match(u["code"]) for u in unspsc)) if match else []
+                ),
+                "work_types": list(
+                    dict.fromkeys(w for u in unspsc if (w := _work_type(u["description"])))
+                ),
+                "unspsc": unspsc,
+                "licenses": [{"code": t, "description": d} for t, d in licenses.get(key, [])],
+                "service_area": [c for (c,) in areas.get(key, [])],
+                "prebid_conference": (
+                    {
+                        "mandatory": bool(mandatory),
+                        "date": r.get("prebid_date"),
+                        "time": r.get("prebid_time"),
+                        "location": r.get("prebid_location"),
+                        "comments": r.get("prebid_comments"),
+                    }
+                    if mandatory is not None
+                    else None
+                ),
+            }
+        )
+    return items
+
+
+def _opportunity_facets(items: list[dict], categories: list[dict]) -> dict:
+    """Precomputed filter values with bid counts (the app never counts), largest first."""
+    labels = {c["key"]: c["label"] for c in categories}
+    labels[OTHER_CATEGORY[0]] = OTHER_CATEGORY[1]
+
+    def tally(values) -> list[tuple]:
+        return sorted(Counter(values).items(), key=lambda kv: (-kv[1], str(kv[0])))
+
+    return {
+        "categories": [
+            {"key": k, "label": labels.get(k, k), "bid_count": n}
+            for k, n in tally(c for i in items for c in i["categories"])
+        ],
+        "work_types": [
+            {"label": k, "bid_count": n}
+            for k, n in tally(w for i in items for w in i["work_types"])
+        ],
+        "licenses": [
+            {"code": code, "description": desc, "bid_count": n}
+            for (code, desc), n in tally(
+                (lic["code"], lic["description"]) for i in items for lic in i["licenses"]
+            )
+        ],
+        "counties": [
+            {"county": k, "bid_count": n}
+            for k, n in tally(c for i in items for c in i["service_area"])
+        ],
+        "bid_types": [
+            {"code": k, "label": _BID_TYPES[k], "bid_count": n}
+            for k, n in tally(i["bid_type"] for i in items if i["bid_type"])
+        ],
+        "mandatory_prebid_count": sum(
+            1 for i in items if (i["prebid_conference"] or {}).get("mandatory")
+        ),
+    }
 
 
 def _fy_partial(fiscal_year: int, coverage_from: str, coverage_to: str, today: str) -> bool:
@@ -1318,13 +1485,14 @@ def export_app(
     con = sqlite3.connect(f"file:{serve_path}?mode=ro", uri=True)
     try:
         loaded = {r[0] for r in con.execute("SELECT DISTINCT business_unit FROM gold_document")}
-        opps = _opportunities(con, today, loaded)
+        categories = load_categories()
+        opps = _opportunities(con, today, loaded, categories)
         flags = _supplier_flags(con, today)
         dept_index, dept_pages = _departments(con, opps, flags, load_aliases(), today)
         sup_index, sup_shards = _suppliers(con, flags, today)
         recompetes = _recompetes(con, flags, today)
         overview, insight_pages, search = _insights(
-            con, flags, dept_index, sup_index, opps, today, load_categories()
+            con, flags, dept_index, sup_index, opps, today, categories
         )
         cmas = _cmas(con, today)
         explore, explore_contracts, explore_cov = _explore(
@@ -1412,7 +1580,16 @@ def export_app(
     sizes = {}
     sizes["meta"] = _write(staging / "meta.json", meta, generated_at)
     sizes["opportunities"] = _write(
-        staging / "opportunities.json", {"total_count": len(opps), "items": opps}, generated_at
+        staging / "opportunities.json",
+        {
+            "total_count": len(opps),
+            # How many open bids' detail pages were read (UNSPSC, licenses,
+            # counties, pre-bid): the rest have empty detail fields.
+            "details_read_count": sum(o["details_read"] for o in opps),
+            "facets": _opportunity_facets(opps, categories),
+            "items": opps,
+        },
+        generated_at,
     )
     sizes["departments_index"] = _write(
         staging / "departments" / "index.json", {"items": dept_index}, generated_at
