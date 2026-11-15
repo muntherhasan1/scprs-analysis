@@ -15,7 +15,7 @@ def _load(path):
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def _build(tmp_path, extra_purchases=(), cmas=None, titles=None):
+def _build(tmp_path, extra_purchases=(), cmas=None, titles=None, source_sql=()):
     src, wh = tmp_path / "scprs.db", tmp_path / "warehouse.db"
     serve, epr = tmp_path / "warehouse-serve.db", tmp_path / "eprocure.db"
     _seed_source(src)  # BU 8660: doc A (v1 100 -> v2 150, Acme/S1), doc B (5000, Beta/S2)
@@ -41,6 +41,12 @@ def _build(tmp_path, extra_purchases=(), cmas=None, titles=None):
                 )
             ],
         )
+        con.commit()
+        con.close()
+    if source_sql:  # [(sql, [params, ...])]: edits to the seeded source before the build
+        con = sqlite3.connect(src)
+        for sql, rows in source_sql:
+            con.executemany(sql, rows or [()])
         con.commit()
         con.close()
     _seed_eprocure(
@@ -581,23 +587,33 @@ def test_no_supplier_share_of_a_net_credit_year(tmp_path):
     ]
 
 
-def test_export_survives_a_serve_db_published_before_titles(tmp_path):
+@pytest.mark.parametrize(
+    ("column", "field"), [("first_item_title", "title"), ("end_date", "end_date")]
+)
+def test_export_survives_a_serve_db_published_before_a_column(tmp_path, column, field):
     """The refresh exports from whatever serve DB is live. One built before
-    first_item_title existed must still export, with null titles, not fail the
+    first_item_title (2026-10) or end_date (2026-11) existed must still export,
+    with that field null and no recompetes list without end dates, not fail the
     run."""
-    _build(tmp_path, titles={"A": "Rate case analytics software"})
+    _build(
+        tmp_path,
+        titles={"A": "Rate case analytics software"},
+        source_sql=[
+            ("UPDATE purchases SET end_date = '2027-01-31' WHERE purchase_document = 'A'", [])
+        ],
+    )
     serve = tmp_path / "warehouse-serve.db"
     con = sqlite3.connect(serve)
     (sql,) = con.execute(
         "SELECT sql FROM sqlite_master WHERE type = 'view' AND name = 'gold_document'"
     ).fetchone()
     cols = [r[1] for r in con.execute("PRAGMA table_info(gold_document)")]
-    assert "first_item_title" in cols
+    assert column in cols
     con.executescript(
         f"CREATE VIEW old_gold_document AS {sql.split(' AS ', 1)[1]};"  # noqa: S608 — the DB's own view SQL
         "DROP VIEW gold_document;"
         "CREATE VIEW gold_document AS SELECT "
-        + ", ".join(c for c in cols if c != "first_item_title")
+        + ", ".join(c for c in cols if c != column)
         + " FROM old_gold_document;"
     )
     con.close()
@@ -618,5 +634,73 @@ def test_export_survives_a_serve_db_published_before_titles(tmp_path):
         if p["profile"]["canonical_name"].upper().startswith("ACME")
     )
     doc_a = next(c for c in acme["recent_contracts"] if c["purchase_document"] == "A")
-    assert doc_a["title"] is None
+    assert doc_a[field] is None
     assert doc_a["department_name"] == "Public Utilities Commission"
+    assert (out / "recompetes.json").exists() == (column != "end_date")
+
+
+def test_recompetes_list_active_contracts_ending_within_a_year(tmp_path):
+    """recompetes.json: active procurement contracts of $100K or more whose term
+    ends in the next 365 days, soonest first. Funding records, closed or small
+    contracts and ends outside the window stay out; the coverage figure says how
+    many of the comparable active contracts list an end date at all."""
+    big = 250_000.0
+    ends = {  # export date 2026-07-25 -> window to 2027-07-25
+        "R1": "2026-09-30",  # in
+        "R2": "2026-08-01",  # in, first (soonest)
+        "R3": "2028-01-01",  # past the window
+        "R4": "2026-06-30",  # already ended, still Active
+        "R5": "2026-10-01",  # under the minimum value
+        "R6": "2026-11-01",  # Closed
+        "R7": "2026-12-01",  # Encumbrance Only: a funding record
+    }  # R8: no end date on record
+    out, _ = _build(
+        tmp_path,
+        extra_purchases=[
+            ("R1", "2025-01-15", big),
+            ("R2", "2025-02-01", 400_000.0),
+            ("R3", "2025-03-01", big),
+            ("R4", "2024-01-01", big),
+            ("R5", "2025-01-01", 50_000.0),
+            ("R6", "2025-01-01", big),
+            ("R7", "2025-01-01", big),
+            ("R8", "2025-01-01", big),
+        ],
+        source_sql=[
+            (
+                "UPDATE purchases SET end_date = ? WHERE purchase_document = ?",
+                [(end, doc) for doc, end in ends.items()],
+            ),
+            ("UPDATE purchases SET status = 'Closed' WHERE purchase_document = 'R6'", []),
+            (
+                "UPDATE purchases SET acquisition_type_sub_type = 'Encumbrance Only' "
+                "WHERE purchase_document = 'R7'",
+                [],
+            ),
+        ],
+    )
+    rc = _load(out / "recompetes.json")
+    assert [i["purchase_document"] for i in rc["items"]] == ["R2", "R1"]
+    assert (rc["window_from"], rc["window_to"], rc["min_value"]) == (
+        "2026-07-25",
+        "2027-07-25",
+        100_000.0,
+    )
+    assert (rc["total_count"], rc["total_value"]) == (2, 650_000.0)
+    # Active, $100K+, not a funding record: R1-R4 and R8; four list an end date.
+    assert (rc["active_contract_count"], rc["end_date_coverage_pct"]) == (5, 80.0)
+    first = rc["items"][0]
+    assert first["end_date"] == "2026-08-01" and first["grand_total"] == 400_000.0
+    assert first["department_name"] == "Public Utilities Commission"
+    assert first["canonical_name"].upper().startswith("ACME")
+    assert first["supplier_kind"] == "company" and first["award_class"] == "C"
+    assert {"sb_certified", "dvbe_certified", "cmas_holder", "title"} <= first.keys()
+    # The same end dates ride on the incumbent's recent contracts.
+    acme = next(
+        p
+        for f in (out / "suppliers").glob("shard-*.json")
+        for p in _load(f)["suppliers"].values()
+        if p["profile"]["canonical_name"].upper().startswith("ACME")
+    )
+    recent = {c["purchase_document"]: c["end_date"] for c in acme["recent_contracts"]}
+    assert recent["R2"] == "2026-08-01" and recent["R8"] is None

@@ -44,6 +44,12 @@ APP_DIR = scprs.DATA_DIR / "app"
 SCHEMA_VERSION = 1
 TOP_N = 25
 RECENT_CONTRACTS = 10
+# recompetes.json: active contracts whose term ends within this many days, of at
+# least this value (2026-11 real data: 13,513 active procurement contracts end
+# within a year, too many to list unfiltered).
+RECOMPETE_DAYS = 365
+RECOMPETE_MIN_VALUE = 100_000.0
+FUNDING_RECORD = "Encumbrance Only"  # an acquisition type that is a funding record, not a purchase
 SHARDS = 100
 
 
@@ -366,10 +372,73 @@ def _departments(
     return index, pages
 
 
-def _title_column(con) -> str:
-    """SCPRS first-item title column, or NULL on a serve DB built before it existed."""
+def _optional_column(con, column: str) -> str:
+    """``column`` of gold_document, or NULL on a serve DB built before it existed
+    (first_item_title: 2026-10; end_date: 2026-11)."""
     cols = {r[1] for r in con.execute("PRAGMA table_info(gold_document)")}
-    return "first_item_title" if "first_item_title" in cols else "NULL"
+    return column if column in cols else "NULL"
+
+
+def _recompetes(con, flags: dict[str, dict], today: str) -> dict | None:
+    """recompetes.json: contracts whose term ends within RECOMPETE_DAYS -- work an
+    incumbent holds now that may come back out to bid.
+
+    Active procurement contracts (gold_procurement) of RECOMPETE_MIN_VALUE or more,
+    funding records (Encumbrance Only) left out, soonest end first. Only a contract
+    that lists an end date can appear, so ``end_date_coverage_pct`` says what share
+    of those active contracts list one. None (no file) on a serve DB built before
+    gold_document carried end_date."""
+    if _optional_column(con, "end_date") == "NULL":
+        return None
+    window_to = (date.fromisoformat(today) + timedelta(days=RECOMPETE_DAYS)).isoformat()
+    base = (
+        "FROM gold_procurement WHERE status = 'Active' AND grand_total >= ? "
+        "AND acquisition_type <> ?"
+    )
+    params = (RECOMPETE_MIN_VALUE, FUNDING_RECORD)
+    active, with_end = con.execute(f"SELECT COUNT(*), COUNT(end_date) {base}", params).fetchone()  # noqa: S608 — fixed SQL
+    rows = _rows(
+        con,
+        "SELECT business_unit, department_name, purchase_document, "  # noqa: S608 — fixed SQL
+        f"{_optional_column(con, 'first_item_title')} AS title, canonical_id, canonical_name, "
+        f"acquisition_type, award_class, start_date, end_date, grand_total {base} "
+        "AND end_date BETWEEN ? AND ? ORDER BY end_date, grand_total DESC, purchase_document",
+        (*params, today, window_to),
+    )
+    items = [
+        {
+            "business_unit": r["business_unit"],
+            "department_name": r["department_name"],
+            "purchase_document": r["purchase_document"],
+            "title": r["title"],
+            "canonical_id": r["canonical_id"],
+            "canonical_name": r["canonical_name"],
+            "supplier_kind": _supplier_kind(r["canonical_id"]),
+            **flags[r["canonical_id"]],
+            "acquisition_type": r["acquisition_type"],
+            "award_class": r["award_class"],
+            "start_date": r["start_date"],
+            "end_date": r["end_date"],
+            "grand_total": _money(r["grand_total"]),
+        }
+        for r in rows
+    ]
+    return {
+        "window_from": today,
+        "window_to": window_to,
+        "min_value": RECOMPETE_MIN_VALUE,
+        "total_count": len(items),
+        "total_value": _money(sum(i["grand_total"] or 0 for i in items)),
+        # Of the active contracts this list draws from, how many list an end date
+        # (2026-11: about a third of all contracts do).
+        "active_contract_count": active,
+        "end_date_coverage_pct": round(100 * with_end / active, 1) if active else None,
+        "note": (
+            "Term end dates as registered in SCPRS. A contract can be extended or amended "
+            "instead of rebid, and contracts with no end date on record don't appear."
+        ),
+        "items": items,
+    }
 
 
 def _coverage(con) -> tuple[str, str]:
@@ -419,8 +488,9 @@ def _suppliers(con, flags: dict[str, dict], today: str) -> tuple[list[dict], dic
         acq[r.pop("canonical_id")].append({**r, "total_value": _money(r["total_value"])})
     for r in _rows(
         con,
-        "SELECT canonical_id, business_unit, department_name, purchase_document, "  # noqa: S608 — title column is a fixed choice
-        f"{_title_column(con)} AS title, start_date, grand_total, "
+        "SELECT canonical_id, business_unit, department_name, purchase_document, "  # noqa: S608 — optional columns are fixed names
+        f"{_optional_column(con, 'first_item_title')} AS title, start_date, "
+        f"{_optional_column(con, 'end_date')} AS end_date, grand_total, "
         "acquisition_type, status FROM ("
         "  SELECT *, ROW_NUMBER() OVER (PARTITION BY canonical_id "
         "    ORDER BY start_date DESC, purchase_document) AS rn FROM gold_procurement"
@@ -770,7 +840,7 @@ def _explore(con, dept_index: list[dict], methods: dict, flags: dict) -> tuple[d
     excludes class X (not procurement) from totals by default. Contracts of EXPLORE_LIST_MIN
     or more are listed per department, loaded only when that department is in view.
     Returns (cube, contracts by business unit, coverage figures)."""
-    title = _title_column(con)
+    title = _optional_column(con, "first_item_title")
     families: list[dict] = []
     fam_idx: dict[str, int] = {}
 
@@ -1238,6 +1308,7 @@ def export_app(
         flags = _supplier_flags(con, today)
         dept_index, dept_pages = _departments(con, opps, flags, load_aliases(), today)
         sup_index, sup_shards = _suppliers(con, flags, today)
+        recompetes = _recompetes(con, flags, today)
         overview, insight_pages, search = _insights(
             con, flags, dept_index, sup_index, opps, today, load_categories()
         )
@@ -1346,6 +1417,8 @@ def export_app(
         for key, page in pages.items():
             _write(staging / "insights" / vector / f"{key}.json", page, generated_at)
     sizes["search"] = _write(staging / "search.json", {"items": search}, generated_at)
+    if recompetes is not None:
+        sizes["recompetes"] = _write(staging / "recompetes.json", recompetes, generated_at)
     if cmas is not None:
         sizes["cmas"] = _write(staging / "cmas" / "agreements.json", cmas, generated_at)
     sizes["explore_cube"] = _write(staging / "explore" / "cube.json", explore, generated_at)
@@ -1370,6 +1443,8 @@ def export_app(
         "suppliers_index_bytes": sizes["suppliers_index"],
         "insight_pages": sum(len(p) for p in insight_pages.values()),
         "search_bytes": sizes["search"],
+        "recompetes": recompetes["total_count"] if recompetes else 0,
+        "recompetes_bytes": sizes.get("recompetes", 0),
         "cmas_agreements": cmas["total_count"] if cmas else 0,
         "cmas_bytes": sizes.get("cmas", 0),
         "explore_cube_rows": len(explore["columns"]["count"]),
