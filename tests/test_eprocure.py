@@ -287,9 +287,8 @@ def _slices(path):
 
 
 def test_carry_forward_fills_only_the_slices_this_run_did_not_bank(tmp_path):
-    """The 2026-11-10 failure: the registry and Posted refreshed, every Historical
-    year timed out. The Historical slices come back from the published store
-    unchanged (their old extracted_at keeps their true age); fresh slices are untouched."""
+    """Slices the run did not bank come back from the published store unchanged
+    (their old extracted_at keeps their true age); fresh slices are untouched."""
     published = tmp_path / "published.db"
     _published_store(published)
     db = tmp_path / "eprocure.db"
@@ -321,15 +320,84 @@ def test_carry_forward_is_a_no_op_when_every_slice_refreshed(tmp_path):
     eprocure.write_events_slice(db, "posted", [], 0)
     for year in _YEARS:
         eprocure.write_events_slice(db, f"historical:{year}", _hist(year, 2), 2)
-    calls = []
+    published = tmp_path / "published.db"
+    published.write_bytes(db.read_bytes())
 
     assert (
         eprocure.carry_forward_events(
-            db, tmp_path / "prev.db", _fetch_from(db, calls), years=_YEARS
+            db, tmp_path / "prev.db", _fetch_from(published, []), years=_YEARS
         )
         == []
     )
-    assert calls == []  # nothing missing -> the published store is never fetched
+
+
+def test_carry_forward_without_published_store_when_nothing_is_missing(tmp_path):
+    """Nothing to carry and no published copy to compare against: leave the store
+    alone (the shrink gate's own fetch decides, as before)."""
+    db = tmp_path / "eprocure.db"
+    eprocure.write_events_slice(db, "posted", [], 0)
+    for year in _YEARS:
+        eprocure.write_events_slice(db, f"historical:{year}", _hist(year, 2), 2)
+    before = db.read_bytes()
+
+    assert (
+        eprocure.carry_forward_events(db, tmp_path / "prev.db", lambda _d: False, years=_YEARS)
+        == []
+    )
+    assert db.read_bytes() == before
+
+
+def test_carry_forward_replays_the_2026_11_10_run(tmp_path):
+    """2026-11-10, slice by slice: Posted refreshed; 2024 refreshed on retry; 2025
+    "refreshed" on retry with 385 rows against a banner of 385 (it held 5,616 a
+    week earlier; 385 was that run's Posted count, so the retry read the wrong
+    result set and the banner check could not tell); 2026 failed twice. The 2025
+    slice must be treated as unrefreshed, or the whole-table shrink gate refuses
+    the publish and the fresh registry is lost again."""
+    published = tmp_path / "published.db"
+    _published_store(published)  # posted 1, 2024: 4, 2025: 5, 2026: 6
+    db = tmp_path / "eprocure.db"
+    eprocure.write_events_slice(
+        db, "posted", [eprocure._tidy_event(_raw_event(), "posted", None)], 1
+    )
+    eprocure.write_events_slice(db, "historical:2024", _hist(2024, 4), 4)
+    eprocure.write_events_slice(db, "historical:2025", _hist(2025, 1), 1)  # wrong result set
+
+    carried = eprocure.carry_forward_events(
+        db, tmp_path / "prev.db", _fetch_from(published, []), years=_YEARS
+    )
+
+    by_slice = {c["slice"]: c for c in carried}
+    assert list(by_slice) == ["historical:2025", "historical:2026"]
+    assert by_slice["historical:2025"]["rows"] == 5
+    assert "shrank" in by_slice["historical:2025"]["reason"]
+    assert by_slice["historical:2026"]["reason"] == "not refreshed"
+    rows, meta = _slices(db)
+    assert meta == {"posted": 1, "historical:2024": 4, "historical:2025": 5, "historical:2026": 6}
+    assert not rows["historical:2024"].endswith("2026-11-03T12:00:00+00:00")  # kept fresh
+
+
+@pytest.mark.parametrize(("new_posted", "replaced"), [(4, True), (6, False)])
+def test_carry_forward_posted_floor_allows_daily_churn(tmp_path, new_posted, replaced):
+    """Posted churns day to day, so its floor is 50% (the daily job's); 6 of a
+    published 10 is churn, 4 of 10 is a broken search."""
+
+    def posted(n, tag):
+        return [
+            eprocure._tidy_event(_raw_event(event_id=f"{tag}{i}"), "posted", None) for i in range(n)
+        ]
+
+    published = tmp_path / "published.db"
+    eprocure.write_events_slice(published, "posted", posted(10, "old"), 10)
+    db = tmp_path / "eprocure.db"
+    eprocure.write_events_slice(db, "posted", posted(new_posted, "new"), new_posted)
+
+    carried = eprocure.carry_forward_events(
+        db, tmp_path / "prev.db", _fetch_from(published, []), years=()
+    )
+
+    assert [c["slice"] for c in carried] == (["posted"] if replaced else [])
+    assert _slices(db)[1] == {"posted": 10 if replaced else new_posted}
 
 
 def test_carry_forward_fails_closed_without_the_published_store(tmp_path):
@@ -376,14 +444,16 @@ def test_carry_forward_reports_a_slice_the_published_store_never_had(tmp_path):
     _published_store(published)
     db = tmp_path / "eprocure.db"
     eprocure.write_events_slice(db, "posted", [], 0)
-    for year in (2025, 2026):
-        eprocure.write_events_slice(db, f"historical:{year}", _hist(year, 2), 2)
+    for year, n in ((2025, 5), (2026, 6)):  # refreshed at their published sizes
+        eprocure.write_events_slice(db, f"historical:{year}", _hist(year, n), n)
 
     carried = eprocure.carry_forward_events(
         db, tmp_path / "prev.db", _fetch_from(published, []), years=(2025, 2026, 2027)
     )
 
-    assert carried == [{"slice": "historical:2027", "rows": 0, "extracted_at": None}]
+    assert carried == [
+        {"slice": "historical:2027", "rows": 0, "extracted_at": None, "reason": "not refreshed"}
+    ]
     assert "historical:2027" not in _slices(db)[1]
     assert "historical:2024" not in _slices(db)[1]  # out-of-window years still age out
 

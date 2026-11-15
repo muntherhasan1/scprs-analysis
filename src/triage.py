@@ -139,8 +139,9 @@ _HINTS: dict[str, dict[str, str]] = {
             "The CSCR event search on caleprocure.ca.gov stalled or timed out (the "
             "overlay is slow at times; the 2026-11 failures were "
             "`Page.wait_for_selector` timeouts). This no longer blocks the registry: "
-            "slices that did not refresh are carried forward unchanged from the "
-            "published store, the run publishes, and the last step fails it."
+            "slices that did not refresh, or shrank below their floor against the "
+            "published copy, are replaced by that copy, the run publishes, and the "
+            "last step fails it."
         ),
         "Carry forward": (
             "Event slices did not refresh and could not be carried forward — the "

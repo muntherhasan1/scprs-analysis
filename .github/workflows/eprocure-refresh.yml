@@ -72,9 +72,11 @@ jobs:
         continue-on-error: true
         run: python -m src.eprocure extract-events --budget-minutes 35
 
-      # Any slice this run did not bank (failed twice or budget-skipped) is copied
-      # unchanged from the published store, so publishing never drops its good
-      # rows. Fail-closed: if a slice is missing and the published store can't be
+      # Any slice this run did not bank (failed twice or budget-skipped), or that
+      # shrank below its floor against the published copy (a retry that read the
+      # wrong result set — 2026-11-10's Historical 2025 held 385 rows, not ~5,600),
+      # is replaced by the published copy, so publishing never drops good rows.
+      # Fail-closed: if a slice is missing and the published store can't be
       # fetched, this step fails and nothing publishes. Same single-writer lock as
       # the daily solicitations job's fetch -> extract -> publish.
       - name: Carry forward event slices this run did not refresh
@@ -89,9 +91,10 @@ jobs:
               Path("data/eprocure.db"), Path("data/eprocure_prev.db"), data_sync.fetch_eprocure_db
           )
           lines = [
-              f"{c['slice']}: carried forward {c['rows']} rows extracted {c['extracted_at']}"
+              f"{c['slice']}: {c['reason']}; kept the published copy "
+              f"({c['rows']} rows, extracted {c['extracted_at']})"
               if c["extracted_at"]
-              else f"{c['slice']}: not in the published store either; left absent"
+              else f"{c['slice']}: {c['reason']}; not in the published store either"
               for c in carried
           ] or ["every event slice refreshed this run"]
           print("\n".join(lines))

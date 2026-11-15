@@ -675,6 +675,16 @@ def _has_table(con: sqlite3.Connection, schema: str, table: str) -> bool:
     )
 
 
+# A refreshed slice below this share of its published copy is treated as not
+# refreshed. Historical years barely move week to week (2024: 5,703 on every run
+# since 2026-10-20), so the whole-table gate's 90%; Posted churns daily, so the
+# daily solicitations job's 50%. Catches a retry that reads the wrong result set:
+# 2026-11-10's Historical 2025 retry wrote 385 rows against a banner of 385 (it
+# held 5,616 a week earlier; 385 was that run's Posted count).
+_SLICE_FLOOR = {"posted": 0.5}
+_HISTORICAL_SLICE_FLOOR = 0.9
+
+
 def carry_forward_events(
     db_path: Path,
     prev_path: Path,
@@ -683,23 +693,29 @@ def carry_forward_events(
     years: tuple[int, ...] | None = None,
     include_posted: bool = True,
 ) -> list[dict]:
-    """Fill each event slice this run did not bank with its previously published copy.
+    """Replace each event slice this run did not really refresh with its published copy.
 
     The weekly refresh starts from an empty store, so a slice that timed out (or
-    that ``--budget-minutes`` skipped) is simply absent. Publishing that store
-    would drop the slice's good published rows; refusing to publish throws away
-    the run's fresh registry (2026-11-10: the registry extracted, every
-    Historical year timed out, and the registry went two weeks without a
-    publish). Carrying the old slice keeps both: its rows and ``events_meta``
-    row are copied unchanged, so its ``extracted_at`` still shows its true age.
+    that ``--budget-minutes`` skipped) is simply absent; a slice that "completed"
+    can still be wrong when the overlay served another search's results, because
+    the banner it is checked against comes from the same wrong page. Publishing
+    either would drop good published rows, and refusing to publish throws away
+    the run's fresh registry (2026-11-10: registry fine; Historical 2026 failed
+    twice and Historical 2025's retry held a Posted-sized result set; nothing
+    published, and the registry went two weeks without a publish). Replacing the
+    slice keeps both: its published rows and ``events_meta`` row are copied
+    unchanged, so its ``extracted_at`` still shows its true age.
 
-    ``fetch_prev(path) -> bool`` downloads the published store to ``prev_path``;
-    it is only called when a slice is missing, and False fails closed — without
-    the published copy there is no store that is safe to publish. Returns one
-    ``{"slice", "rows", "extracted_at"}`` per unrefreshed slice (empty when the
-    run refreshed everything); a slice the published store never had (a new
-    year after a rollover) has ``rows`` 0 and ``extracted_at`` None and stays
-    absent. Years outside the window still age out, as in ``extract_events``.
+    A slice is replaced when it is absent, or when it holds fewer rows than its
+    floor (``_SLICE_FLOOR``) of the published copy. ``fetch_prev(path) -> bool``
+    downloads the published store to ``prev_path``. False with a slice absent
+    fails closed (no store is safe to publish); False with every slice present
+    skips the comparison and leaves the store alone, so the shrink gate's own
+    fetch decides, as before. Returns one ``{"slice", "rows", "extracted_at",
+    "reason"}`` per replaced slice (empty when the run refreshed everything). A
+    slice the published store never had (a new year after a rollover) has
+    ``rows`` 0 and ``extracted_at`` None and stays as the run left it. Years
+    outside the window still age out, as in ``extract_events``.
     """
     want = [
         key
@@ -713,21 +729,25 @@ def carry_forward_events(
     con = sqlite3.connect(db_path)
     try:
         banked = (
-            {k for (k,) in con.execute("SELECT slice_key FROM events_meta")}
+            dict(con.execute("SELECT slice_key, rows FROM events_meta"))
             if _has_table(con, "main", "events_meta")
-            else set()
+            else {}
         )
     finally:
         con.close()
     missing = [k for k in want if k not in banked]
-    if not missing:
-        return []
     if not fetch_prev(prev_path):
-        raise EprocureError(
-            f"Event slice(s) {', '.join(missing)} did not refresh and the published "
-            "eprocure.db could not be fetched to carry them forward; NOT publishing "
-            "(the published copy keeps them)."
+        if missing:
+            raise EprocureError(
+                f"Event slice(s) {', '.join(missing)} did not refresh and the published "
+                "eprocure.db could not be fetched to carry them forward; NOT publishing "
+                "(the published copy keeps them)."
+            )
+        print(
+            "WARN: could not fetch the published eprocure.db; per-slice shrink check "
+            "skipped (the shrink gate still compares whole tables)"
         )
+        return []
 
     cols = ", ".join((*_EVENT_COLUMNS, "slice_key", "extracted_at"))
     carried: list[dict] = []
@@ -736,7 +756,7 @@ def carry_forward_events(
         con.execute("ATTACH DATABASE ? AS prev", (f"{prev_path.resolve().as_uri()}?mode=ro",))
         has_prev = _has_table(con, "prev", "events") and _has_table(con, "prev", "events_meta")
         _ensure_events_tables(con)
-        for key in missing:
+        for key in want:
             meta = (
                 con.execute(
                     "SELECT banner_total, rows, extracted_at FROM prev.events_meta "
@@ -746,8 +766,19 @@ def carry_forward_events(
                 if has_prev
                 else None
             )
+            if key not in banked:
+                reason = "not refreshed"
+            elif meta is not None and banked[key] < int(
+                meta[1] * _SLICE_FLOOR.get(key, _HISTORICAL_SLICE_FLOOR)
+            ):
+                floor = _SLICE_FLOOR.get(key, _HISTORICAL_SLICE_FLOOR)
+                reason = (
+                    f"shrank to {banked[key]} rows, below {floor:.0%} of the published {meta[1]}"
+                )
+            else:
+                continue  # refreshed, and plausibly complete
             if meta is None:
-                carried.append({"slice": key, "rows": 0, "extracted_at": None})
+                carried.append({"slice": key, "rows": 0, "extracted_at": None, "reason": reason})
                 continue
             con.execute("DELETE FROM events WHERE slice_key = ?", (key,))
             n = con.execute(
@@ -764,7 +795,7 @@ def carry_forward_events(
                 "VALUES (?, ?, ?, ?)",
                 (key, *meta),
             )
-            carried.append({"slice": key, "rows": n, "extracted_at": meta[2]})
+            carried.append({"slice": key, "rows": n, "extracted_at": meta[2], "reason": reason})
         con.commit()  # all-or-nothing: an error above rolls back on close
     finally:
         con.close()

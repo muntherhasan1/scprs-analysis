@@ -77,10 +77,14 @@ extracts and publishes `eprocure.db` to the private operational dataset via
 1. **In-extractor completeness check** — unique firms ≥ 99% of the site's own
    banner total, else the run fails before writing.
 2. **Event carry-forward** — the events step may fail without discarding the
-   registry: any slice this run did not bank (failed twice or budget-skipped)
-   is copied unchanged from the published store (`carry_forward_events`), its
-   `extracted_at` still showing its true age. Fail-closed: if a slice is
-   missing and the published store can't be fetched, nothing publishes.
+   registry. Any slice this run did not bank (failed twice or budget-skipped),
+   or that shrank below its floor against the published copy (90% Historical,
+   50% Posted), is replaced by the published copy (`carry_forward_events`), its
+   `extracted_at` still showing its true age. The floor catches a retry that
+   read the wrong result set, which the banner check can't: on 2026-11-10 the
+   Historical 2025 retry wrote 385 rows against a banner of 385 (it held 5,616
+   the week before; 385 was that run's Posted count). Fail-closed: if a slice
+   is missing and the published store can't be fetched, nothing publishes.
 3. **Shrink gate** — the new store must hold ≥ 90% of the previously
    *published* rows (first publish passes on > 0), catching a search that
    silently covered a subset.
