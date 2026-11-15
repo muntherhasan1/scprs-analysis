@@ -15,18 +15,31 @@ def _load(path):
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def _build(tmp_path, extra_purchases=(), cmas=None):
+def _build(tmp_path, extra_purchases=(), cmas=None, titles=None):
     src, wh = tmp_path / "scprs.db", tmp_path / "warehouse.db"
     serve, epr = tmp_path / "warehouse-serve.db", tmp_path / "eprocure.db"
     _seed_source(src)  # BU 8660: doc A (v1 100 -> v2 150, Acme/S1), doc B (5000, Beta/S2)
-    if extra_purchases:  # (purchase_document, start_date, grand_total)
+    if titles:  # {purchase_document: first_item_title}, set on every version
+        con = sqlite3.connect(src)
+        con.executemany(
+            "UPDATE purchases SET first_item_title = ? WHERE purchase_document = ?",
+            [(t, doc) for doc, t in titles.items()],
+        )
+        con.commit()
+        con.close()
+    if extra_purchases:  # (purchase_document, start_date, grand_total[, business_unit])
         con = sqlite3.connect(src)
         con.executemany(
             "INSERT INTO purchases (business_unit, purchase_document, version, grand_total, "
             "start_date, acquisition_type_sub_type, acquisition_method, supplier_id, "
-            "supplier_name, status, department_name) VALUES ('8660', ?, '1', ?, ?, "
-            "'IT Goods', 'Formal - COMPETITIVE', 'S1', 'Acme', 'Active', 'PUC')",
-            [(doc, total, start) for doc, start, total in extra_purchases],
+            "supplier_name, status, department_name) VALUES (?, ?, '1', ?, ?, "
+            "'IT Goods', 'Formal - COMPETITIVE', 'S1', 'Acme', 'Active', ?)",
+            [
+                (bu, doc, total, start, {"8660": "PUC", "2660": "Caltrans"}[bu])
+                for doc, start, total, bu in (
+                    (*p, "8660") if len(p) == 3 else p for p in extra_purchases
+                )
+            ],
         )
         con.commit()
         con.close()
@@ -242,6 +255,8 @@ def test_partial_fiscal_year_ignores_future_start_dates(tmp_path):
             ("F0", "2020-07-01", 1.0),  # FY2021 fully covered from its first day
             ("F1", "2027-06-30", 1.0),  # last day of FY2027 -- a year still running
             ("F2", "2028-06-30", 1.0),  # FY2028 has not started yet
+            ("F3", "2020-08-01", 1.0, "2660"),  # a second department buying in FY2021
+            ("F4", "2020-09-01", 1.0),  # ...and a second FY2021 contract for 8660
         ],
     )
     fy = {y["fiscal_year"]: y["partial"] for y in _load(out / "departments" / "8660.json")[
@@ -265,6 +280,23 @@ def test_partial_fiscal_year_ignores_future_start_dates(tmp_path):
         2027: True,
         2028: True,
     }
+    # Insight pages too (they used to carry neither marker): a category or
+    # acquisition trend must not read a year in progress, or a year fewer
+    # departments reported, as the market shrinking.
+    it_goods = _load(out / "insights" / "acquisition" / "it-goods.json")["spend_by_fiscal_year"]
+    assert {y["fiscal_year"]: y["partial"] for y in it_goods} == {
+        2021: False,
+        2027: True,
+        2028: True,
+    }
+    assert {y["fiscal_year"]: y["department_count"] for y in it_goods} == {
+        2021: 2,  # distinct departments (8660 twice, 2660 once), not contracts (3)
+        2027: 1,
+        2028: 1,
+    }
+    for page in (out / "insights").glob("*/*.json"):
+        for row in _load(page)["spend_by_fiscal_year"]:
+            assert {"partial", "department_count"} <= row.keys(), page
 
 
 def test_cmas_holder_requires_an_agreement_in_term(tmp_path):
@@ -474,3 +506,117 @@ def test_department_pages_use_procurement_totals_and_governed_shares(tmp_path, m
     flags = {m["award_class"]: m["competitive_flag"] for m in page["acquisition_mix"]}
     assert flags == {"C": "Competitive", "L": "Leveraged", "N": "Non-Competitive"}
     assert sum(y["total_value"] for y in page["spend_by_fiscal_year"]) == 10_000
+
+
+def test_top_suppliers_carry_per_year_value_and_share(tmp_path):
+    """Who is gaining: each top supplier's value and share of the page per fiscal
+    year. Where every supplier is listed, the years tie to the page's trend."""
+    out, _ = _build(
+        tmp_path,
+        extra_purchases=[("F0", "2020-07-01", 1.0), ("F1", "2022-08-01", 3.0)],
+    )
+    checked = 0
+    for path in (out / "insights").glob("*/*.json"):
+        page = _load(path)
+        if page["top_suppliers_total_count"] > len(page["top_suppliers"]):
+            continue  # a cut list can't tie out
+        for fy in page["spend_by_fiscal_year"]:
+            rows = [
+                r
+                for s in page["top_suppliers"]
+                for r in s["by_fiscal_year"]
+                if r["fiscal_year"] == fy["fiscal_year"]
+            ]
+            assert round(sum(r["total_value"] for r in rows), 2) == fy["total_value"], path
+            if fy["total_value"] > 0:  # no share of a net-credit or $0 year
+                assert abs(sum(r["share_pct"] for r in rows) - 100) < 0.05, path
+            checked += 1
+    assert checked
+    # Under $10K holds doc A (Acme, 150), doc B (Beta, 5000), F0 (Acme, 1) in FY2021
+    # and F1 (Acme, 3) in FY2023: Beta's FY2021 share is 5000 / 5151.
+    small = _load(out / "insights" / "size" / "under-10k.json")
+    beta = next(s for s in small["top_suppliers"] if s["canonical_name"].upper() == "BETA")
+    assert beta["by_fiscal_year"] == [
+        {"fiscal_year": 2021, "total_value": 5000.0, "share_pct": round(100 * 5000 / 5151, 2)}
+    ]
+    acme = next(s for s in small["top_suppliers"] if s["canonical_name"].upper().startswith("ACME"))
+    assert [(r["fiscal_year"], r["share_pct"]) for r in acme["by_fiscal_year"]] == [
+        (2021, round(100 * 151 / 5151, 2)),
+        (2023, 100.0),
+    ]
+
+
+def test_supplier_recent_contracts_say_what_and_for_whom(tmp_path):
+    """A competitor's recent contracts carry the SCPRS first-item title and the
+    buying department's name, not just a document id and a business-unit code."""
+    out, _ = _build(tmp_path, titles={"A": "Rate case analytics software"})
+    acme = next(
+        p
+        for f in (out / "suppliers").glob("shard-*.json")
+        for p in _load(f)["suppliers"].values()
+        if p["profile"]["canonical_name"].upper().startswith("ACME")
+    )
+    doc_a = next(c for c in acme["recent_contracts"] if c["purchase_document"] == "A")
+    assert doc_a["title"] == "Rate case analytics software"
+    # The department dimension's name, not the raw "PUC" on the source row.
+    assert doc_a["department_name"] == "Public Utilities Commission"
+    assert doc_a["business_unit"] == "8660"
+
+
+def test_no_supplier_share_of_a_net_credit_year(tmp_path):
+    """A year whose page total is net credits (real: Waste & land FY2016,
+    -$2,898) gets no per-year share: a value over a negative total would read as
+    a share with the wrong sign."""
+    out, _ = _build(
+        tmp_path,
+        extra_purchases=[("C1", "2024-08-01", -50.0), ("C2", "2024-09-01", 10.0)],
+    )
+    page = _load(out / "insights" / "acquisition" / "it-goods.json")
+    assert {y["fiscal_year"]: y["total_value"] for y in page["spend_by_fiscal_year"]} == {
+        2025: -40.0
+    }
+    (acme,) = page["top_suppliers"]
+    assert acme["by_fiscal_year"] == [
+        {"fiscal_year": 2025, "total_value": -40.0, "share_pct": None}
+    ]
+
+
+def test_export_survives_a_serve_db_published_before_titles(tmp_path):
+    """The refresh exports from whatever serve DB is live. One built before
+    first_item_title existed must still export, with null titles, not fail the
+    run."""
+    _build(tmp_path, titles={"A": "Rate case analytics software"})
+    serve = tmp_path / "warehouse-serve.db"
+    con = sqlite3.connect(serve)
+    (sql,) = con.execute(
+        "SELECT sql FROM sqlite_master WHERE type = 'view' AND name = 'gold_document'"
+    ).fetchone()
+    cols = [r[1] for r in con.execute("PRAGMA table_info(gold_document)")]
+    assert "first_item_title" in cols
+    con.executescript(
+        f"CREATE VIEW old_gold_document AS {sql.split(' AS ', 1)[1]};"  # noqa: S608 — the DB's own view SQL
+        "DROP VIEW gold_document;"
+        "CREATE VIEW gold_document AS SELECT "
+        + ", ".join(c for c in cols if c != "first_item_title")
+        + " FROM old_gold_document;"
+    )
+    con.close()
+    out = tmp_path / "app-old-serve"
+    app_export.export_app(
+        serve_path=serve,
+        app_dir=out,
+        wh_path=tmp_path / "warehouse.db",
+        eprocure_path=tmp_path / "eprocure.db",
+        cmas_path=tmp_path / "missing_cmas.db",
+        today="2026-07-25",
+        log=lambda *a: None,
+    )
+    acme = next(
+        p
+        for f in (out / "suppliers").glob("shard-*.json")
+        for p in _load(f)["suppliers"].values()
+        if p["profile"]["canonical_name"].upper().startswith("ACME")
+    )
+    doc_a = next(c for c in acme["recent_contracts"] if c["purchase_document"] == "A")
+    assert doc_a["title"] is None
+    assert doc_a["department_name"] == "Public Utilities Commission"
