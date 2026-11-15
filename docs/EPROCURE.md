@@ -167,7 +167,12 @@ Mechanism (recon 2026-07-24) — the overlay, not the PeopleSoft host:
   `**Small Business Bidders ONLY**`). `eprocure.set_aside_flags` reads the
   clause before each "ONLY": SB groups only (SB, MB, SB-PW, small business) ->
   `sb_only`; DVBE only -> `dvbe_only`; both -> `sb_or_dvbe` (open to either,
-  so neither "only" flag). Until 2026-10 a substring test for "DVBE ONLY"
+  so neither "only" flag). Restricting procedure names count too (2026-11):
+  "SB Option" / "Small Business Option" -> `sb_only`, "DVBE Option" -> `dvbe_only`,
+  "SB/DVBE Option" -> `sb_or_dvbe` (State Contracting Manual 14.05.3), and
+  Caltrans "SB Minor B" -> `sb_only` (its Minor B program is certified small
+  businesses only); on 2026-11-15 these were 8 of 376 open bids, previously
+  unflagged. Until 2026-10 a substring test for "DVBE ONLY"
   tagged ~258 SB-or-DVBE events as DVBE-only and missed ~111 SB-only phrasings;
   the warehouse re-derives the flags from the event name at ingest, so stored
   rows are corrected without a re-scrape.
