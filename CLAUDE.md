@@ -31,9 +31,10 @@ payments (payee coverage, paid-within-awarded, budget envelope); `outliers.py` r
 the R4 outlier review with live-SCPRS and payment evidence. See
 `docs/RECONCILIATION.md`.
 
-`app_export.py` writes the planned vendor web app's static JSON (`data/app/`)
-from the serve DB, recomputing supplier share/HHI by canonical supplier. See
-`docs/VENDOR_APP.md`.
+`app_export.py` writes the static JSON (`data/app/`) behind Contract Lens, the
+live vendor web app (static HF Space; the browser reads the published dataset
+directly, so its file paths and fields are the site's API), from the serve DB,
+recomputing supplier share/HHI by canonical supplier. See `docs/VENDOR_APP.md`.
 
 `eprocure.py` is likewise standalone: Cal eProcure's SB/DVBE certified-supplier
 registry (headless Playwright on the same PeopleSoft host as SCPRS — the overlay
