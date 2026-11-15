@@ -366,6 +366,12 @@ def _departments(
     return index, pages
 
 
+def _title_column(con) -> str:
+    """SCPRS first-item title column, or NULL on a serve DB built before it existed."""
+    cols = {r[1] for r in con.execute("PRAGMA table_info(gold_document)")}
+    return "first_item_title" if "first_item_title" in cols else "NULL"
+
+
 def _coverage(con) -> tuple[str, str]:
     """The whole warehouse's start-date window (first, last)."""
     return con.execute("SELECT MIN(start_date), MAX(start_date) FROM gold_document").fetchone()
@@ -413,7 +419,8 @@ def _suppliers(con, flags: dict[str, dict], today: str) -> tuple[list[dict], dic
         acq[r.pop("canonical_id")].append({**r, "total_value": _money(r["total_value"])})
     for r in _rows(
         con,
-        "SELECT canonical_id, business_unit, purchase_document, start_date, grand_total, "
+        "SELECT canonical_id, business_unit, department_name, purchase_document, "  # noqa: S608 — title column is a fixed choice
+        f"{_title_column(con)} AS title, start_date, grand_total, "
         "acquisition_type, status FROM ("
         "  SELECT *, ROW_NUMBER() OVER (PARTITION BY canonical_id "
         "    ORDER BY start_date DESC, purchase_document) AS rn FROM gold_procurement"
@@ -926,8 +933,13 @@ _Q_HEAD = (
     "FROM temp.{t} WHERE k IS NOT NULL GROUP BY k"
 )
 _Q_BY_FY = (
-    "SELECT k, fiscal_year, {docs}, SUM(v) AS total_value FROM temp.{t} "
+    "SELECT k, fiscal_year, {docs}, SUM(v) AS total_value, "
+    "COUNT(DISTINCT business_unit) AS department_count FROM temp.{t} "
     "WHERE k IS NOT NULL AND fiscal_year IS NOT NULL GROUP BY 1, 2 ORDER BY 2"
+)
+_Q_SUPPLIER_FY = (
+    "SELECT k, canonical_id, fiscal_year, SUM(v) AS total_value FROM temp.{t} "
+    "WHERE k IS NOT NULL AND fiscal_year IS NOT NULL GROUP BY 1, 2, 3 ORDER BY 3"
 )
 _Q_DEPTS = (
     "SELECT k, business_unit, {docs}, SUM(v) AS total_value FROM temp.{t} "
@@ -945,8 +957,21 @@ _Q_CROSS = (
 )
 
 
-def _slices(con, table: str, flags: dict[str, dict], dept_names: dict[str, str]) -> dict:
-    """{key: page payload} for one vector's temp table (internal constant name)."""
+def _slices(
+    con,
+    table: str,
+    flags: dict[str, dict],
+    dept_names: dict[str, str],
+    cov: tuple[str, str],
+    today: str,
+) -> dict:
+    """{key: page payload} for one vector's temp table (internal constant name).
+
+    Fiscal-year rows carry ``partial`` (against the warehouse window, as on the
+    overview) and ``department_count`` (departments reporting that year), so a
+    trend chart can't read a year in progress or a coverage jump as a market
+    change. Each top supplier carries ``by_fiscal_year`` -- its value and share of
+    the page's total per year -- so the UI can show who is gaining or losing."""
 
     # {t} = the vector's temp table (internal constant); DOCS counts distinct contracts.
     def q(sql: str) -> list[dict]:
@@ -956,7 +981,29 @@ def _slices(con, table: str, flags: dict[str, dict], dept_names: dict[str, str])
     grand = sum(h["total_value"] or 0 for h in head.values())
     by_fy, depts, sups, cross = (defaultdict(list) for _ in range(4))
     for r in q(_Q_BY_FY):
-        by_fy[r.pop("k")].append({**r, "total_value": _money(r["total_value"])})
+        by_fy[r.pop("k")].append(
+            {
+                **r,
+                "total_value": _money(r["total_value"]),
+                "partial": _fy_partial(r["fiscal_year"], *cov, today),
+            }
+        )
+    fy_totals = {
+        (k, row["fiscal_year"]): row["total_value"] or 0
+        for k, rows in by_fy.items()
+        for row in rows
+    }
+    sup_fy: dict[tuple[str, str], list[dict]] = defaultdict(list)
+    for r in q(_Q_SUPPLIER_FY):
+        k, fy, v = r["k"], r["fiscal_year"], r["total_value"] or 0
+        total_fy = fy_totals.get((k, fy)) or 0
+        sup_fy[(k, r["canonical_id"])].append(
+            {
+                "fiscal_year": fy,
+                "total_value": _money(v),
+                "share_pct": round(100 * v / total_fy, 2) if total_fy else None,
+            }
+        )
     for r in q(_Q_DEPTS):
         depts[r.pop("k")].append(r)
     for r in q(_Q_SUPPLIERS):
@@ -995,6 +1042,7 @@ def _slices(con, table: str, flags: dict[str, dict], dept_names: dict[str, str])
                     "total_value": _money(s["total_value"]),
                     "share_pct": round(100 * (s["total_value"] or 0) / total, 2) if total else None,
                     **flags[s["canonical_id"]],
+                    "by_fiscal_year": sup_fy[(k, s["canonical_id"])],
                 }
                 for s in sups[k][:TOP_N]
             ],
@@ -1012,6 +1060,7 @@ def _insights(con, flags, dept_index, sup_index, opps, today, categories):
     con.create_function("app_acq", 1, _base_acquisition, deterministic=True)
     con.create_function("app_category", 1, match, deterministic=True)
     dept_names = {d["business_unit"]: d["department_name"] for d in dept_index}
+    cov = _coverage(con)
     size_labels = {k: label for k, label, _lo, _hi in SIZE_BUCKETS}
     cat_meta = {c["key"]: c for c in categories}
     cat_meta[OTHER_CATEGORY[0]] = {"label": OTHER_CATEGORY[1], "keywords": []}
@@ -1021,7 +1070,7 @@ def _insights(con, flags, dept_index, sup_index, opps, today, categories):
         table = f"app_{vector}"
         con.execute(f"DROP TABLE IF EXISTS temp.{table}")  # noqa: S608 — internal name
         con.execute(f"CREATE TEMP TABLE {table} AS {select}")  # noqa: S608 — internal constants
-        vectors[vector] = _slices(con, table, flags, dept_names)
+        vectors[vector] = _slices(con, table, flags, dept_names, cov, today)
 
     def mix(pages, labels, order=None):
         keys = order or sorted(pages, key=lambda k: -(pages[k]["total_value"] or 0))
@@ -1083,7 +1132,6 @@ def _insights(con, flags, dept_index, sup_index, opps, today, categories):
         "COUNT(DISTINCT business_unit) AS department_count FROM gold_procurement "
         "WHERE fiscal_year IS NOT NULL GROUP BY 1 ORDER BY 1",
     )
-    cov = _coverage(con)
     week = (date.fromisoformat(today) + timedelta(days=7)).isoformat()
     companies = [s for s in sup_index if s["supplier_kind"] == "company"]
     overview = {

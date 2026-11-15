@@ -15,10 +15,18 @@ def _load(path):
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def _build(tmp_path, extra_purchases=(), cmas=None):
+def _build(tmp_path, extra_purchases=(), cmas=None, titles=None):
     src, wh = tmp_path / "scprs.db", tmp_path / "warehouse.db"
     serve, epr = tmp_path / "warehouse-serve.db", tmp_path / "eprocure.db"
     _seed_source(src)  # BU 8660: doc A (v1 100 -> v2 150, Acme/S1), doc B (5000, Beta/S2)
+    if titles:  # {purchase_document: first_item_title}, set on every version
+        con = sqlite3.connect(src)
+        con.executemany(
+            "UPDATE purchases SET first_item_title = ? WHERE purchase_document = ?",
+            [(t, doc) for doc, t in titles.items()],
+        )
+        con.commit()
+        con.close()
     if extra_purchases:  # (purchase_document, start_date, grand_total)
         con = sqlite3.connect(src)
         con.executemany(
@@ -265,6 +273,23 @@ def test_partial_fiscal_year_ignores_future_start_dates(tmp_path):
         2027: True,
         2028: True,
     }
+    # Insight pages too (they used to carry neither marker): a category or
+    # acquisition trend must not read a year in progress, or a year fewer
+    # departments reported, as the market shrinking.
+    it_goods = _load(out / "insights" / "acquisition" / "it-goods.json")["spend_by_fiscal_year"]
+    assert {y["fiscal_year"]: y["partial"] for y in it_goods} == {
+        2021: False,
+        2027: True,
+        2028: True,
+    }
+    assert {y["fiscal_year"]: y["department_count"] for y in it_goods} == {
+        2021: 1,
+        2027: 1,
+        2028: 1,
+    }
+    for page in (out / "insights").glob("*/*.json"):
+        for row in _load(page)["spend_by_fiscal_year"]:
+            assert {"partial", "department_count"} <= row.keys(), page
 
 
 def test_cmas_holder_requires_an_agreement_in_term(tmp_path):
@@ -474,3 +499,58 @@ def test_department_pages_use_procurement_totals_and_governed_shares(tmp_path, m
     flags = {m["award_class"]: m["competitive_flag"] for m in page["acquisition_mix"]}
     assert flags == {"C": "Competitive", "L": "Leveraged", "N": "Non-Competitive"}
     assert sum(y["total_value"] for y in page["spend_by_fiscal_year"]) == 10_000
+
+
+def test_top_suppliers_carry_per_year_value_and_share(tmp_path):
+    """Who is gaining: each top supplier's value and share of the page per fiscal
+    year. Where every supplier is listed, the years tie to the page's trend."""
+    out, _ = _build(
+        tmp_path,
+        extra_purchases=[("F0", "2020-07-01", 1.0), ("F1", "2022-08-01", 3.0)],
+    )
+    checked = 0
+    for path in (out / "insights").glob("*/*.json"):
+        page = _load(path)
+        if page["top_suppliers_total_count"] > len(page["top_suppliers"]):
+            continue  # a cut list can't tie out
+        for fy in page["spend_by_fiscal_year"]:
+            rows = [
+                r
+                for s in page["top_suppliers"]
+                for r in s["by_fiscal_year"]
+                if r["fiscal_year"] == fy["fiscal_year"]
+            ]
+            assert round(sum(r["total_value"] for r in rows), 2) == fy["total_value"], path
+            if fy["total_value"]:
+                assert abs(sum(r["share_pct"] for r in rows) - 100) < 0.05, path
+            checked += 1
+    assert checked
+    # Under $10K holds doc A (Acme, 150), doc B (Beta, 5000), F0 (Acme, 1) in FY2021
+    # and F1 (Acme, 3) in FY2023: Beta's FY2021 share is 5000 / 5151.
+    small = _load(out / "insights" / "size" / "under-10k.json")
+    beta = next(s for s in small["top_suppliers"] if s["canonical_name"].upper() == "BETA")
+    assert beta["by_fiscal_year"] == [
+        {"fiscal_year": 2021, "total_value": 5000.0, "share_pct": round(100 * 5000 / 5151, 2)}
+    ]
+    acme = next(s for s in small["top_suppliers"] if s["canonical_name"].upper().startswith("ACME"))
+    assert [(r["fiscal_year"], r["share_pct"]) for r in acme["by_fiscal_year"]] == [
+        (2021, round(100 * 151 / 5151, 2)),
+        (2023, 100.0),
+    ]
+
+
+def test_supplier_recent_contracts_say_what_and_for_whom(tmp_path):
+    """A competitor's recent contracts carry the SCPRS first-item title and the
+    buying department's name, not just a document id and a business-unit code."""
+    out, _ = _build(tmp_path, titles={"A": "Rate case analytics software"})
+    acme = next(
+        p
+        for f in (out / "suppliers").glob("shard-*.json")
+        for p in _load(f)["suppliers"].values()
+        if p["profile"]["canonical_name"].upper().startswith("ACME")
+    )
+    doc_a = next(c for c in acme["recent_contracts"] if c["purchase_document"] == "A")
+    assert doc_a["title"] == "Rate case analytics software"
+    # The department dimension's name, not the raw "PUC" on the source row.
+    assert doc_a["department_name"] == "Public Utilities Commission"
+    assert doc_a["business_unit"] == "8660"
