@@ -203,6 +203,18 @@ def test_default_event_years_is_current_and_two_prior():
         ("HVAC Units Services **Small Business Bidders ONLY**", (1, 0, 0)),
         ("*Certified Small Business ONLY* IFPQ Elevator Maintenance", (1, 0, 0)),
         ("24YS0056 *SB-MB Only* Johnson Hall Fan Coils", (1, 0, 0)),
+        # Restricting procedure names with no "only" (live titles, 2026-11-15)
+        ("RFQ #2026061 - SB Option- 3DATX Mini PEMS and 1065 Upgrades", (1, 0, 0)),
+        ("RFQ #2026114 - SB option - Acronis Cyber Protect", (1, 0, 0)),
+        ("SMALL BUSINESS OPTION - SA000005-26 - Manage Engine Ad Manager Plus", (1, 0, 0)),
+        ("SB Minor B - 11A4467 - Imperial County", (1, 0, 0)),
+        ("SB Minor B- Replace Guardrail-San Diego County", (1, 0, 0)),
+        ("DVBE Option - Janitorial Services", (0, 1, 0)),
+        ("RFQ 26-114 SB/DVBE Option Office Furniture", (0, 0, 1)),
+        # ...and look-alikes that restrict nothing
+        ("Minor B - 11A4467 - Imperial County", (0, 0, 0)),
+        ("Optional services, SB 1383 compliance", (0, 0, 0)),
+        ("Renewal option year 2", (0, 0, 0)),
         # "only" that is not a set-aside
         ("Emergency repairs, weekends only", (0, 0, 0)),
         ("Janitorial Services", (0, 0, 0)),
