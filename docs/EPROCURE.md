@@ -76,10 +76,17 @@ extracts and publishes `eprocure.db` to the private operational dataset via
 
 1. **In-extractor completeness check** — unique firms ≥ 99% of the site's own
    banner total, else the run fails before writing.
-2. **Shrink gate** — the new store must hold ≥ 90% of the previously
+2. **Event carry-forward** — the events step may fail without discarding the
+   registry: any slice this run did not bank (failed twice or budget-skipped)
+   is copied unchanged from the published store (`carry_forward_events`), its
+   `extracted_at` still showing its true age. Fail-closed: if a slice is
+   missing and the published store can't be fetched, nothing publishes.
+3. **Shrink gate** — the new store must hold ≥ 90% of the previously
    *published* rows (first publish passes on > 0), catching a search that
    silently covered a subset.
-3. **Upload-on-success** — publish only runs when both gates pass.
+4. **Upload-on-success** — publish only runs when the gates pass. A run that
+   carried slices forward still publishes, then **ends red** naming them, so
+   triage opens an issue and the pipeline monitor doesn't count it as a success.
 
 Failures open a triage issue (`src/triage.py` hints under
 "eProcure registry refresh").
@@ -169,7 +176,10 @@ run). Each slice gates on >=99% of the site's own banner total before writing;
 `--budget-minutes` stops cleanly *between* slices, so a banked slice is always
 complete. `events_meta` records per-slice banner totals. The
 `eprocure-refresh` workflow extracts events after the registry and the shrink
-gate covers both tables.
+gate covers both tables. One exception to "exactly the latest run": a slice in
+the run's window that did not refresh is carried forward from the published
+store (see **CI refresh**), so its rows can be a week or more older than the
+rest — read `events_meta.extracted_at` per slice, never one run timestamp.
 
 ## Follow-ups (tracked, not in this change)
 

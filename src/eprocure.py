@@ -476,6 +476,15 @@ def _verify_select(page, selector: str, want: str) -> None:
         raise EprocureError(f"Filter {selector} shows {got!r}, wanted {want!r} — not searching.")
 
 
+def _event_slice_queue(
+    years: tuple[int, ...], include_posted: bool
+) -> list[tuple[str, int | None]]:
+    """The run's slices in extraction order, as ``(slice_key, year)``."""
+    queue: list[tuple[str, int | None]] = [("posted", None)] if include_posted else []
+    queue.extend((f"historical:{y}", y) for y in years)
+    return queue
+
+
 def download_events(
     on_slice,
     *,
@@ -500,10 +509,7 @@ def download_events(
     from time import monotonic
 
     t0 = monotonic()
-    queue: list[tuple[str, int | None]] = []
-    if include_posted:
-        queue.append(("posted", None))
-    queue.extend((f"historical:{y}", y) for y in years)
+    queue = _event_slice_queue(years, include_posted)
     skipped: list[str] = []
     attempts: dict[str, int] = {}
     failed: list[str] = []
@@ -578,6 +584,17 @@ _EVENT_COLUMNS = (
 )
 
 
+def _ensure_events_tables(con: sqlite3.Connection) -> None:
+    cols = ", ".join(_EVENT_COLUMNS)
+    con.execute(
+        f"CREATE TABLE IF NOT EXISTS events ({cols}, slice_key TEXT, extracted_at TEXT)"  # noqa: S608 - internal constants
+    )
+    con.execute(
+        "CREATE TABLE IF NOT EXISTS events_meta ("
+        "slice_key TEXT PRIMARY KEY, banner_total INTEGER, rows INTEGER, extracted_at TEXT)"
+    )
+
+
 def write_events_slice(db_path: Path, slice_key: str, rows: list[dict], banner_total: int) -> dict:
     """Idempotent per-slice replace of the ``events`` table + its meta row.
 
@@ -594,14 +611,7 @@ def write_events_slice(db_path: Path, slice_key: str, rows: list[dict], banner_t
     db_path.parent.mkdir(parents=True, exist_ok=True)
     con = sqlite3.connect(db_path)
     try:
-        cols = ", ".join(_EVENT_COLUMNS)
-        con.execute(
-            f"CREATE TABLE IF NOT EXISTS events ({cols}, slice_key TEXT, extracted_at TEXT)"  # noqa: S608 - internal constants
-        )
-        con.execute(
-            "CREATE TABLE IF NOT EXISTS events_meta ("
-            "slice_key TEXT PRIMARY KEY, banner_total INTEGER, rows INTEGER, extracted_at TEXT)"
-        )
+        _ensure_events_tables(con)
         con.execute("DELETE FROM events WHERE slice_key = ?", (slice_key,))
         ph = ", ".join("?" * (len(_EVENT_COLUMNS) + 2))
         con.executemany(
@@ -653,6 +663,112 @@ def extract_events(
     if not summaries:
         raise EprocureError("No event slice completed — nothing extracted.")
     return summaries
+
+
+def _has_table(con: sqlite3.Connection, schema: str, table: str) -> bool:
+    return (
+        con.execute(
+            f"SELECT 1 FROM {schema}.sqlite_master WHERE type = 'table' AND name = ?",  # noqa: S608 - schema is an internal constant
+            (table,),
+        ).fetchone()
+        is not None
+    )
+
+
+def carry_forward_events(
+    db_path: Path,
+    prev_path: Path,
+    fetch_prev,
+    *,
+    years: tuple[int, ...] | None = None,
+    include_posted: bool = True,
+) -> list[dict]:
+    """Fill each event slice this run did not bank with its previously published copy.
+
+    The weekly refresh starts from an empty store, so a slice that timed out (or
+    that ``--budget-minutes`` skipped) is simply absent. Publishing that store
+    would drop the slice's good published rows; refusing to publish throws away
+    the run's fresh registry (2026-11-10: the registry extracted, every
+    Historical year timed out, and the registry went two weeks without a
+    publish). Carrying the old slice keeps both: its rows and ``events_meta``
+    row are copied unchanged, so its ``extracted_at`` still shows its true age.
+
+    ``fetch_prev(path) -> bool`` downloads the published store to ``prev_path``;
+    it is only called when a slice is missing, and False fails closed — without
+    the published copy there is no store that is safe to publish. Returns one
+    ``{"slice", "rows", "extracted_at"}`` per unrefreshed slice (empty when the
+    run refreshed everything); a slice the published store never had (a new
+    year after a rollover) has ``rows`` 0 and ``extracted_at`` None and stays
+    absent. Years outside the window still age out, as in ``extract_events``.
+    """
+    want = [
+        key
+        for key, _ in _event_slice_queue(
+            default_event_years() if years is None else years, include_posted
+        )
+    ]
+    db_path, prev_path = Path(db_path), Path(prev_path)
+    if not db_path.exists():
+        raise EprocureError(f"{db_path} not found — the registry extract writes it first")
+    con = sqlite3.connect(db_path)
+    try:
+        banked = (
+            {k for (k,) in con.execute("SELECT slice_key FROM events_meta")}
+            if _has_table(con, "main", "events_meta")
+            else set()
+        )
+    finally:
+        con.close()
+    missing = [k for k in want if k not in banked]
+    if not missing:
+        return []
+    if not fetch_prev(prev_path):
+        raise EprocureError(
+            f"Event slice(s) {', '.join(missing)} did not refresh and the published "
+            "eprocure.db could not be fetched to carry them forward; NOT publishing "
+            "(the published copy keeps them)."
+        )
+
+    cols = ", ".join((*_EVENT_COLUMNS, "slice_key", "extracted_at"))
+    carried: list[dict] = []
+    con = sqlite3.connect(db_path, uri=True)
+    try:
+        con.execute("ATTACH DATABASE ? AS prev", (f"{prev_path.resolve().as_uri()}?mode=ro",))
+        has_prev = _has_table(con, "prev", "events") and _has_table(con, "prev", "events_meta")
+        _ensure_events_tables(con)
+        for key in missing:
+            meta = (
+                con.execute(
+                    "SELECT banner_total, rows, extracted_at FROM prev.events_meta "
+                    "WHERE slice_key = ?",
+                    (key,),
+                ).fetchone()
+                if has_prev
+                else None
+            )
+            if meta is None:
+                carried.append({"slice": key, "rows": 0, "extracted_at": None})
+                continue
+            con.execute("DELETE FROM events WHERE slice_key = ?", (key,))
+            n = con.execute(
+                f"INSERT INTO events ({cols}) SELECT {cols} FROM prev.events WHERE slice_key = ?",  # noqa: S608 - internal constants
+                (key,),
+            ).rowcount
+            if n != meta[1]:
+                raise EprocureError(
+                    f"Published slice {key!r} holds {n} rows but its events_meta records "
+                    f"{meta[1]} — not carrying a slice that disagrees with itself; NOT publishing."
+                )
+            con.execute(
+                "INSERT OR REPLACE INTO events_meta (slice_key, banner_total, rows, extracted_at) "
+                "VALUES (?, ?, ?, ?)",
+                (key, *meta),
+            )
+            carried.append({"slice": key, "rows": n, "extracted_at": meta[2]})
+        con.commit()  # all-or-nothing: an error above rolls back on close
+    finally:
+        con.close()
+    return carried
 
 
 # ------------------------------------------------------------------------- CLI

@@ -135,6 +135,27 @@ _HINTS: dict[str, dict[str, str]] = {
             "committing so the search covered a subset; nothing was published "
             "(upload-on-success held)."
         ),
+        "Extract events": (
+            "The CSCR event search on caleprocure.ca.gov stalled or timed out (the "
+            "overlay is slow at times; the 2026-11 failures were "
+            "`Page.wait_for_selector` timeouts). This no longer blocks the registry: "
+            "slices that did not refresh are carried forward unchanged from the "
+            "published store, the run publishes, and the last step fails it."
+        ),
+        "Carry forward": (
+            "Event slices did not refresh and could not be carried forward — the "
+            "published `eprocure.db` could not be fetched, or a published slice's "
+            "rows disagreed with its own `events_meta` count (the step's error says "
+            "which). Nothing was published (fail-closed; the published copy keeps "
+            "them). For a fetch failure check `HF_SCPRS_TOKEN` and the operational "
+            "dataset, then dispatch the workflow again."
+        ),
+        "Fail the run if event slices": (
+            "The registry and every refreshed event slice WERE published; the slices "
+            "named in this step's error are last run's copy (the carry step's "
+            "summary shows their age). Usually the eProcure site being slow: the "
+            "next weekly run retries, or dispatch the workflow to retry sooner."
+        ),
     },
     "eProcure solicitations refresh": {
         "_default": (

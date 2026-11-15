@@ -63,8 +63,43 @@ jobs:
       # in-extractor against the site's own banner; the budget stops cleanly
       # between slices ahead of the job timeout (finished slices are complete
       # on their own — no half-written slice can publish).
+      # continue-on-error: a slice that times out on the overlay is an
+      # availability failure, and must not discard the registry extracted above
+      # (2026-11-10: it did, and the registry went two weeks without a publish).
+      # The carry step below fills the gap; the last step still fails the run.
       - name: Extract events (Posted + recent Historical years)
+        id: events
+        continue-on-error: true
         run: python -m src.eprocure extract-events --budget-minutes 35
+
+      # Any slice this run did not bank (failed twice or budget-skipped) is copied
+      # unchanged from the published store, so publishing never drops its good
+      # rows. Fail-closed: if a slice is missing and the published store can't be
+      # fetched, this step fails and nothing publishes. Same single-writer lock as
+      # the daily solicitations job's fetch -> extract -> publish.
+      - name: Carry forward event slices this run did not refresh
+        id: carry
+        run: |
+          python - <<'PY'
+          import os
+          from pathlib import Path
+          from src import data_sync, eprocure
+
+          carried = eprocure.carry_forward_events(
+              Path("data/eprocure.db"), Path("data/eprocure_prev.db"), data_sync.fetch_eprocure_db
+          )
+          lines = [
+              f"{c['slice']}: carried forward {c['rows']} rows extracted {c['extracted_at']}"
+              if c["extracted_at"]
+              else f"{c['slice']}: not in the published store either; left absent"
+              for c in carried
+          ] or ["every event slice refreshed this run"]
+          print("\n".join(lines))
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as out:
+              out.write(f"carried={', '.join(c['slice'] for c in carried)}\n")
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as summary:
+              summary.write("### eProcure event slices\n```\n" + "\n".join(lines) + "\n```\n")
+          PY
 
       # Upload-on-success gate (#51): never publish a shrunken extract over good
       # data. The extractor already refuses an export short of the site's own
@@ -132,3 +167,13 @@ jobs:
 
       - name: Publish eprocure.db to the operational dataset
         run: python -m src.data_sync publish-eprocure
+
+      # Published, but not fully refreshed: end red so triage opens an issue and
+      # the run doesn't count as a success for the pipeline monitor.
+      - name: Fail the run if event slices were not refreshed
+        if: steps.events.outcome == 'failure' || steps.carry.outputs.carried != ''
+        env:
+          CARRIED: ${{ steps.carry.outputs.carried }}
+        run: |
+          echo "::error::eProcure events did not fully refresh. The registry and every refreshed slice were published; not refreshed this run: ${CARRIED:-none (see the Extract events step)}."
+          exit 1
