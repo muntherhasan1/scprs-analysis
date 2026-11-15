@@ -219,6 +219,25 @@ event name), so counts are a floor, not a census; coverage is Posted + recent
 Historical years, not the full archive; Posted rows have no published date by
 source design. A pre-events `eprocure.db` (registry only) still builds cleanly.
 
+**Bid detail pages** (`eprocure extract-details`, daily; see `docs/EPROCURE.md`)
+land in `bronze_eprocure_event_details` plus three child tables.
+- **Department code:** the unit eProcure confirmed when the page loaded wins
+  over the name match (`gold_eprocure_event.business_unit_source` = 'eprocure'
+  or 'name'). That places bids whose names match no single FI$Cal unit, e.g.
+  California Military Department → 8940 and Franchise Tax Board → 7730.
+- **Posted opportunity:** `gold_eprocure_posted_opportunity` gains
+  `published_date`, `event_version` (>1 = amended), `format_type`,
+  `is_information_request` (not a bid), the pre-bid conference
+  (`prebid_mandatory` 1/0, NULL when N/A, plus date, time, location and
+  comments), `description` and `details_read_at`. All are NULL for a bid not
+  read yet.
+- **Child marts:** `gold_eprocure_event_unspsc` (type of work),
+  `gold_eprocure_event_license` (CSLB classes) and
+  `gold_eprocure_event_service_area` (counties), one row per code, class or
+  county.
+- **Warn checks:** `posted_bid_without_detail_read` and
+  `detail_unit_disagrees_with_name_match`.
+
 ## Contract change capture (history over time)
 The bronze/silver/gold layers are a full-refresh snapshot of *current* state, so on
 their own they can't show how a contract changed. **`dw_document_history`** fixes

@@ -131,6 +131,19 @@ MART_DESCRIPTIONS: dict[str, str] = {
         "All Cal eProcure solicitation events, posted + historical, one row per "
         "(department, event). No award/winner data — for spend use gold_document."
     ),
+    "gold_eprocure_event_unspsc": (
+        "UNSPSC codes (type of work) on each open bid's Cal eProcure detail page, one row "
+        "per code — for 'open bids for <kind of work>' join to "
+        "gold_eprocure_posted_opportunity on (department_name, event_id)."
+    ),
+    "gold_eprocure_event_license": (
+        "Contractor license classes (CSLB: A, B, C-10, ...) each open bid requires, one "
+        "row per class — for 'bids I can bid on with a C-10 license'."
+    ),
+    "gold_eprocure_event_service_area": (
+        "Counties each open bid's work covers (detail page Service Area), one row per "
+        "county — for 'open bids in <county>'."
+    ),
     "gold_supplier_certification": (
         "SB/DVBE certification (Cal eProcure registry) per canonical supplier, with their "
         "SCPRS document_count/total_value — THE mart for 'spend with small-business or "
