@@ -49,6 +49,13 @@ _METRICS: dict[str, str] = {
     "cmas_matched_suppliers": "SELECT COUNT(*) FROM gold_supplier_cmas",
     # Term-end coverage, and the recompete window it feeds (Contract Lens).
     "documents_with_end_date": "SELECT COUNT(end_date) FROM lv_fact_document",
+    # Bid detail pages read, and open bids with a department code.
+    "posted_bids_with_detail_read": (
+        "SELECT COUNT(*) FROM gold_eprocure_posted_opportunity WHERE details_read_at IS NOT NULL"
+    ),
+    "posted_bids_with_business_unit": (
+        "SELECT COUNT(*) FROM gold_eprocure_posted_opportunity WHERE business_unit IS NOT NULL"
+    ),
     "active_procurement_ending_next_365_days": (
         "SELECT COUNT(*) FROM gold_procurement WHERE status = 'Active' "
         "AND end_date BETWEEN date('now') AND date('now', '+365 days')"

@@ -1680,3 +1680,143 @@ def test_assistance_rules_reference_is_well_formed():
         re.compile(r["exclude_pattern"] or "x")
         assert r["award_class"] == "X" and r["flag"] and "http" in r["evidence"]
         assert len(r["scm_code"]) == 3 and r["business_unit"].isdigit()
+
+
+def test_eprocure_bid_detail_pages_fold(tmp_path):
+    """Detail-page reads (eprocure extract-details) land in bronze; the unit
+    eProcure confirmed fills a bid the name match can't place; the posted
+    opportunity carries the published date, pre-bid conference and RFI flag;
+    codes, license classes and counties get their own marts; warn checks count
+    unread bids and unit disagreements."""
+    from src import eprocure
+
+    src, wh = tmp_path / "scprs.db", tmp_path / "warehouse.db"
+    epr = tmp_path / "eprocure.db"
+    _seed_source(src)
+
+    def posted(eid, name, dept):
+        return (
+            eid,
+            name,
+            dept,
+            None,
+            "2026-12-01",
+            "Posted",
+            0,
+            0,
+            "posted",
+            None,
+        )
+
+    _seed_eprocure(
+        epr,
+        [("100", "Acme, Inc.", "SB", "2025-01-01", "2027-01-31")],
+        events=[
+            posted("0000040760", "Fire Sprinkler Retrofit", "California Military Department"),
+            posted("26-001", "Road Work", "Department of Transportation"),
+            posted("RFI 848", "Preferred Lender RFI", "CSU Systemwide Offices"),
+            posted("26-009", "Not read yet", "Department of Transportation"),
+        ],
+    )
+    con = sqlite3.connect(epr)
+    eprocure._ensure_detail_tables(con)
+    base = {
+        "format1": "Sell Event",
+        "format2": "RFx",
+        "published": "10/02/2026 3:30PM PDT",
+        "version": "2",
+        "conference": "Mandatory",
+        "conf_date": "10/21/2026",
+        "conf_comments": "Attendance is required to bid.",
+        "unspsc": ["72102100"],
+        "unspsc_desc": ["Building facility services - Pest control"],
+        "license": ["C-20"],
+        "license_desc": ["Warm-Air Heating Contractor"],
+        "area_id": ["045"],
+        "county": ["Shasta"],
+    }
+    eprocure.write_event_detail(
+        con,
+        "California Military Department",
+        "0000040760",
+        "8940",
+        eprocure.parse_event_detail(base),
+        "2026-11-15T22:00:00+00:00",
+    )
+    # 9999 disagrees with the reference's unique match for Caltrans (2660)
+    eprocure.write_event_detail(
+        con,
+        "Department of Transportation",
+        "26-001",
+        "9999",
+        eprocure.parse_event_detail({**base, "conference": "Non Mandatory"}),
+        "2026-11-15T22:00:00+00:00",
+    )
+    eprocure.write_event_detail(
+        con,
+        "CSU Systemwide Offices",
+        "RFI 848",
+        "6630",
+        eprocure.parse_event_detail(
+            {
+                **base,
+                "format1": "Request For Information",
+                "conference": None,
+                "license": [],
+                "license_desc": [],
+            }
+        ),
+        "2026-11-15T22:00:00+00:00",
+    )
+    con.commit()
+    con.close()
+    warehouse.build_all(
+        wh_path=wh,
+        source_path=src,
+        enrichment_db=tmp_path / "no_enrich.db",
+        cmas_db=tmp_path / "missing_cmas.db",
+        eprocure_db=epr,
+        log=lambda *a: None,
+    )
+    con = sqlite3.connect(wh)
+    try:
+        unit = dict(
+            con.execute(
+                "SELECT event_id, business_unit || ':' || COALESCE(business_unit_source, '-') "
+                "FROM gold_eprocure_event"
+            )
+        )
+        assert (
+            unit["0000040760"] == "8940:eprocure"
+        )  # no FI$Cal name match; eProcure confirmed 8940
+        assert unit["26-009"] == "2660:name"  # not read: the exact-name match still applies
+        assert unit["26-001"] == "9999:eprocure"  # the confirmed unit wins...
+        opp = {
+            r[0]: r[1:]
+            for r in con.execute(
+                "SELECT event_id, published_date, event_version, is_information_request, "
+                "prebid_mandatory, prebid_comments FROM gold_eprocure_posted_opportunity"
+            )
+        }
+        assert opp["0000040760"] == ("2026-10-02", 2, 0, 1, "Attendance is required to bid.")
+        assert opp["26-001"][3] == 0  # Non Mandatory
+        assert opp["RFI 848"][2:4] == (1, None)  # an information request; conference N/A
+        assert opp["26-009"] == (None, None, None, None, None)  # not read yet
+        assert con.execute(
+            "SELECT business_unit, unspsc, unspsc_description FROM gold_eprocure_event_unspsc "
+            "WHERE event_id = '0000040760'"
+        ).fetchall() == [("8940", "72102100", "Building facility services - Pest control")]
+        assert con.execute("SELECT COUNT(*) FROM gold_eprocure_event_license").fetchone()[0] == 2
+        assert con.execute(
+            "SELECT county FROM gold_eprocure_event_service_area WHERE event_id = 'RFI 848'"
+        ).fetchall() == [("Shasta",)]
+        dq = dict(
+            con.execute(
+                "SELECT check_name, failed_count FROM dw_dq_results WHERE batch_id = "
+                "(SELECT MAX(batch_id) FROM dw_dq_results)"
+            )
+        )
+        assert dq["posted_bid_without_detail_read"] == 1  # 26-009
+        assert dq["detail_unit_disagrees_with_name_match"] == 1  # ...and is flagged (26-001)
+    finally:
+        con.close()

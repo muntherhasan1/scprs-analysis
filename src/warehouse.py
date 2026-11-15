@@ -178,6 +178,103 @@ def build_bronze(
     # optional like the registry; a pre-events eprocure.db (no events table)
     # just yields an empty bronze table.
     counts["bronze_eprocure_events"] = _ingest_eprocure_events(con, eprocure_db, batch, ts)
+
+    # Each open bid's detail page (same store, `extract-details`): UNSPSC codes,
+    # license classes, service areas, pre-bid conference. Optional like events.
+    counts.update(_ingest_eprocure_event_details(con, eprocure_db, batch, ts))
+    return counts
+
+
+# Bid detail pages (src/eprocure.py `extract-details`): bronze table -> (source
+# table in eprocure.db, columns). One row per event read, plus one child row per
+# UNSPSC code / license class / service-area county. Buyer contact details are
+# never in the store.
+_EPROCURE_DETAIL_TABLES: dict[str, tuple[str, dict[str, str]]] = {
+    "bronze_eprocure_event_details": (
+        "event_details",
+        {
+            "department_name": "TEXT",
+            "event_id": "TEXT",
+            "business_unit": "TEXT",
+            "format_type": "TEXT",
+            "published_date": "TEXT",
+            "event_version": "INTEGER",
+            "end_text": "TEXT",
+            "description": "TEXT",
+            "prebid_mandatory": "INTEGER",
+            "prebid_date": "TEXT",
+            "prebid_time": "TEXT",
+            "prebid_location": "TEXT",
+            "prebid_comments": "TEXT",
+            "fetched_at": "TEXT",
+        },
+    ),
+    "bronze_eprocure_event_unspsc": (
+        "event_detail_unspsc",
+        {
+            "department_name": "TEXT",
+            "event_id": "TEXT",
+            "ord": "INTEGER",
+            "unspsc": "TEXT",
+            "unspsc_description": "TEXT",
+        },
+    ),
+    "bronze_eprocure_event_licenses": (
+        "event_detail_licenses",
+        {
+            "department_name": "TEXT",
+            "event_id": "TEXT",
+            "ord": "INTEGER",
+            "license_type": "TEXT",
+            "license_description": "TEXT",
+        },
+    ),
+    "bronze_eprocure_event_service_areas": (
+        "event_detail_service_areas",
+        {
+            "department_name": "TEXT",
+            "event_id": "TEXT",
+            "ord": "INTEGER",
+            "area_id": "TEXT",
+            "county": "TEXT",
+        },
+    ),
+}
+
+
+def _ingest_eprocure_event_details(
+    con: sqlite3.Connection, eprocure_db: Path, batch: str, ts: str
+) -> dict[str, int]:
+    """Land the bid detail-page reads into their bronze tables (own store/connection).
+
+    Optional: an absent eprocure.db, or a store from before `extract-details`,
+    yields empty tables and the build proceeds unaffected."""
+    counts: dict[str, int] = {}
+    src = sqlite3.connect(eprocure_db, timeout=30) if eprocure_db.exists() else None
+    try:
+        for bronze, (source, cols) in _EPROCURE_DETAIL_TABLES.items():
+            con.execute(f"DROP TABLE IF EXISTS {bronze}")  # noqa: S608 - internal constants
+            defs = ", ".join(f"{c} {t}" for c, t in cols.items())
+            con.execute(
+                f"CREATE TABLE {bronze} ({defs}, "  # noqa: S608 - internal constants
+                "_batch_id TEXT, _loaded_at TEXT, _source TEXT)"
+            )
+            if (
+                src is not None
+                and src.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (source,)
+                ).fetchone()
+            ):
+                rows = src.execute(f"SELECT {', '.join(cols)} FROM {source}").fetchall()  # noqa: S608 - internal constants
+                ph = ", ".join("?" * (len(cols) + 3))
+                con.executemany(
+                    f"INSERT INTO {bronze} VALUES ({ph})",  # noqa: S608 - fixed arity
+                    [(*r, batch, ts, "eprocure.db") for r in rows],
+                )
+            counts[bronze] = _count(con, bronze)
+    finally:
+        if src is not None:
+            src.close()
     return counts
 
 
@@ -1567,9 +1664,11 @@ def _build_marts(con):
         # (bare event ids collide across departments). An event captured both
         # live (Posted) and completed (Historical) resolves to the completed row
         # — the same current-state discipline as document versions. business_unit
-        # comes from the FI$Cal department reference by exact name, only where
-        # that name maps to a single BU (NULL for DAAs, superior courts, and
-        # ambiguous reference names like "Transportation").
+        # is the unit eProcure itself confirmed when the bid's detail page was read
+        # (bronze_eprocure_event_details), else the FI$Cal department reference by
+        # exact name where that name maps to a single BU (NULL for DAAs, superior
+        # courts, and ambiguous reference names like "Transportation").
+        # business_unit_source (appended last) says which: 'eprocure' / 'name'.
         "gold_eprocure_event": """
             WITH dept AS (
               SELECT UPPER(TRIM(department_name)) AS dept_norm,
@@ -1583,23 +1682,67 @@ def _build_marts(con):
                        ORDER BY CASE WHEN search_status = 'historical' THEN 0 ELSE 1 END,
                                 rowid) AS _rn
               FROM bronze_eprocure_events)
-            SELECT e.event_id, e.event_name, e.department_name, d.business_unit,
-                   CASE WHEN d.business_unit IS NOT NULL THEN 1 ELSE 0 END
-                        AS matched_to_department,
+            SELECT e.event_id, e.event_name, e.department_name,
+                   COALESCE(det.business_unit, d.business_unit) AS business_unit,
+                   CASE WHEN COALESCE(det.business_unit, d.business_unit) IS NOT NULL
+                        THEN 1 ELSE 0 END AS matched_to_department,
                    e.published_date, e.end_date, e.status,
-                   e.sb_only, e.dvbe_only, e.search_status, e.search_year, e.sb_or_dvbe
+                   e.sb_only, e.dvbe_only, e.search_status, e.search_year, e.sb_or_dvbe,
+                   CASE WHEN det.business_unit IS NOT NULL THEN 'eprocure'
+                        WHEN d.business_unit IS NOT NULL THEN 'name' END
+                        AS business_unit_source
             FROM ev e
             LEFT JOIN dept d ON d.dept_norm = UPPER(TRIM(e.department_name))
+            LEFT JOIN bronze_eprocure_event_details det
+                   ON det.department_name = e.department_name AND det.event_id = e.event_id
             WHERE e._rn = 1""",
         # Live procurement opportunities: solicitations open for bid as of the
         # last events extraction, with the bid close date and SB/DVBE set-aside
         # flags. published_date is always NULL here by source design (the Posted
         # grid has no Published Date column).
+        # The detail-page columns (appended after the grid's, so earlier positions
+        # hold) are NULL for a bid not yet read: published_date (the Posted grid
+        # has none), event_version (>1 = amended), format_type and
+        # is_information_request ("Request For Information / RFx": not a bid),
+        # the pre-bid conference (prebid_mandatory 1/0, NULL when N/A) and the
+        # description. Codes, licenses and counties are in the child marts below.
         "gold_eprocure_posted_opportunity": """
-            SELECT event_id, event_name, department_name, business_unit,
-                   end_date AS bid_close_date, sb_only, dvbe_only, sb_or_dvbe
-            FROM gold_eprocure_event
-            WHERE status = 'Posted'""",
+            SELECT e.event_id, e.event_name, e.department_name, e.business_unit,
+                   e.end_date AS bid_close_date, e.sb_only, e.dvbe_only, e.sb_or_dvbe,
+                   det.published_date, det.event_version, det.format_type,
+                   CASE WHEN det.event_id IS NULL THEN NULL
+                        WHEN det.format_type LIKE 'Request For Information%' THEN 1
+                        ELSE 0 END AS is_information_request,
+                   det.prebid_mandatory, det.prebid_date, det.prebid_time,
+                   det.prebid_location, det.prebid_comments, det.description,
+                   det.fetched_at AS details_read_at
+            FROM gold_eprocure_event e
+            LEFT JOIN bronze_eprocure_event_details det
+                   ON det.department_name = e.department_name AND det.event_id = e.event_id
+            WHERE e.status = 'Posted'""",
+        # One row per UNSPSC code on a bid's detail page (type of work), in page
+        # order; join to gold_eprocure_event / _posted_opportunity on
+        # (department_name, event_id).
+        "gold_eprocure_event_unspsc": """
+            SELECT u.department_name, u.event_id, e.business_unit, u.ord,
+                   u.unspsc, u.unspsc_description
+            FROM bronze_eprocure_event_unspsc u
+            LEFT JOIN gold_eprocure_event e
+                   ON e.department_name = u.department_name AND e.event_id = u.event_id""",
+        # Contractor license classes a bid requires (CSLB classes: A, B, C-10, ...).
+        "gold_eprocure_event_license": """
+            SELECT l.department_name, l.event_id, e.business_unit, l.ord,
+                   l.license_type, l.license_description
+            FROM bronze_eprocure_event_licenses l
+            LEFT JOIN gold_eprocure_event e
+                   ON e.department_name = l.department_name AND e.event_id = l.event_id""",
+        # Counties a bid's work covers (the page's Service Area table).
+        "gold_eprocure_event_service_area": """
+            SELECT a.department_name, a.event_id, e.business_unit, a.ord,
+                   a.area_id, a.county
+            FROM bronze_eprocure_event_service_areas a
+            LEFT JOIN gold_eprocure_event e
+                   ON e.department_name = a.department_name AND e.event_id = a.event_id""",
         # Set-aside demand: each department's solicitation volume per calendar
         # year (year of bid close) and how much of it is SB-only / DVBE-only set
         # aside (or open to either: sb_or_dvbe_count, appended last so existing
@@ -2097,6 +2240,25 @@ _DQ_CHECKS = [
         "SELECT COUNT(*) FROM (SELECT 1 FROM bronze_eprocure_events "
         "GROUP BY department_name, event_id, search_status, search_year "
         "HAVING COUNT(*) > 1)",
+    ),
+    (
+        # Coverage of the daily detail-page read: open bids not read yet (new
+        # since the last run, the budget ran out, or no unit would load: DAAs).
+        "posted_bid_without_detail_read",
+        "warn",
+        "gold_eprocure_posted_opportunity (details_read_at IS NULL)",
+        "SELECT COUNT(*) FROM gold_eprocure_posted_opportunity WHERE details_read_at IS NULL",
+    ),
+    (
+        # The unit eProcure confirmed should equal the exact-name match wherever
+        # the name maps to one unit; a mismatch means the reference is wrong.
+        "detail_unit_disagrees_with_name_match",
+        "warn",
+        "bronze_eprocure_event_details vs silver_department",
+        "SELECT COUNT(*) FROM bronze_eprocure_event_details det JOIN ("
+        "  SELECT UPPER(TRIM(department_name)) AS dept_norm, MIN(business_unit) AS bu"
+        "  FROM silver_department GROUP BY 1 HAVING COUNT(DISTINCT business_unit) = 1"
+        ") d ON d.dept_norm = UPPER(TRIM(det.department_name)) WHERE d.bu <> det.business_unit",
     ),
     (
         "eprocure_event_has_end_date",
