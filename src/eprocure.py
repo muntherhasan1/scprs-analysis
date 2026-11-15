@@ -340,21 +340,34 @@ def default_event_years(today: datetime | None = None) -> tuple[int, ...]:
 _SET_ASIDE_CLAUSE = re.compile(r"([^*()\"\[\]:;]{0,80}?)\bONLY")
 _SB_GROUP = re.compile(r"\b(SB|SBS|SB-PW|MB|SMALL BUSINESS(ES)?|MICRO ?BUSINESS(ES)?)\b")
 _DVBE_GROUP = re.compile(r"\b(DVBE|DISABLED VETERAN)")
+# Procedure names that restrict bidding without the word "only" (checked
+# against live titles 2026-11-15): the SB/DVBE Option, released only to
+# certified SBs/MBs or DVBEs (State Contracting Manual 14.05.3), and Caltrans's
+# SB Minor B program, certified small businesses only.
+_OPTION_CLAUSE = re.compile(
+    r"\b(SB/DVBE|SB-DVBE|SB|SMALL BUSINESS|DVBE)[ -]?OPTION\b|\bSB MINOR B\b"
+)
 
 
 def set_aside_flags(event_name: str | None) -> tuple[int, int, int]:
-    """(sb_only, dvbe_only, sb_or_dvbe) from an event title's "... ONLY" clauses.
+    """(sb_only, dvbe_only, sb_or_dvbe) from an event title's "... ONLY" clauses
+    and restricting procedure names ("SB Option", "SB/DVBE Option", "SB Minor B").
 
     A clause naming only small-business groups (SB, MB, SB-PW) is SB-only; only
-    DVBE is DVBE-only; both ("SB/DVBE ONLY", "SB ... or a DVBE Only") is a set
-    aside open to either, which is neither SB-only nor DVBE-only. A floor: an
-    untitled set-aside is invisible here.
+    DVBE is DVBE-only; both ("SB/DVBE ONLY", "SB ... or a DVBE Only",
+    "SB/DVBE Option") is a set aside open to either, which is neither SB-only
+    nor DVBE-only. A floor: a restriction the title doesn't state is invisible
+    here.
     """
     name = " ".join((event_name or "").upper().split())
     sb = dvbe = False
     for clause in _SET_ASIDE_CLAUSE.findall(name):
         sb = sb or bool(_SB_GROUP.search(clause))
         dvbe = dvbe or bool(_DVBE_GROUP.search(clause))
+    for m in _OPTION_CLAUSE.finditer(name):
+        group = m.group(1) or "SB"  # SB MINOR B
+        sb = sb or group != "DVBE"
+        dvbe = dvbe or "DVBE" in group
     return int(sb and not dvbe), int(dvbe and not sb), int(sb and dvbe)
 
 
