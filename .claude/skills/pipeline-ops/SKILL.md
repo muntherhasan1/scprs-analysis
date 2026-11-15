@@ -16,6 +16,11 @@ stale serving, zero alerts) and the audit that followed (issues #43–#56).
    `timeout-minutes` kill concludes cancelled, not failure).
 3. Read the run log tail; every pipeline workflow sets `PYTHONUNBUFFERED` so a
    killed run still shows how far it got.
+   For a browser step, look at the evidence before theorising: the triage issue
+   quotes each `failure evidence [...]` line (title, URL, page text, requests
+   still in flight, HTTP errors, console errors) and links the
+   `failure-evidence-*` artifact (screenshot, page HTML, `report.json`; kept 14
+   days). See `src/failure_evidence.py`.
 4. Data safety reasoning: publishes are upload-on-success and atomic — a killed
    run cannot half-publish. Rollback fires ONLY on verified marker mismatch.
 5. Verify serving with `python -m src.golive_check` (never the local stdio MCP

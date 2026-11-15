@@ -232,3 +232,398 @@ def test_extract_events_posted_only_queues_no_historical_years(monkeypatch, tmp_
     assert seen == {"years": (), "posted": True}
     eprocure.extract_events(tmp_path / "e.db", years=None)
     assert seen["years"] == eprocure.default_event_years()
+
+
+# ------------------------------------------- carry-forward of unrefreshed slices
+
+_YEARS = (2024, 2025, 2026)
+
+
+def _hist(year, n):
+    return [
+        eprocure._tidy_event(_raw_event(event_id=f"{year}-{i}"), "historical", year)
+        for i in range(n)
+    ]
+
+
+def _published_store(path):
+    """A previously published store: Posted + three Historical years."""
+    eprocure.write_events_slice(
+        path, "posted", [eprocure._tidy_event(_raw_event(), "posted", None)], 1
+    )
+    for year, n in zip(_YEARS, (4, 5, 6), strict=True):
+        eprocure.write_events_slice(path, f"historical:{year}", _hist(year, n), n)
+    con = sqlite3.connect(path)
+    try:  # age the published slices so a carried copy is distinguishable from a fresh one
+        con.execute("UPDATE events SET extracted_at = '2026-11-03T12:00:00+00:00'")
+        con.execute("UPDATE events_meta SET extracted_at = '2026-11-03T12:00:00+00:00'")
+        con.commit()
+    finally:
+        con.close()
+
+
+def _fetch_from(published, calls):
+    def fetch(dest):
+        calls.append(dest)
+        dest.write_bytes(published.read_bytes())
+        return True
+
+    return fetch
+
+
+def _slices(path):
+    con = sqlite3.connect(path)
+    try:
+        rows = dict(
+            con.execute(
+                "SELECT slice_key, COUNT(*) || ' @ ' || MAX(extracted_at) FROM events "
+                "GROUP BY slice_key"
+            ).fetchall()
+        )
+        meta = dict(con.execute("SELECT slice_key, rows FROM events_meta").fetchall())
+        return rows, meta
+    finally:
+        con.close()
+
+
+def test_carry_forward_fills_only_the_slices_this_run_did_not_bank(tmp_path):
+    """Slices the run did not bank come back from the published store unchanged
+    (their old extracted_at keeps their true age); fresh slices are untouched."""
+    published = tmp_path / "published.db"
+    _published_store(published)
+    db = tmp_path / "eprocure.db"
+    eprocure.write_events_slice(
+        db, "posted", [eprocure._tidy_event(_raw_event(event_id="NEW"), "posted", None)], 1
+    )
+    calls = []
+
+    carried = eprocure.carry_forward_events(
+        db, tmp_path / "prev.db", _fetch_from(published, calls), years=_YEARS
+    )
+
+    assert [c["slice"] for c in carried] == [
+        "historical:2024",
+        "historical:2025",
+        "historical:2026",
+    ]
+    assert [c["rows"] for c in carried] == [4, 5, 6]
+    assert {c["extracted_at"] for c in carried} == {"2026-11-03T12:00:00+00:00"}
+    rows, meta = _slices(db)
+    assert rows["historical:2025"] == "5 @ 2026-11-03T12:00:00+00:00"
+    assert not rows["posted"].endswith("2026-11-03T12:00:00+00:00")  # the fresh slice stayed fresh
+    assert meta == {"posted": 1, "historical:2024": 4, "historical:2025": 5, "historical:2026": 6}
+    assert len(calls) == 1
+
+
+def test_carry_forward_is_a_no_op_when_every_slice_refreshed(tmp_path):
+    db = tmp_path / "eprocure.db"
+    eprocure.write_events_slice(db, "posted", [], 0)
+    for year in _YEARS:
+        eprocure.write_events_slice(db, f"historical:{year}", _hist(year, 2), 2)
+    published = tmp_path / "published.db"
+    published.write_bytes(db.read_bytes())
+
+    assert (
+        eprocure.carry_forward_events(
+            db, tmp_path / "prev.db", _fetch_from(published, []), years=_YEARS
+        )
+        == []
+    )
+
+
+def test_carry_forward_without_published_store_when_nothing_is_missing(tmp_path):
+    """Nothing to carry and no published copy to compare against: leave the store
+    alone (the shrink gate's own fetch decides, as before)."""
+    db = tmp_path / "eprocure.db"
+    eprocure.write_events_slice(db, "posted", [], 0)
+    for year in _YEARS:
+        eprocure.write_events_slice(db, f"historical:{year}", _hist(year, 2), 2)
+    before = db.read_bytes()
+
+    assert (
+        eprocure.carry_forward_events(db, tmp_path / "prev.db", lambda _d: False, years=_YEARS)
+        == []
+    )
+    assert db.read_bytes() == before
+
+
+def test_carry_forward_replays_the_2026_11_10_run(tmp_path):
+    """2026-11-10, slice by slice: Posted refreshed; 2024 refreshed on retry; 2025
+    "refreshed" on retry with 385 rows against a banner of 385 (it held 5,616 a
+    week earlier; 385 was that run's Posted count, so the retry read the wrong
+    result set and the banner check could not tell); 2026 failed twice. The 2025
+    slice must be treated as unrefreshed, or the whole-table shrink gate refuses
+    the publish and the fresh registry is lost again."""
+    published = tmp_path / "published.db"
+    _published_store(published)  # posted 1, 2024: 4, 2025: 5, 2026: 6
+    db = tmp_path / "eprocure.db"
+    eprocure.write_events_slice(
+        db, "posted", [eprocure._tidy_event(_raw_event(), "posted", None)], 1
+    )
+    eprocure.write_events_slice(db, "historical:2024", _hist(2024, 4), 4)
+    eprocure.write_events_slice(db, "historical:2025", _hist(2025, 1), 1)  # wrong result set
+
+    carried = eprocure.carry_forward_events(
+        db, tmp_path / "prev.db", _fetch_from(published, []), years=_YEARS
+    )
+
+    by_slice = {c["slice"]: c for c in carried}
+    assert list(by_slice) == ["historical:2025", "historical:2026"]
+    assert by_slice["historical:2025"]["rows"] == 5
+    assert "shrank" in by_slice["historical:2025"]["reason"]
+    assert by_slice["historical:2026"]["reason"] == "not refreshed"
+    rows, meta = _slices(db)
+    assert meta == {"posted": 1, "historical:2024": 4, "historical:2025": 5, "historical:2026": 6}
+    assert not rows["historical:2024"].endswith("2026-11-03T12:00:00+00:00")  # kept fresh
+
+
+@pytest.mark.parametrize(("new_posted", "replaced"), [(4, True), (6, False)])
+def test_carry_forward_posted_floor_allows_daily_churn(tmp_path, new_posted, replaced):
+    """Posted churns day to day, so its floor is 50% (the daily job's); 6 of a
+    published 10 is churn, 4 of 10 is a broken search."""
+
+    def posted(n, tag):
+        return [
+            eprocure._tidy_event(_raw_event(event_id=f"{tag}{i}"), "posted", None) for i in range(n)
+        ]
+
+    published = tmp_path / "published.db"
+    eprocure.write_events_slice(published, "posted", posted(10, "old"), 10)
+    db = tmp_path / "eprocure.db"
+    eprocure.write_events_slice(db, "posted", posted(new_posted, "new"), new_posted)
+
+    carried = eprocure.carry_forward_events(
+        db, tmp_path / "prev.db", _fetch_from(published, []), years=()
+    )
+
+    assert [c["slice"] for c in carried] == (["posted"] if replaced else [])
+    assert _slices(db)[1] == {"posted": 10 if replaced else new_posted}
+
+
+def test_carry_forward_fails_closed_without_the_published_store(tmp_path):
+    """A slice is missing and the published copy can't be fetched: publishing
+    would wipe that slice's good rows, so refuse and leave the store as it was."""
+    db = tmp_path / "eprocure.db"
+    eprocure.write_events_slice(db, "posted", [], 0)
+    before = db.read_bytes()
+
+    with pytest.raises(eprocure.EprocureError, match="NOT publishing"):
+        eprocure.carry_forward_events(db, tmp_path / "prev.db", lambda _dest: False, years=_YEARS)
+    assert db.read_bytes() == before
+
+
+def test_carry_forward_when_no_event_slice_completed(tmp_path):
+    """Only the registry wrote the store (no events tables yet): every slice is carried."""
+    published = tmp_path / "published.db"
+    _published_store(published)
+    db = tmp_path / "eprocure.db"
+    sqlite3.connect(db).close()
+
+    carried = eprocure.carry_forward_events(
+        db, tmp_path / "prev.db", _fetch_from(published, []), years=_YEARS
+    )
+
+    assert [c["slice"] for c in carried] == [
+        "posted",
+        "historical:2024",
+        "historical:2025",
+        "historical:2026",
+    ]
+    assert _slices(db)[1] == {
+        "posted": 1,
+        "historical:2024": 4,
+        "historical:2025": 5,
+        "historical:2026": 6,
+    }
+
+
+def test_carry_forward_reports_a_slice_the_published_store_never_had(tmp_path):
+    """After a year rollover the new year's slice may fail before it was ever
+    published: nothing to carry, so it is reported (rows 0, no age) and left absent."""
+    published = tmp_path / "published.db"
+    _published_store(published)
+    db = tmp_path / "eprocure.db"
+    eprocure.write_events_slice(db, "posted", [], 0)
+    for year, n in ((2025, 5), (2026, 6)):  # refreshed at their published sizes
+        eprocure.write_events_slice(db, f"historical:{year}", _hist(year, n), n)
+
+    carried = eprocure.carry_forward_events(
+        db, tmp_path / "prev.db", _fetch_from(published, []), years=(2025, 2026, 2027)
+    )
+
+    assert carried == [
+        {"slice": "historical:2027", "rows": 0, "extracted_at": None, "reason": "not refreshed"}
+    ]
+    assert "historical:2027" not in _slices(db)[1]
+    assert "historical:2024" not in _slices(db)[1]  # out-of-window years still age out
+
+
+def test_carry_forward_refuses_a_published_slice_that_disagrees_with_its_meta(tmp_path):
+    published = tmp_path / "published.db"
+    _published_store(published)
+    con = sqlite3.connect(published)
+    con.execute("DELETE FROM events WHERE slice_key = 'historical:2025' AND event_id = '2025-0'")
+    con.commit()
+    con.close()
+    db = tmp_path / "eprocure.db"
+    eprocure.write_events_slice(db, "posted", [], 0)
+    before = db.read_bytes()
+
+    with pytest.raises(eprocure.EprocureError, match="historical:2025"):
+        eprocure.carry_forward_events(
+            db, tmp_path / "prev.db", _fetch_from(published, []), years=_YEARS
+        )
+    assert db.read_bytes() == before
+
+
+def _refresh_steps():
+    from pathlib import Path
+
+    import yaml
+
+    wf = yaml.safe_load(Path(".github/workflows/eprocure-refresh.yml").read_text(encoding="utf-8"))
+    return wf["jobs"]["refresh"]["steps"]
+
+
+def test_refresh_workflow_publishes_the_registry_when_event_slices_fail():
+    """An event-search timeout must not throw away a good registry extract
+    (2026-11-10: registry extracted, events timed out, publish skipped, registry
+    stale for two weeks) — but the run must still end red so triage sees it."""
+    steps = _refresh_steps()
+    names = [s["name"] for s in steps]
+    by_id = {s.get("id"): s for s in steps if s.get("id")}
+
+    events, carry = by_id["events"], by_id["carry"]
+    assert events.get("continue-on-error") is True
+    assert "carry_forward_events" in carry["run"]
+    assert "continue-on-error" not in carry  # can't carry -> fail closed, no publish
+    gate = next(n for n in names if n.startswith("Sanity-check"))
+    publish = next(n for n in names if n.startswith("Publish"))
+    fail = next(s for s in steps if s["name"].startswith("Fail the run"))
+    assert names.index(events["name"]) < names.index(carry["name"]) < names.index(gate)
+    assert names.index(gate) < names.index(publish) < names.index(fail["name"])
+    assert "steps.events.outcome == 'failure'" in fail["if"]
+    assert "steps.carry.outputs.carried != ''" in fail["if"]
+    assert "${{" not in fail["run"]  # inputs via env:, never inline in bash
+
+
+# ------------------------------------------------------------ failure evidence
+
+
+def _fake_playwright(monkeypatch, tmp_path, goto_error, calls):
+    from pathlib import Path
+    from types import SimpleNamespace
+
+    from src import failure_evidence
+
+    monkeypatch.setattr(failure_evidence, "EVIDENCE_DIR", tmp_path / "evidence")
+    failure_evidence.PageWatch.reset_limit()
+
+    class Page:
+        url = eprocure.EVENTS_URL
+
+        def on(self, *_a):
+            pass
+
+        def goto(self, *_a, **_k):
+            raise goto_error
+
+        def screenshot(self, *, path, **_k):
+            calls.append("capture")
+            Path(path).write_bytes(b"png")
+            return b"png"
+
+        def title(self):
+            return "Event Search"
+
+        def evaluate(self, *_a):
+            return ""
+
+        def content(self):
+            return "<html></html>"
+
+    class Ctx:
+        def new_page(self):
+            return Page()
+
+        def close(self):
+            calls.append("close")
+
+    class Browser:
+        def new_context(self, **_k):
+            return Ctx()
+
+        def close(self):
+            calls.append("browser-close")
+
+    class Playwright:
+        chromium = SimpleNamespace(launch=lambda **_k: Browser())
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_a):
+            return False
+
+    monkeypatch.setattr(eprocure, "sync_playwright", Playwright)
+    return tmp_path / "evidence"
+
+
+def _captured(evidence_dir):
+    return sorted(d.name.split("Z-", 1)[1] for d in evidence_dir.iterdir())
+
+
+def test_events_capture_evidence_on_each_attempt_before_the_session_closes(monkeypatch, tmp_path):
+    calls = []
+    evidence = _fake_playwright(
+        monkeypatch, tmp_path, eprocure.PWTimeout("Timeout 120000ms exceeded."), calls
+    )
+    with pytest.raises(eprocure.EprocureError, match="posted"):
+        eprocure.download_events(lambda *_a: None, years=())
+    assert calls == ["capture", "close", "capture", "close", "browser-close"]
+    assert _captured(evidence) == ["events-posted-attempt1", "events-posted-attempt2"]
+
+
+def test_events_capture_evidence_on_an_unexpected_error_too(monkeypatch, tmp_path):
+    """The 2026-10 registry failures were net::ERR_EMPTY_RESPONSE from goto — a
+    Playwright Error, not a timeout — which ends the run without a retry."""
+    calls = []
+    evidence = _fake_playwright(
+        monkeypatch, tmp_path, RuntimeError("net::ERR_EMPTY_RESPONSE"), calls
+    )
+    with pytest.raises(RuntimeError, match="ERR_EMPTY_RESPONSE"):
+        eprocure.download_events(lambda *_a: None, years=())
+    assert calls[:2] == ["capture", "close"]
+    assert _captured(evidence) == ["events-posted-attempt1"]
+
+
+@pytest.mark.parametrize(
+    ("error", "raised"),
+    [
+        (eprocure.PWTimeout("Timeout 180000ms exceeded."), eprocure.EprocureError),
+        (RuntimeError("net::ERR_EMPTY_RESPONSE"), RuntimeError),
+    ],
+)
+def test_registry_captures_evidence_before_the_browser_closes(monkeypatch, tmp_path, error, raised):
+    calls = []
+    evidence = _fake_playwright(monkeypatch, tmp_path, error, calls)
+    with pytest.raises(raised):
+        eprocure.download_registry(out_dir=tmp_path)
+    assert calls == ["capture", "browser-close"]
+    assert _captured(evidence) == ["registry"]
+
+
+def test_extract_events_logs_the_site_status_mix(monkeypatch, tmp_path, capsys):
+    def fake_download(on_slice, **_kw):
+        rows = [
+            eprocure._tidy_event(_raw_event(event_id=str(i), status=st), "historical", 2025)
+            for i, st in enumerate(["Event Completed", "Event Completed", "Canceled"])
+        ]
+        on_slice("historical:2025", rows, 3)
+        return []
+
+    monkeypatch.setattr(eprocure, "download_events", fake_download)
+    eprocure.extract_events(tmp_path / "e.db", years=(2025,), include_posted=False)
+    assert "events historical:2025: site status mix Event Completed 2, Canceled 1" in (
+        capsys.readouterr().out
+    )

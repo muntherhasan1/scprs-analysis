@@ -40,6 +40,12 @@ scratchpad probes:
   `collect_po_details` / `enrich_details` — this pattern broke a 3-day
   livelock, PR #42).
 - Money/date cleaning at load time (`$1,234` → float, MM/DD/YYYY → ISO).
+- **Browser extractors capture failure evidence**: attach
+  `failure_evidence.PageWatch(page, label)` right after `new_page()` and call
+  `watch.capture(e)` in every failure path *before* the context closes
+  (retryable and fatal alike). A bare Playwright timeout only names the element
+  that never appeared; the 2026-11 eProcure outage couldn't be diagnosed
+  because a slow relay, a block page and a script error all read the same.
 
 ## Publishing and gates
 
@@ -60,7 +66,9 @@ Copy the shape of `.github/workflows/cmas-refresh.yml` (simple) or
 `enrich-canary.yml` (long-running): offset cron; `scprs-operational-writer`
 concurrency group if it writes the operational dataset; `PYTHONUNBUFFERED: "1"`;
 `timeout-minutes` as a backstop ABOVE the self-budget; inputs via `env:` not
-inline `${{ }}`; result + duration to `GITHUB_STEP_SUMMARY`. Then wire
+inline `${{ }}`; result + duration to `GITHUB_STEP_SUMMARY`; a browser
+workflow ends with the `Upload failure evidence` step (`if: always()`, see
+`eprocure-refresh.yml`). Then wire
 observability: a `_HINTS` entry in `src/triage.py`, and confirm the pipeline
 monitor / dead-man's switch cover the new workflow (see the pipeline-ops skill).
 

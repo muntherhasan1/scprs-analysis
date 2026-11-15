@@ -45,12 +45,14 @@ import argparse
 import os
 import re
 import sqlite3
+from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 
 from playwright.sync_api import TimeoutError as PWTimeout
 from playwright.sync_api import sync_playwright
 
+from src.failure_evidence import PageWatch
 from src.supplier_master import normalize_name
 
 # Chromium needs --no-sandbox when running as non-root in a container; set the
@@ -117,6 +119,7 @@ def download_registry(
         browser = p.chromium.launch(headless=headless, args=_CHROMIUM_ARGS)
         ctx = browser.new_context(accept_downloads=True)
         page = ctx.new_page()
+        watch = PageWatch(page, "registry")
         try:
             page.goto(REGISTRY_URL, wait_until="domcontentloaded", timeout=timeout_ms)
             page.wait_for_selector(f'[id="{_CERT_FLAG.format(0)}"]', timeout=timeout_ms)
@@ -150,7 +153,11 @@ def download_registry(
             dl_info.value.save_as(str(dest))
             return dest, banner_total
         except PWTimeout as e:
+            watch.capture(e)
             raise EprocureError(f"Timed out driving the registry search: {e}") from e
+        except Exception as e:
+            watch.capture(e)
+            raise
         finally:
             browser.close()
 
@@ -476,6 +483,15 @@ def _verify_select(page, selector: str, want: str) -> None:
         raise EprocureError(f"Filter {selector} shows {got!r}, wanted {want!r} — not searching.")
 
 
+def _event_slice_queue(
+    years: tuple[int, ...], include_posted: bool
+) -> list[tuple[str, int | None]]:
+    """The run's slices in extraction order, as ``(slice_key, year)``."""
+    queue: list[tuple[str, int | None]] = [("posted", None)] if include_posted else []
+    queue.extend((f"historical:{y}", y) for y in years)
+    return queue
+
+
 def download_events(
     on_slice,
     *,
@@ -500,10 +516,7 @@ def download_events(
     from time import monotonic
 
     t0 = monotonic()
-    queue: list[tuple[str, int | None]] = []
-    if include_posted:
-        queue.append(("posted", None))
-    queue.extend((f"historical:{y}", y) for y in years)
+    queue = _event_slice_queue(years, include_posted)
     skipped: list[str] = []
     attempts: dict[str, int] = {}
     failed: list[str] = []
@@ -527,8 +540,10 @@ def download_events(
                 # pager permanently hidden, stalling pagination. Every clean
                 # recon run was a session's first search; mirror that.
                 ctx = browser.new_context(user_agent=_BROWSER_UA)
+                watch = None
                 try:
                     page = ctx.new_page()
+                    watch = PageWatch(page, f"events-{key}-attempt{attempts[key]}")
                     page.goto(EVENTS_URL, wait_until="domcontentloaded", timeout=timeout_ms)
                     page.wait_for_selector(f"{_EVENT_STATUS}:visible", timeout=timeout_ms)
                     page.wait_for_timeout(5000)
@@ -546,11 +561,19 @@ def download_events(
                     status = "historical" if year else "posted"
                     on_slice(key, [_tidy_event(r, status, year) for r in rows], total)
                 except (EprocureError, PWTimeout) as e:
+                    if watch:
+                        watch.capture(e)
                     if attempts[key] < 2:
                         print(f"events {key}: attempt failed ({e}); retrying once at the end")
                         queue.append((key, year))
                     else:
                         failed.append(f"{key}: {e}")
+                except Exception as e:
+                    # Anything else (e.g. goto's net::ERR_EMPTY_RESPONSE) ends the
+                    # run: keep what the page showed before the context closes.
+                    if watch:
+                        watch.capture(e)
+                    raise
                 finally:
                     ctx.close()
         finally:
@@ -578,6 +601,17 @@ _EVENT_COLUMNS = (
 )
 
 
+def _ensure_events_tables(con: sqlite3.Connection) -> None:
+    cols = ", ".join(_EVENT_COLUMNS)
+    con.execute(
+        f"CREATE TABLE IF NOT EXISTS events ({cols}, slice_key TEXT, extracted_at TEXT)"  # noqa: S608 - internal constants
+    )
+    con.execute(
+        "CREATE TABLE IF NOT EXISTS events_meta ("
+        "slice_key TEXT PRIMARY KEY, banner_total INTEGER, rows INTEGER, extracted_at TEXT)"
+    )
+
+
 def write_events_slice(db_path: Path, slice_key: str, rows: list[dict], banner_total: int) -> dict:
     """Idempotent per-slice replace of the ``events`` table + its meta row.
 
@@ -594,14 +628,7 @@ def write_events_slice(db_path: Path, slice_key: str, rows: list[dict], banner_t
     db_path.parent.mkdir(parents=True, exist_ok=True)
     con = sqlite3.connect(db_path)
     try:
-        cols = ", ".join(_EVENT_COLUMNS)
-        con.execute(
-            f"CREATE TABLE IF NOT EXISTS events ({cols}, slice_key TEXT, extracted_at TEXT)"  # noqa: S608 - internal constants
-        )
-        con.execute(
-            "CREATE TABLE IF NOT EXISTS events_meta ("
-            "slice_key TEXT PRIMARY KEY, banner_total INTEGER, rows INTEGER, extracted_at TEXT)"
-        )
+        _ensure_events_tables(con)
         con.execute("DELETE FROM events WHERE slice_key = ?", (slice_key,))
         ph = ", ".join("?" * (len(_EVENT_COLUMNS) + 2))
         con.executemany(
@@ -640,6 +667,11 @@ def extract_events(
         s = write_events_slice(db_path, key, rows, total)
         summaries.append(s)
         print(f"events {key}: {s['rows']} rows (site banner {total}) -> {db_path.name}")
+        # The site's own status column, so a slice holding another search's
+        # results is visible in the log (2026-11-10: Historical 2025's retry held
+        # 385 rows, that run's Posted count; nothing logged could show why).
+        mix = Counter(r.get("status") or "?" for r in rows).most_common(4)
+        print(f"events {key}: site status mix " + (", ".join(f"{st} {n}" for st, n in mix) or "-"))
 
     skipped = download_events(
         on_slice,
@@ -653,6 +685,143 @@ def extract_events(
     if not summaries:
         raise EprocureError("No event slice completed — nothing extracted.")
     return summaries
+
+
+def _has_table(con: sqlite3.Connection, schema: str, table: str) -> bool:
+    return (
+        con.execute(
+            f"SELECT 1 FROM {schema}.sqlite_master WHERE type = 'table' AND name = ?",  # noqa: S608 - schema is an internal constant
+            (table,),
+        ).fetchone()
+        is not None
+    )
+
+
+# A refreshed slice below this share of its published copy is treated as not
+# refreshed. Historical years barely move week to week (2024: 5,703 on every run
+# since 2026-10-20), so the whole-table gate's 90%; Posted churns daily, so the
+# daily solicitations job's 50%. Catches a retry that reads the wrong result set:
+# 2026-11-10's Historical 2025 retry wrote 385 rows against a banner of 385 (it
+# held 5,616 a week earlier; 385 was that run's Posted count).
+_SLICE_FLOOR = {"posted": 0.5}
+_HISTORICAL_SLICE_FLOOR = 0.9
+
+
+def carry_forward_events(
+    db_path: Path,
+    prev_path: Path,
+    fetch_prev,
+    *,
+    years: tuple[int, ...] | None = None,
+    include_posted: bool = True,
+) -> list[dict]:
+    """Replace each event slice this run did not really refresh with its published copy.
+
+    The weekly refresh starts from an empty store, so a slice that timed out (or
+    that ``--budget-minutes`` skipped) is simply absent; a slice that "completed"
+    can still be wrong when the overlay served another search's results, because
+    the banner it is checked against comes from the same wrong page. Publishing
+    either would drop good published rows, and refusing to publish throws away
+    the run's fresh registry (2026-11-10: registry fine; Historical 2026 failed
+    twice and Historical 2025's retry held a Posted-sized result set; nothing
+    published, and the registry went two weeks without a publish). Replacing the
+    slice keeps both: its published rows and ``events_meta`` row are copied
+    unchanged, so its ``extracted_at`` still shows its true age.
+
+    A slice is replaced when it is absent, or when it holds fewer rows than its
+    floor (``_SLICE_FLOOR``) of the published copy. ``fetch_prev(path) -> bool``
+    downloads the published store to ``prev_path``. False with a slice absent
+    fails closed (no store is safe to publish); False with every slice present
+    skips the comparison and leaves the store alone, so the shrink gate's own
+    fetch decides, as before. Returns one ``{"slice", "rows", "extracted_at",
+    "reason"}`` per replaced slice (empty when the run refreshed everything). A
+    slice the published store never had (a new year after a rollover) has
+    ``rows`` 0 and ``extracted_at`` None and stays as the run left it. Years
+    outside the window still age out, as in ``extract_events``.
+    """
+    want = [
+        key
+        for key, _ in _event_slice_queue(
+            default_event_years() if years is None else years, include_posted
+        )
+    ]
+    db_path, prev_path = Path(db_path), Path(prev_path)
+    if not db_path.exists():
+        raise EprocureError(f"{db_path} not found — the registry extract writes it first")
+    con = sqlite3.connect(db_path)
+    try:
+        banked = (
+            dict(con.execute("SELECT slice_key, rows FROM events_meta"))
+            if _has_table(con, "main", "events_meta")
+            else {}
+        )
+    finally:
+        con.close()
+    missing = [k for k in want if k not in banked]
+    if not fetch_prev(prev_path):
+        if missing:
+            raise EprocureError(
+                f"Event slice(s) {', '.join(missing)} did not refresh and the published "
+                "eprocure.db could not be fetched to carry them forward; NOT publishing "
+                "(the published copy keeps them)."
+            )
+        print(
+            "WARN: could not fetch the published eprocure.db; per-slice shrink check "
+            "skipped (the shrink gate still compares whole tables)"
+        )
+        return []
+
+    cols = ", ".join((*_EVENT_COLUMNS, "slice_key", "extracted_at"))
+    carried: list[dict] = []
+    con = sqlite3.connect(db_path, uri=True)
+    try:
+        con.execute("ATTACH DATABASE ? AS prev", (f"{prev_path.resolve().as_uri()}?mode=ro",))
+        has_prev = _has_table(con, "prev", "events") and _has_table(con, "prev", "events_meta")
+        _ensure_events_tables(con)
+        for key in want:
+            meta = (
+                con.execute(
+                    "SELECT banner_total, rows, extracted_at FROM prev.events_meta "
+                    "WHERE slice_key = ?",
+                    (key,),
+                ).fetchone()
+                if has_prev
+                else None
+            )
+            if key not in banked:
+                reason = "not refreshed"
+            elif meta is not None and banked[key] < int(
+                meta[1] * _SLICE_FLOOR.get(key, _HISTORICAL_SLICE_FLOOR)
+            ):
+                floor = _SLICE_FLOOR.get(key, _HISTORICAL_SLICE_FLOOR)
+                reason = (
+                    f"shrank to {banked[key]} rows, below {floor:.0%} of the published {meta[1]}"
+                )
+            else:
+                continue  # refreshed, and plausibly complete
+            if meta is None:
+                carried.append({"slice": key, "rows": 0, "extracted_at": None, "reason": reason})
+                continue
+            con.execute("DELETE FROM events WHERE slice_key = ?", (key,))
+            n = con.execute(
+                f"INSERT INTO events ({cols}) SELECT {cols} FROM prev.events WHERE slice_key = ?",  # noqa: S608 - internal constants
+                (key,),
+            ).rowcount
+            if n != meta[1]:
+                raise EprocureError(
+                    f"Published slice {key!r} holds {n} rows but its events_meta records "
+                    f"{meta[1]} — not carrying a slice that disagrees with itself; NOT publishing."
+                )
+            con.execute(
+                "INSERT OR REPLACE INTO events_meta (slice_key, banner_total, rows, extracted_at) "
+                "VALUES (?, ?, ?, ?)",
+                (key, *meta),
+            )
+            carried.append({"slice": key, "rows": n, "extracted_at": meta[2], "reason": reason})
+        con.commit()  # all-or-nothing: an error above rolls back on close
+    finally:
+        con.close()
+    return carried
 
 
 # ------------------------------------------------------------------------- CLI

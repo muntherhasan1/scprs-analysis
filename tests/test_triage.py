@@ -221,3 +221,98 @@ def test_cli_classify_cancel_skips_routine_drops(tmp_path, capsys, monkeypatch):
 
     assert run("Summary refresh") == "dropped"
     assert run("Enrich (Wave 2)") == "skip"  # fires several times a day
+
+
+# -------------------------------------------------------------- failure evidence
+
+_DIGEST = (
+    "failure evidence [events-historical-2026-attempt1]: title='Event Search'; "
+    "url=https://caleprocure.ca.gov/pages/Events-BS3/event-search.aspx; "
+    "1 request(s) in flight, oldest 118s: POST https://caleprocure.ca.gov/nlx3/psc/x"
+)
+
+
+def test_report_quotes_failure_evidence_and_links_the_artifact():
+    r = triage.build_report(
+        "eProcure registry refresh",
+        ["Extract events (Posted + recent Historical years)"],
+        "https://run/9",
+        evidence=[_DIGEST],
+        evidence_url="https://run/9/artifacts/77",
+    )
+    body = r["body"]
+    assert "### What the page showed" in body
+    assert f"```text\n{_DIGEST}\n```" in body
+    assert "https://run/9/artifacts/77" in body
+    # evidence leads: it comes before the generic hints
+    assert body.index("What the page showed") < body.index("Likely cause")
+
+
+def test_report_evidence_is_fenced_capped_and_cannot_break_out():
+    """Page text comes from an outside site: it must stay inside the code fence
+    (no rendered markdown, no @mentions) and the section stays bounded."""
+    hostile = "failure evidence [x]: title='```\n@someone **bold**'" + "y" * 2000
+    r = triage.build_report("CI", [], "https://run/1", evidence=[hostile] * 12)
+    section = r["body"].split("### What the page showed", 1)[1].split("###", 1)[0]
+    assert section.count("```") == 2  # only our own fence
+    assert section.count("failure evidence [x]") == triage.EVIDENCE_LINES
+    assert all(len(line) <= triage.EVIDENCE_LINE_CHARS for line in section.splitlines())
+
+
+def test_report_without_evidence_is_unchanged():
+    r = triage.build_report("CI", [], "https://run/1")
+    assert "What the page showed" not in r["body"]
+
+
+def test_triage_step_gathers_evidence_from_the_failed_run(tmp_path):
+    """Runs triage.yml's own step against a fake `gh`: the evidence line in the
+    failed job's log and the failure-evidence artifact reach the new issue."""
+    import os
+    import shutil
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    import yaml
+
+    repo = Path(__file__).resolve().parent.parent
+    wf = yaml.safe_load((repo / ".github/workflows/triage.yml").read_text(encoding="utf-8"))
+    script = next(s for s in wf["jobs"]["triage"]["steps"] if s["name"] == "Triage")["run"]
+    gh = tmp_path / "gh"
+    gh.write_text(
+        "#!/bin/bash\n"
+        'case "$*" in\n'
+        '  "api repos/o/r/actions/runs/1/jobs"*) echo 11 ;;\n'
+        f'  "api repos/o/r/actions/jobs/11/logs"*) cat "{tmp_path / "job.log"}" ;;\n'
+        '  "api repos/o/r/actions/runs/1/artifacts"*) echo 77 ;;\n'
+        '  "issue list"*) echo "" ;;\n'
+        '  "run view"*) echo "Extract events (Posted + recent Historical years)" ;;\n'
+        '  "issue create"*) shift 2; while [ $# -gt 0 ]; do\n'
+        '      [ "$1" = "--body" ] && printf "%s" "$2" > body.md; shift; done ;;\n'
+        "esac\n",
+        newline="\n",
+    )
+    gh.chmod(0o755)
+    (tmp_path / "job.log").write_text(
+        "2026-11-10T13:16:12.8123Z events historical:2026: attempt failed\n"
+        f"2026-11-10T13:16:12.9123Z {_DIGEST}\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "step.sh").write_text(script, encoding="utf-8", newline="\n")
+    env = {
+        **os.environ,
+        "PATH": os.pathsep.join(
+            [str(tmp_path), str(Path(sys.executable).parent), os.environ["PATH"]]
+        ),
+        "PYTHONPATH": str(repo),
+        "GITHUB_REPOSITORY": "o/r",
+        "WF": "eProcure registry refresh",
+        "WF_PATH": ".github/workflows/eprocure-refresh.yml",
+        "CONCLUSION": "failure",
+        "RUN_URL": "https://github.com/o/r/actions/runs/1",
+        "RUN_ID": "1",
+    }
+    subprocess.run([shutil.which("bash"), "step.sh"], cwd=tmp_path, env=env, check=True)  # noqa: S603
+    body = (tmp_path / "body.md").read_text(encoding="utf-8")
+    assert _DIGEST in body
+    assert "https://github.com/o/r/actions/runs/1/artifacts/77" in body

@@ -97,6 +97,38 @@ def test_rare_writer_step_flags_stale_and_missing_runs(tmp_path):
     assert "no successful 'Operational backup' run" in finding
 
 
+@pytest.mark.skipif(not shutil.which("bash"), reason="needs bash")
+def test_alert_body_carries_every_finding(tmp_path):
+    """Runs the alert step's own bash against a fake `gh` that records the
+    comment body. Every finding output (F1-F4) must reach the issue: issue #197
+    collected ten comments with an empty findings list because the rare-writer
+    finding (F4, e.g. a stale eProcure registry) was gated on but never written."""
+    script = next(s for s in _monitor_steps() if s["name"] == "Alert on findings")["run"]
+    gh = tmp_path / "gh"
+    gh.write_text(
+        "#!/bin/bash\n"
+        'case "$*" in\n'
+        '  "issue list"*) echo 197 ;;\n'
+        '  "issue comment"*) printf "%s" "$5" > body.txt ;;\n'
+        "esac\n",
+        newline="\n",
+    )
+    gh.chmod(0o755)
+    (tmp_path / "step.sh").write_text(script, encoding="utf-8", newline="\n")
+    findings = {f"F{i}": f"finding number {i}" for i in range(1, 5)}
+    env = {
+        **os.environ,
+        **findings,
+        "PATH": f"{tmp_path}{os.pathsep}{os.environ['PATH']}",
+        "ALERT_LABEL": "pipeline-monitor-alert",
+        "RUN_URL": "https://example.invalid/run",
+    }
+    subprocess.run([shutil.which("bash"), "step.sh"], cwd=tmp_path, env=env, check=True)  # noqa: S603
+    body = (tmp_path / "body.txt").read_text(encoding="utf-8")
+    for text in findings.values():
+        assert f"- {text}" in body
+
+
 def test_rare_writer_finding_gates_alert_ping_and_recovery():
     by_name = {s["name"]: s.get("if", "") for s in _monitor_steps()}
     assert "steps.rare.outputs.finding != ''" in by_name["Alert on findings"]
