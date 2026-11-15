@@ -47,6 +47,12 @@ _METRICS: dict[str, str] = {
     "departments": "SELECT COUNT(*) FROM dim_department",
     "cmas_agreements": "SELECT COUNT(*) FROM gold_cmas_agreement",
     "cmas_matched_suppliers": "SELECT COUNT(*) FROM gold_supplier_cmas",
+    # Term-end coverage, and the recompete window it feeds (Contract Lens).
+    "documents_with_end_date": "SELECT COUNT(end_date) FROM lv_fact_document",
+    "active_procurement_ending_next_365_days": (
+        "SELECT COUNT(*) FROM gold_procurement WHERE status = 'Active' "
+        "AND end_date BETWEEN date('now') AND date('now', '+365 days')"
+    ),
 }
 
 # A row-count drop beyond this fraction is flagged (intentional shrinks happen, but
