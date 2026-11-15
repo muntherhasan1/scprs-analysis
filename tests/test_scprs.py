@@ -80,7 +80,7 @@ def test_download_range_bisects_on_export_timeout(monkeypatch):
 
     calls = []
 
-    def fake_extract(bu, frm, to, *, out_dir=None):
+    def fake_extract(bu, frm, to, *, out_dir=None, capture_timeouts=True):
         a, b = scprs._parse_date(frm), scprs._parse_date(to)
         calls.append((frm, to))
         if (b - a).days > 20:  # "too big" -> the site times out generating it
@@ -98,7 +98,7 @@ def test_download_range_bisects_on_export_timeout(monkeypatch):
 def test_download_range_reraises_when_single_day_times_out(monkeypatch):
     import pytest
 
-    def always_timeout(bu, frm, to, *, out_dir=None):
+    def always_timeout(bu, frm, to, *, out_dir=None, capture_timeouts=True):
         raise scprs.ExtractTimeout("simulated")
 
     monkeypatch.setattr(scprs, "download_extract", always_timeout)
@@ -114,7 +114,7 @@ def test_download_range_splits_on_row_cap_without_dialog(monkeypatch):
     monkeypatch.setattr(scprs, "ROW_CAP", 10)  # keep test frames tiny
     calls = []
 
-    def fake_extract(bu, frm, to, *, out_dir=None):
+    def fake_extract(bu, frm, to, *, out_dir=None, capture_timeouts=True):
         a, b = scprs._parse_date(frm), scprs._parse_date(to)
         calls.append((frm, to))
         # truncated flag deliberately False (simulates a reworded dialog); path
@@ -171,3 +171,138 @@ def test_wait_for_results_times_out_instead_of_guessing():
     rather than guess the size from page text."""
     with pytest.raises(scprs.ExtractTimeout):
         scprs._wait_for_results(_SlowGrid(10**9, ""), 5_000)
+
+
+# -------------------------------------------------------------- failure evidence
+# download_range bisects on ExtractTimeout, so most export timeouts are routine:
+# only a timeout download_range re-raises (single day / max depth) is a failure
+# worth evidence, or the 8-capture cap would be spent on routine splits. Direct
+# callers (recon, outliers) get capture by default; non-timeout errors always
+# capture.
+
+
+def test_download_range_asks_for_evidence_only_on_the_timeout_it_reraises(monkeypatch):
+    calls = []
+
+    def always_times_out(bu, a, b, *, out_dir, capture_timeouts):
+        calls.append((a, b, capture_timeouts))
+        raise scprs.ExtractTimeout("export timed out")
+
+    monkeypatch.setattr(scprs, "download_extract", always_times_out)
+    with pytest.raises(scprs.ExtractTimeout):
+        scprs.download_range("0250", "01/01/2025", "01/04/2025", log=lambda *a: None)
+    assert calls == [
+        ("01/01/2025", "01/04/2025", False),
+        ("01/01/2025", "01/02/2025", False),
+        ("01/01/2025", "01/01/2025", True),  # unsplittable: this one is the failure
+    ]
+
+
+class _ExtractPage:
+    url = scprs.SEARCH_URL
+
+    def __init__(self, goto_error=None):
+        self.goto_error, self.vals, self.events = goto_error, {}, []
+        self.keyboard = self
+
+    def on(self, *_a):
+        pass
+
+    def goto(self, *_a, **_k):
+        if self.goto_error:
+            raise self.goto_error
+
+    def click(self, *_a):
+        pass
+
+    def fill(self, sel, value):
+        self.vals[sel] = value
+
+    def press(self, *_a):
+        pass
+
+    def locator(self, sel):
+        page = self
+
+        class Loc:
+            def press_sequentially(self, value, delay=0):
+                page.vals[sel] = value
+
+        return Loc()
+
+    def input_value(self, sel):
+        return self.vals.get(sel, "")
+
+    def wait_for_timeout(self, *_a):
+        pass
+
+    def inner_text(self, *_a):
+        return "Processing..."  # the grid never renders
+
+    def screenshot(self, *, path, **_k):
+        self.events.append("capture")
+        Path(path).write_bytes(b"png")
+        return b"png"
+
+    def title(self):
+        return "SCPRS search"
+
+    def evaluate(self, *_a):
+        return "Processing..."
+
+    def content(self):
+        return "<html></html>"
+
+
+def _extract(monkeypatch, page, **kw):
+    class Browser:
+        def new_context(self, **_k):
+            class Ctx:
+                def new_page(self):
+                    return page
+
+            return Ctx()
+
+        def close(self):
+            page.events.append("browser-close")
+
+    class Playwright:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_a):
+            return False
+
+        @property
+        def chromium(self):
+            return self
+
+        def launch(self, **_k):
+            return Browser()
+
+    monkeypatch.setattr(scprs, "sync_playwright", Playwright)
+    return scprs.download_extract("0250", "06/01/2025", "06/30/2025", **kw)
+
+
+@pytest.mark.parametrize("capture", [True, False])
+def test_extract_timeout_capture_follows_the_flag(monkeypatch, tmp_path, capture):
+    page = _ExtractPage(goto_error=scprs.PWTimeout("Timeout 120000ms exceeded."))
+    with pytest.raises(scprs.ExtractTimeout, match="Timed out driving SCPRS search"):
+        _extract(monkeypatch, page, out_dir=tmp_path, capture_timeouts=capture)
+    assert page.events == (["capture", "browser-close"] if capture else ["browser-close"])
+
+
+def test_extract_grid_timeout_is_captured_and_still_an_extract_timeout(monkeypatch, tmp_path):
+    """_wait_for_results raises ExtractTimeout itself (not a Playwright timeout);
+    it must still reach download_range as ExtractTimeout, after the capture."""
+    page = _ExtractPage()
+    with pytest.raises(scprs.ExtractTimeout, match="no row-count banner"):
+        _extract(monkeypatch, page, out_dir=tmp_path, timeout_ms=3000)
+    assert page.events == ["capture", "browser-close"]
+
+
+def test_extract_non_timeout_errors_always_capture(monkeypatch, tmp_path):
+    page = _ExtractPage(goto_error=RuntimeError("net::ERR_EMPTY_RESPONSE"))
+    with pytest.raises(RuntimeError, match="ERR_EMPTY_RESPONSE"):
+        _extract(monkeypatch, page, out_dir=tmp_path, capture_timeouts=False)
+    assert page.events == ["capture", "browser-close"]

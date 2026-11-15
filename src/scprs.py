@@ -33,6 +33,8 @@ from pathlib import Path
 from playwright.sync_api import TimeoutError as PWTimeout
 from playwright.sync_api import sync_playwright
 
+from src.failure_evidence import PageWatch
+
 # Chromium needs --no-sandbox when running as non-root in a container; set the
 # PLAYWRIGHT_NO_SANDBOX env var there (the Dockerfile does). No effect locally.
 _CHROMIUM_ARGS = ["--no-sandbox"] if os.environ.get("PLAYWRIGHT_NO_SANDBOX") else []
@@ -125,11 +127,17 @@ def download_extract(
     out_dir: Path = DATA_DIR,
     headless: bool = True,
     timeout_ms: int = 120_000,
+    capture_timeouts: bool = True,
 ) -> Extract:
     """Download the SCPRS *summary* extract for one business unit + date range.
 
     Dates are MM/DD/YYYY. (Line-item detail comes from the drill-down, not the
     unreliable "Download Detail Information" export — see collect_po_details.)
+
+    A failure captures what the page showed (src/failure_evidence.py) before the
+    browser closes. ``capture_timeouts=False`` skips that for timeouts only:
+    download_range passes it on ranges it will bisect, where a timeout is the
+    routine "too big" signal, not a failure. Other errors always capture.
     """
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -137,6 +145,7 @@ def download_extract(
         browser = p.chromium.launch(headless=headless, args=_CHROMIUM_ARGS)
         ctx = browser.new_context(accept_downloads=True)
         page = ctx.new_page()
+        watch = PageWatch(page, f"extract-{business_unit}-{from_date}-{to_date}")
         try:
             page.goto(SEARCH_URL, wait_until="networkidle", timeout=timeout_ms)
             _type(page, _BU, business_unit)
@@ -172,8 +181,17 @@ def download_extract(
             )
             dl.save_as(str(dest))
             return Extract(business_unit, from_date, to_date, dest, truncated, False)
+        except ExtractTimeout as e:  # _wait_for_results: no grid banner in time
+            if capture_timeouts:
+                watch.capture(e)
+            raise
         except PWTimeout as e:
+            if capture_timeouts:
+                watch.capture(e)
             raise ExtractTimeout(f"Timed out driving SCPRS search: {e}") from e
+        except Exception as e:
+            watch.capture(e)
+            raise
         finally:
             browser.close()
 
@@ -209,7 +227,15 @@ def download_range(
 
     def rec(a: date, b: date, depth: int) -> None:
         try:
-            res = download_extract(business_unit, _fmt_date(a), _fmt_date(b), out_dir=out_dir)
+            res = download_extract(
+                business_unit,
+                _fmt_date(a),
+                _fmt_date(b),
+                out_dir=out_dir,
+                # A timeout here is re-raised (not bisected) only at a single day
+                # or max depth: capture evidence for that one, not routine splits.
+                capture_timeouts=a == b or depth >= max_depth,
+            )
         except ExtractTimeout:
             # Too big to export in the time budget. Bisect like a cap hit; only a
             # single day that still times out is a genuine failure worth raising.
@@ -419,6 +445,10 @@ def collect_po_details(
         browser = p.chromium.launch(headless=headless, args=_CHROMIUM_ARGS)
         ctx = browser.new_context()
         page = ctx.new_page()
+        # Evidence for every way a day ends incomplete that a log line can't
+        # explain: an exception, a grid that never renders, a Next that never
+        # advances (src/failure_evidence.py). Budget/max_docs stops are normal.
+        watch = PageWatch(page, f"drill-{business_unit}-{from_date}-{to_date}")
         try:
             page.goto(SEARCH_URL, wait_until="networkidle", timeout=timeout_ms)
             _type(page, _BU, business_unit)
@@ -444,6 +474,10 @@ def collect_po_details(
                 # never rendered. Recording this as a done day with 0 documents
                 # hid whole days from enrichment (e.g. 3600 2023-08-16, 30 docs).
                 log("results grid did not load; leaving the day incomplete")
+                watch.capture(
+                    f"results grid did not load for {business_unit} {from_date}..{to_date} "
+                    "(neither rows nor 'No Records Found' within the poll)"
+                )
                 if stats is not None:
                     stats["complete"] = False
                 return []
@@ -527,6 +561,10 @@ def collect_po_details(
                         continue
                 if not advanced:
                     log(f"  next-page click did not advance past page {page_no}; stopping early")
+                    watch.capture(
+                        f"next-page click did not advance past page {page_no} for "
+                        f"{business_unit} {from_date}..{to_date} (~90s)"
+                    )
                     complete = False
                     break
                 page_no += 1
@@ -547,6 +585,9 @@ def collect_po_details(
                         "complete": complete,
                     }
                 )
+        except Exception as e:
+            watch.capture(e)
+            raise
         finally:
             browser.close()
     return results

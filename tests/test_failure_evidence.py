@@ -181,3 +181,34 @@ def test_listener_errors_never_reach_playwright(tmp_path):
     for event in ("console", "request", "requestfailed", "response"):
         page.emit(event, object())  # attributes missing: must be swallowed, and counted
     assert watch.listener_errors == 4
+
+
+def test_every_browser_workflow_uploads_failure_evidence():
+    """A job that installs a browser must upload data/failure-evidence/ on every
+    outcome, under the name prefix triage.yml looks for — or its captures are
+    written on the runner and thrown away with it."""
+    from pathlib import Path
+
+    import yaml
+
+    wf_dir = Path(__file__).resolve().parent.parent / ".github/workflows"
+    browser_jobs = []
+    for path in sorted(wf_dir.glob("*.yml")):
+        wf = yaml.safe_load(path.read_text(encoding="utf-8"))
+        for job_id, job in wf["jobs"].items():
+            steps = job.get("steps", [])
+            if not any("playwright install" in (s.get("run") or "") for s in steps):
+                continue
+            browser_jobs.append(f"{path.name}:{job_id}")
+            uploads = [
+                s
+                for s in steps
+                if str(s.get("uses", "")).startswith("actions/upload-artifact")
+                and (s.get("with") or {}).get("path", "").rstrip("/") == "data/failure-evidence"
+            ]
+            assert uploads, f"{path.name}:{job_id} drives a browser but never uploads its evidence"
+            assert (
+                uploads[0].get("if") == "always()"
+            ), f"{path.name}:{job_id} upload must be always()"
+            assert str(uploads[0]["with"]["name"]).startswith("failure-evidence")
+    assert len(browser_jobs) >= 6, browser_jobs  # the detection itself still finds them
