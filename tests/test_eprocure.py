@@ -505,3 +505,125 @@ def test_refresh_workflow_publishes_the_registry_when_event_slices_fail():
     assert "steps.events.outcome == 'failure'" in fail["if"]
     assert "steps.carry.outputs.carried != ''" in fail["if"]
     assert "${{" not in fail["run"]  # inputs via env:, never inline in bash
+
+
+# ------------------------------------------------------------ failure evidence
+
+
+def _fake_playwright(monkeypatch, tmp_path, goto_error, calls):
+    from pathlib import Path
+    from types import SimpleNamespace
+
+    from src import failure_evidence
+
+    monkeypatch.setattr(failure_evidence, "EVIDENCE_DIR", tmp_path / "evidence")
+    failure_evidence.PageWatch.reset_limit()
+
+    class Page:
+        url = eprocure.EVENTS_URL
+
+        def on(self, *_a):
+            pass
+
+        def goto(self, *_a, **_k):
+            raise goto_error
+
+        def screenshot(self, *, path, **_k):
+            calls.append("capture")
+            Path(path).write_bytes(b"png")
+            return b"png"
+
+        def title(self):
+            return "Event Search"
+
+        def evaluate(self, *_a):
+            return ""
+
+        def content(self):
+            return "<html></html>"
+
+    class Ctx:
+        def new_page(self):
+            return Page()
+
+        def close(self):
+            calls.append("close")
+
+    class Browser:
+        def new_context(self, **_k):
+            return Ctx()
+
+        def close(self):
+            calls.append("browser-close")
+
+    class Playwright:
+        chromium = SimpleNamespace(launch=lambda **_k: Browser())
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_a):
+            return False
+
+    monkeypatch.setattr(eprocure, "sync_playwright", Playwright)
+    return tmp_path / "evidence"
+
+
+def _captured(evidence_dir):
+    return sorted(d.name.split("Z-", 1)[1] for d in evidence_dir.iterdir())
+
+
+def test_events_capture_evidence_on_each_attempt_before_the_session_closes(monkeypatch, tmp_path):
+    calls = []
+    evidence = _fake_playwright(
+        monkeypatch, tmp_path, eprocure.PWTimeout("Timeout 120000ms exceeded."), calls
+    )
+    with pytest.raises(eprocure.EprocureError, match="posted"):
+        eprocure.download_events(lambda *_a: None, years=())
+    assert calls == ["capture", "close", "capture", "close", "browser-close"]
+    assert _captured(evidence) == ["events-posted-attempt1", "events-posted-attempt2"]
+
+
+def test_events_capture_evidence_on_an_unexpected_error_too(monkeypatch, tmp_path):
+    """The 2026-10 registry failures were net::ERR_EMPTY_RESPONSE from goto — a
+    Playwright Error, not a timeout — which ends the run without a retry."""
+    calls = []
+    evidence = _fake_playwright(
+        monkeypatch, tmp_path, RuntimeError("net::ERR_EMPTY_RESPONSE"), calls
+    )
+    with pytest.raises(RuntimeError, match="ERR_EMPTY_RESPONSE"):
+        eprocure.download_events(lambda *_a: None, years=())
+    assert calls[:2] == ["capture", "close"]
+    assert _captured(evidence) == ["events-posted-attempt1"]
+
+
+@pytest.mark.parametrize(
+    ("error", "raised"),
+    [
+        (eprocure.PWTimeout("Timeout 180000ms exceeded."), eprocure.EprocureError),
+        (RuntimeError("net::ERR_EMPTY_RESPONSE"), RuntimeError),
+    ],
+)
+def test_registry_captures_evidence_before_the_browser_closes(monkeypatch, tmp_path, error, raised):
+    calls = []
+    evidence = _fake_playwright(monkeypatch, tmp_path, error, calls)
+    with pytest.raises(raised):
+        eprocure.download_registry(out_dir=tmp_path)
+    assert calls == ["capture", "browser-close"]
+    assert _captured(evidence) == ["registry"]
+
+
+def test_extract_events_logs_the_site_status_mix(monkeypatch, tmp_path, capsys):
+    def fake_download(on_slice, **_kw):
+        rows = [
+            eprocure._tidy_event(_raw_event(event_id=str(i), status=st), "historical", 2025)
+            for i, st in enumerate(["Event Completed", "Event Completed", "Canceled"])
+        ]
+        on_slice("historical:2025", rows, 3)
+        return []
+
+    monkeypatch.setattr(eprocure, "download_events", fake_download)
+    eprocure.extract_events(tmp_path / "e.db", years=(2025,), include_posted=False)
+    assert "events historical:2025: site status mix Event Completed 2, Canceled 1" in (
+        capsys.readouterr().out
+    )

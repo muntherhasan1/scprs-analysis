@@ -360,10 +360,47 @@ def classify_cancel(jobs: list[dict], timeout_minutes: int | None) -> str:
     return "interrupted"
 
 
+# Failure evidence (src/failure_evidence.py) quoted in the issue: bounded, and
+# fenced because it carries text from outside sites (titles, page text).
+EVIDENCE_LINES = 8
+EVIDENCE_LINE_CHARS = 600
+
+
+def _evidence_section(evidence: list[str], evidence_url: str) -> str:
+    lines = [ln.strip() for ln in evidence if ln.strip()][:EVIDENCE_LINES]
+    if not lines and not evidence_url:
+        return ""
+    out = "### What the page showed\n"
+    if lines:
+        safe = [
+            ln.replace("`", "'")[: EVIDENCE_LINE_CHARS - 1]
+            + ("…" if len(ln) >= EVIDENCE_LINE_CHARS else "")
+            for ln in lines
+        ]
+        out += "```text\n" + "\n".join(safe) + "\n```\n"
+    if evidence_url:
+        out += (
+            f"Screenshots, page HTML and network state: {evidence_url} "
+            "(run artifact, kept 14 days)\n"
+        )
+    return out + "\n"
+
+
 def build_report(
-    workflow: str, failed_steps: list[str], run_url: str, conclusion: str = "failure"
+    workflow: str,
+    failed_steps: list[str],
+    run_url: str,
+    conclusion: str = "failure",
+    *,
+    evidence: list[str] | None = None,
+    evidence_url: str = "",
 ) -> dict[str, str]:
-    """Build the triage issue (title, body, marker) for a failed workflow run."""
+    """Build the triage issue (title, body, marker) for a failed workflow run.
+
+    ``evidence`` are the ``failure evidence [...]`` digest lines the failed jobs
+    printed and ``evidence_url`` the run's failure-evidence artifact; when
+    present they lead the "likely cause" hints, because they say what the page
+    actually showed."""
     hints = _HINTS.get(workflow, {})
     steps = [s.strip() for s in failed_steps if s.strip()]
 
@@ -415,7 +452,10 @@ def build_report(
         f"## ⚠️ `{workflow}` {verb}\n\n"
         f"**Run:** {run_url}\n\n"
         f"**Failed step(s):** {steps_line}\n\n"
-        f"### Likely cause & what to check\n" + "\n".join(f"- {h}" for h in specific) + "\n\n---\n"
+        + _evidence_section(evidence or [], evidence_url)
+        + "### Likely cause & what to check\n"
+        + "\n".join(f"- {h}" for h in specific)
+        + "\n\n---\n"
         "_Automated triage. This issue **auto-closes** when a later run of this "
         "workflow succeeds._"
     )
@@ -434,6 +474,12 @@ def _cli() -> None:
         default="failure",
         help="`failure`, `cancelled` (a timeout kill) or `dropped` (cancelled while queued)",
     )
+    rep.add_argument(
+        "--evidence-file",
+        default=None,
+        help="file of `failure evidence [...]` digest lines from the failed jobs' logs",
+    )
+    rep.add_argument("--evidence-url", default="", help="the run's failure-evidence artifact")
     cls = sub.add_parser(
         "classify-cancel",
         help="Print what to do with a cancelled run: timeout | dropped | skip",
@@ -443,7 +489,20 @@ def _cli() -> None:
     cls.add_argument("--jobs-json", required=True, help="file holding the REST jobs response")
     args = ap.parse_args()
     if args.cmd == "report":
-        report = build_report(args.workflow, args.steps.split(","), args.run_url, args.conclusion)
+        evidence: list[str] = []
+        if args.evidence_file:
+            try:
+                evidence = Path(args.evidence_file).read_text(encoding="utf-8").splitlines()
+            except OSError:
+                evidence = []  # evidence is a bonus; never block the issue on it
+        report = build_report(
+            args.workflow,
+            args.steps.split(","),
+            args.run_url,
+            args.conclusion,
+            evidence=evidence,
+            evidence_url=args.evidence_url,
+        )
         print(json.dumps(report))
     elif args.cmd == "classify-cancel":
         try:

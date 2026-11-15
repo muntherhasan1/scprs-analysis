@@ -45,12 +45,14 @@ import argparse
 import os
 import re
 import sqlite3
+from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 
 from playwright.sync_api import TimeoutError as PWTimeout
 from playwright.sync_api import sync_playwright
 
+from src.failure_evidence import PageWatch
 from src.supplier_master import normalize_name
 
 # Chromium needs --no-sandbox when running as non-root in a container; set the
@@ -117,6 +119,7 @@ def download_registry(
         browser = p.chromium.launch(headless=headless, args=_CHROMIUM_ARGS)
         ctx = browser.new_context(accept_downloads=True)
         page = ctx.new_page()
+        watch = PageWatch(page, "registry")
         try:
             page.goto(REGISTRY_URL, wait_until="domcontentloaded", timeout=timeout_ms)
             page.wait_for_selector(f'[id="{_CERT_FLAG.format(0)}"]', timeout=timeout_ms)
@@ -150,7 +153,11 @@ def download_registry(
             dl_info.value.save_as(str(dest))
             return dest, banner_total
         except PWTimeout as e:
+            watch.capture(e)
             raise EprocureError(f"Timed out driving the registry search: {e}") from e
+        except Exception as e:
+            watch.capture(e)
+            raise
         finally:
             browser.close()
 
@@ -533,8 +540,10 @@ def download_events(
                 # pager permanently hidden, stalling pagination. Every clean
                 # recon run was a session's first search; mirror that.
                 ctx = browser.new_context(user_agent=_BROWSER_UA)
+                watch = None
                 try:
                     page = ctx.new_page()
+                    watch = PageWatch(page, f"events-{key}-attempt{attempts[key]}")
                     page.goto(EVENTS_URL, wait_until="domcontentloaded", timeout=timeout_ms)
                     page.wait_for_selector(f"{_EVENT_STATUS}:visible", timeout=timeout_ms)
                     page.wait_for_timeout(5000)
@@ -552,11 +561,19 @@ def download_events(
                     status = "historical" if year else "posted"
                     on_slice(key, [_tidy_event(r, status, year) for r in rows], total)
                 except (EprocureError, PWTimeout) as e:
+                    if watch:
+                        watch.capture(e)
                     if attempts[key] < 2:
                         print(f"events {key}: attempt failed ({e}); retrying once at the end")
                         queue.append((key, year))
                     else:
                         failed.append(f"{key}: {e}")
+                except Exception as e:
+                    # Anything else (e.g. goto's net::ERR_EMPTY_RESPONSE) ends the
+                    # run: keep what the page showed before the context closes.
+                    if watch:
+                        watch.capture(e)
+                    raise
                 finally:
                     ctx.close()
         finally:
@@ -650,6 +667,11 @@ def extract_events(
         s = write_events_slice(db_path, key, rows, total)
         summaries.append(s)
         print(f"events {key}: {s['rows']} rows (site banner {total}) -> {db_path.name}")
+        # The site's own status column, so a slice holding another search's
+        # results is visible in the log (2026-11-10: Historical 2025's retry held
+        # 385 rows, that run's Posted count; nothing logged could show why).
+        mix = Counter(r.get("status") or "?" for r in rows).most_common(4)
+        print(f"events {key}: site status mix " + (", ".join(f"{st} {n}" for st, n in mix) or "-"))
 
     skipped = download_events(
         on_slice,

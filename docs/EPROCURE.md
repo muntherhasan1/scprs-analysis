@@ -93,7 +93,12 @@ extracts and publishes `eprocure.db` to the private operational dataset via
    triage opens an issue and the pipeline monitor doesn't count it as a success.
 
 Failures open a triage issue (`src/triage.py` hints under
-"eProcure registry refresh").
+"eProcure registry refresh"). Every browser failure (registry search, each
+event-slice attempt, retried or not) captures what the page showed — screenshot,
+page HTML, in-flight and failed requests, console errors — via
+`src/failure_evidence.py`; the issue quotes the digest and links the
+`failure-evidence-*` run artifact. Each slice also logs the site's own status
+mix, so a slice holding another search's results is visible in the log.
 
 **Daily Posted refresh.** `.github/workflows/eprocure-solicitations.yml` keeps
 the vendor app's open solicitations current between weekly runs. It fetches the

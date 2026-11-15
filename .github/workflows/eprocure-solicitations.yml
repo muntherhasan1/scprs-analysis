@@ -131,3 +131,17 @@ jobs:
 
       - name: Publish eprocure.db to the operational dataset
         run: python -m src.data_sync publish-eprocure
+
+      # What the page showed when a browser step failed: screenshot, page HTML
+      # and network state (src/failure_evidence.py). Runs on every outcome,
+      # including a timeout kill; uploads nothing when nothing failed. Public
+      # repo, so anyone can download it: the capture drops URL query strings and
+      # never records headers, bodies or cookies. Triage links it in the issue.
+      - name: Upload failure evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: failure-evidence-${{ github.run_attempt }}
+          path: data/failure-evidence/
+          if-no-files-found: ignore
+          retention-days: 14
