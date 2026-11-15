@@ -110,6 +110,12 @@ The SCPRS search is a stateful PeopleSoft component driven by a headless browser
   ids are the `_PODET_*` maps; `pandas.read_html` can't handle these tables).
 - Downloaded `.xls` files are actually HTML tables; `load_extract()` cleans the
   PeopleSoft quirks (leading apostrophes on id columns, `$1,234` money).
+- Failures capture what the page showed (`src/failure_evidence.py`: screenshot,
+  HTML, in-flight/failed requests) before the browser closes — every exception,
+  plus `collect_po_details`' silent incompletes (grid never rendered, Next never
+  advanced). `download_extract` skips it for timeouts `download_range` will
+  bisect (`capture_timeouts`), so routine splits don't spend the per-run cap.
+  Workflows upload `data/failure-evidence/`; triage quotes it in the issue.
 
 **Grain / versioning is the central data-modeling concern.** SCPRS documents exist
 at `(document, version)` grain — a document can be re-drilled at several versions.

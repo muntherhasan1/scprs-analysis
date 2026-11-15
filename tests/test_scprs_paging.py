@@ -7,8 +7,11 @@ and a grid that never renders must not read as an empty day. Both used to be
 recorded as done days (2026-10 review)."""
 
 import contextlib
+import json
 
-from src import scprs
+import pytest
+
+from src import failure_evidence, scprs
 
 
 class _Loc:
@@ -47,15 +50,38 @@ class _Loc:
         return doc
 
     def click(self):
-        if self.sel == scprs._NEXT_PAGE:
+        if self.sel == scprs._NEXT_PAGE and not self.page.stuck:
             self.page.pg += 1
 
 
 class _Page:
-    def __init__(self, pages, total, loaded=True):
+    url = scprs.SEARCH_URL
+
+    def __init__(self, pages, total, loaded=True, stuck=False, goto_error=None):
         self.pages, self.total, self.loaded = pages, total, loaded
+        self.stuck, self.goto_error = stuck, goto_error  # Next never advances / goto fails
         self.pg, self.vals, self.last, self.drilled = 0, {}, None, []
+        self.events: list[str] = []  # "capture" / "browser-close", in order
         self.keyboard = self
+
+    # what failure_evidence.PageWatch needs
+    def on(self, *_a):
+        pass
+
+    def screenshot(self, *, path, **_k):
+        self.events.append("capture")
+        with open(path, "wb") as f:
+            f.write(b"png")
+        return b"png"
+
+    def title(self):
+        return "SCPRS search"
+
+    def evaluate(self, *_a):
+        return self.inner_text("body")
+
+    def content(self):
+        return "<html></html>"
 
     def grid(self):
         return self.pages[self.pg] if self.loaded else []
@@ -70,7 +96,8 @@ class _Page:
         self.vals[sel] = self.vals.get(sel, "") + value
 
     def goto(self, *a, **k):
-        pass
+        if self.goto_error:
+            raise self.goto_error
 
     def click(self, sel):
         pass
@@ -141,7 +168,7 @@ def _fake_playwright(page):
             return Ctx()
 
         def close(self):
-            pass
+            page.events.append("browser-close")
 
     return PW
 
@@ -188,3 +215,48 @@ def test_full_coverage_with_skips_is_complete(monkeypatch):
     docs, stats = _collect(monkeypatch, page, skip_docs={"D2"})
     assert docs == ["D1", "D3", "D4"]
     assert stats == {"total": 4, "drilled": 3, "skipped": 1, "complete": True}
+
+
+# -------------------------------------------------------------- failure evidence
+# collect_po_details captures what the search page showed (src/failure_evidence.py)
+# whenever a day ends up incomplete for a reason a log line can't explain.
+
+
+def _captures():
+    d = failure_evidence.EVIDENCE_DIR
+    return [json.loads((p / "report.json").read_text()) for p in sorted(d.iterdir())]
+
+
+def test_unrendered_grid_captures_what_the_page_showed(monkeypatch):
+    page = _Page([["D1"]], total=1, loaded=False)
+    _collect(monkeypatch, page)
+    [report] = _captures()
+    assert report["label"] == "drill-9999-01-02-2025-01-02-2025"
+    assert "results grid did not load" in report["error"]
+    assert report["visible_text"] == "Processing..."
+    assert page.events == ["capture", "browser-close"]
+
+
+def test_stalled_next_page_captures_what_the_page_showed(monkeypatch):
+    page = _Page([["D1"], ["D2"]], total=2, stuck=True)
+    docs, stats = _collect(monkeypatch, page)
+    assert docs == ["D1"] and stats["complete"] is False  # unchanged behaviour
+    [report] = _captures()
+    assert "next-page click did not advance past page 1" in report["error"]
+    assert page.events == ["capture", "browser-close"]
+
+
+def test_drill_error_is_captured_before_the_browser_closes(monkeypatch):
+    page = _Page([["D1"]], total=1, goto_error=RuntimeError("net::ERR_EMPTY_RESPONSE"))
+    with pytest.raises(RuntimeError, match="ERR_EMPTY_RESPONSE"):
+        _collect(monkeypatch, page)
+    [report] = _captures()
+    assert report["error"] == "RuntimeError: net::ERR_EMPTY_RESPONSE"
+    assert page.events == ["capture", "browser-close"]
+
+
+def test_complete_day_captures_nothing(monkeypatch):
+    page = _Page([["D1", "D2"], ["D3"]], total=3)
+    _, stats = _collect(monkeypatch, page)
+    assert stats["complete"] is True
+    assert _captures() == [] and page.events == ["browser-close"]
