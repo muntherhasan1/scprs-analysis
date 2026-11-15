@@ -1125,6 +1125,10 @@ def build_gold(con: sqlite3.Connection, batch: str, ts: str) -> dict:
           s.purchase_document, s.bill_code, s.status, s.version, s.is_enriched,
           s.has_associated_pos,
           s.first_item_title,                                  -- degenerate attribute
+          -- Term end, degenerate too: dim_date spans the observed START dates only,
+          -- and terms run years past them, so a key would collapse to Unknown.
+          -- Non-ISO text (DQ document_end_date_not_iso) becomes NULL.
+          CASE WHEN s.end_date LIKE '____-__-__' THEN s.end_date END AS end_date,
           COALESCE(dt.date_key, 0)  AS start_date_key,
           dep.dept_key, sup.supplier_key, buy.buyer_key, acq.acq_key,
           s.merchandise_amount, s.freight_tax_misc, s.grand_total,
@@ -1742,7 +1746,8 @@ def _build_marts(con):
                    COALESCE(f.award_class_override, aq.award_class) AS award_class,
                    f.contract_flag,
                    f.purchase_document, f.first_item_title, f.status,
-                   dd.full_date AS start_date, dd.year AS calendar_year, dd.fiscal_year,
+                   dd.full_date AS start_date, f.end_date,
+                   dd.year AS calendar_year, dd.fiscal_year,
                    f.grand_total, f.line_count, f.associated_po_count
             FROM fact_document f
             JOIN dim_supplier s ON s.supplier_key = f.supplier_key
@@ -2004,6 +2009,23 @@ _DQ_CHECKS = [
         "silver_document (blank summary rows, no drill)",
         "SELECT COUNT(*) FROM silver_document WHERE version IS NULL "
         "AND grand_total IS NULL AND start_date IS NULL",
+    ),
+    (
+        # The summary stores ISO dates; a value that isn't one (model._iso keeps
+        # unparseable text as-is) is dropped to NULL in fact_document.end_date.
+        "document_end_date_not_iso",
+        "warn",
+        "silver_document.end_date (dropped from gold)",
+        "SELECT COUNT(*) FROM silver_document WHERE TRIM(COALESCE(end_date, '')) <> '' "
+        "AND end_date NOT LIKE '____-__-__'",
+    ),
+    (
+        # A term that ends before it starts is a data-entry error at the source;
+        # kept as reported, but a recompete list built on end_date must not trust it.
+        "document_ends_before_start",
+        "warn",
+        "gold_document (end_date < start_date)",
+        "SELECT COUNT(*) FROM gold_document WHERE end_date < start_date",
     ),
     (
         # A combined "Type_SubType" string left in acquisition_type silently drops
