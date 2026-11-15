@@ -32,7 +32,8 @@ jobs:
     # Basis: the Posted slice (384 rows, ~2 grid pages) extracted in 36s locally
     # on 2026-10-31; setup (pip + Chromium) is ~3 min. 20 leaves ample margin for
     # a slow overlay and the extractor's one in-session retry.
-    timeout-minutes: 20
+    # Posted ~5 min + bid detail pages (25 min budget) + publish.
+    timeout-minutes: 50
     env:
       PYTHONUNBUFFERED: "1" # a killed run must still show how far it got
       SCPRS_DATASET: ${{ vars.SCPRS_DATASET || 'munther-hasan/scprs-operational-db' }}
@@ -75,6 +76,18 @@ jobs:
 
       - name: Extract the Posted slice
         run: python -m src.eprocure extract-events --posted-only
+
+      # Each open bid's detail page (UNSPSC codes, contractor license classes,
+      # service-area counties, pre-bid conference): never-read bids first, then
+      # the oldest reads, ~1.5 s each. The budget stops cleanly (exit 0) and the
+      # next run resumes. A failure here doesn't block publishing the Posted
+      # slice and the reads banked so far; the last step fails the run instead.
+      - name: Read bid detail pages
+        id: details
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          python -m src.eprocure extract-details --budget-minutes 25 2>&1 | tee details.log
 
       # Two checks before publishing:
       #  1. Everything except Posted is identical to the fetched store (registry
@@ -120,12 +133,36 @@ jobs:
               print("FAIL: Posted shrank below 50% of the previous slice — likely a "
                     "broken search; NOT publishing")
               sys.exit(1)
+          # Detail reads only ever grow for bids still open: a read the previous
+          # store held for a still-Posted bid must still be there.
+          def details(path):
+              con = sqlite3.connect(path)
+              try:
+                  posted = set(con.execute(
+                      "SELECT department_name, event_id FROM events WHERE slice_key = 'posted'"))
+                  has = con.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' "
+                                    "AND name = 'event_details'").fetchone()
+                  read = set(con.execute(
+                      "SELECT department_name, event_id FROM event_details")) if has else set()
+                  return posted, read
+              finally:
+                  con.close()
+          prev_open, prev_read = details("data/eprocure_prev.db")
+          now_open, now_read = details("data/eprocure.db")
+          print(f"bid detail pages: {len(now_read & now_open)} of {len(now_open)} open bids read "
+                f"(previously {len(prev_read & prev_open)} of {len(prev_open)})")
+          lost = (prev_read & now_open) - now_read
+          if lost:
+              print(f"FAIL: {len(lost)} detail reads for still-open bids disappeared, e.g. "
+                    f"{sorted(lost)[:3]}; NOT publishing")
+              sys.exit(1)
           print("OK: gate passed")
           PY
           {
             echo "### eProcure solicitations refresh"
             echo '```'
             cat gate.log
+            tail -n 3 details.log 2>/dev/null || true
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
@@ -145,3 +182,11 @@ jobs:
           path: data/failure-evidence/
           if-no-files-found: ignore
           retention-days: 14
+
+      # The Posted slice and every detail read banked before the failure WERE
+      # published above; this only makes the failure visible (and triaged).
+      - name: Fail the run if bid detail pages failed
+        if: steps.details.outcome == 'failure'
+        run: |
+          echo "::error::Reading bid detail pages failed (see that step's log). The Posted slice and the reads banked before the failure were published; the next run resumes."
+          exit 1

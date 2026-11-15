@@ -97,6 +97,12 @@ jobs:
               else f"{c['slice']}: {c['reason']}; not in the published store either"
               for c in carried
           ] or ["every event slice refreshed this run"]
+          # This run rebuilt eprocure.db from empty; keep the daily job's bid
+          # detail reads for bids that are still open.
+          details = eprocure.carry_forward_event_details(
+              Path("data/eprocure.db"), Path("data/eprocure_prev.db"), data_sync.fetch_eprocure_db
+          )
+          lines.append(f"bid detail pages: {details['carried']} reads carried ({details['reason']})")
           print("\n".join(lines))
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as out:
               out.write(f"carried={', '.join(c['slice'] for c in carried)}\n")

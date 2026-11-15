@@ -639,3 +639,187 @@ def test_extract_events_logs_the_site_status_mix(monkeypatch, tmp_path, capsys):
     assert "events historical:2025: site status mix Event Completed 2, Canceled 1" in (
         capsys.readouterr().out
     )
+
+
+# ---- event detail pages (recon 2026-11-15) -------------------------------------
+# Real reads of two live detail pages (Veterans Affairs flooring, Caltrans SB
+# Minor B), trimmed. Buyer contact fields are on the page but never read.
+_FLOORING = {
+    "event_id": "0000040541",
+    "event_name": "25HS0024 - NCVC Flooring Replacement Service",
+    "dept": "Dept of Veterans Affairs",
+    "format1": "Sell Event",
+    "format2": "RFx",
+    "published": "10/02/2026 3:30PM PDT",
+    "version": "3",
+    "end": "11/16/2026 4:00PM PST",
+    "description": "The Northern California Veterans Cemetery requires Flooring Replacement "
+    "Services to be done on their campus.\nADDENDUMS ADDED***",
+    "conference": "Mandatory",
+    "conf_date": "10/21/2026",
+    "conf_time": "1:00PM",
+    "conf_location": "Northern California Veterans Cemetery Administration Building",
+    "conf_comments": "Attendance for the entire inspection is required in order for bidders "
+    "to be eligible to submit a bid.",
+    "unspsc": ["72152500", "72152506"],
+    "unspsc_desc": [
+        "Special trade construction & maint srvcs - Floor laying",
+        "Special trade construction & maint srvcs - Floor laying - Resilient floor laying",
+    ],
+    "license": ["B", "C-15"],
+    "license_desc": ["General Building Contractor", "Flooring and Floor Covering Contractors"],
+    "area_id": ["045", "052", "053"],
+    "county": ["Shasta", "Tehama", "Trinity"],
+}
+_CALTRANS = {
+    "event_id": "11A4467",
+    "format1": "Sell Event",
+    "format2": "RFx",
+    "published": "10/30/2026 2:00PM PDT",
+    "version": "1",
+    "conference": "Non Mandatory",
+    "conf_date": "",
+    "conf_time": "",
+    "conf_location": "",
+    "conf_comments": "",
+    "unspsc": ["72141000"],
+    "unspsc_desc": ["Heavy construction services - Highway & road construction services"],
+    "license": ["A"],
+    "license_desc": ["General Engineering Contractor"],
+    "area_id": ["013"],
+    "county": ["Imperial"],
+}
+
+
+def test_parse_event_detail_from_live_reads():
+    d = eprocure.parse_event_detail(_FLOORING)
+    assert d["format_type"] == "Sell Event / RFx"
+    assert (d["published_date"], d["event_version"]) == ("2026-10-02", 3)
+    assert d["prebid_mandatory"] == 1 and d["prebid_date"] == "2026-10-21"
+    assert d["prebid_comments"].startswith("Attendance for the entire inspection")
+    assert d["unspsc"][0] == ("72152500", "Special trade construction & maint srvcs - Floor laying")
+    assert [t for t, _ in d["licenses"]] == ["B", "C-15"]
+    assert d["service_areas"] == [("045", "Shasta"), ("052", "Tehama"), ("053", "Trinity")]
+    assert "\n" in d["description"]  # line breaks kept
+
+    c = eprocure.parse_event_detail(_CALTRANS)
+    assert c["prebid_mandatory"] == 0  # "Non Mandatory"
+    assert c["prebid_date"] is None and c["prebid_location"] is None  # blanks -> None
+    # A "Pre Bid Conference(N/A)" section has no conference text at all.
+    na = eprocure.parse_event_detail({**_CALTRANS, "conference": None})
+    assert na["prebid_mandatory"] is None
+
+
+def _posted_db(tmp_path, events):
+    db = tmp_path / "e.db"
+    rows = [
+        eprocure._tidy_event(
+            {
+                "event_id": eid,
+                "event_name": f"Bid {eid}",
+                "department_name": dept,
+                "published_raw": "",
+                "end_raw": end,
+                "status": "Posted",
+            },
+            "posted",
+            None,
+        )
+        for dept, eid, end in events
+    ]
+    eprocure.write_events_slice(db, "posted", rows, banner_total=len(rows))
+    con = sqlite3.connect(db)
+    eprocure._ensure_detail_tables(con)
+    return db, con
+
+
+def test_write_event_detail_replaces_one_event_atomically(tmp_path):
+    db, con = _posted_db(tmp_path, [("Dept of Veterans Affairs", "0000040541", "11/16/2026")])
+    key = ("Dept of Veterans Affairs", "0000040541")
+    d = eprocure.parse_event_detail(_FLOORING)
+    eprocure.write_event_detail(con, *key, "8955", d, "2026-11-15T22:00:00+00:00")
+    eprocure.write_event_detail(
+        con, *key, "8955", {**d, "unspsc": d["unspsc"][:1]}, "2026-11-16T22:00:00+00:00"
+    )
+
+    def count(t):
+        return con.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0]  # noqa: S608 - test constant
+
+    assert count("event_details") == 1
+    assert count("event_detail_unspsc") == 1  # the second read replaced, not appended
+    assert count("event_detail_licenses") == 2 and count("event_detail_service_areas") == 3
+    row = con.execute(
+        "SELECT business_unit, fetched_at, prebid_mandatory FROM event_details"
+    ).fetchone()
+    assert row == ("8955", "2026-11-16T22:00:00+00:00", 1)
+    cols = {r[1] for r in con.execute("PRAGMA table_info(event_details)")}
+    assert not cols & {"contact_name", "phone", "email"}  # buyer contact is never stored
+
+
+def test_detail_queue_reads_new_events_first_and_retries_misses_weekly(tmp_path):
+    db, con = _posted_db(
+        tmp_path,
+        [
+            ("A Dept", "1", "12/01/2026"),
+            ("A Dept", "2", "11/20/2026"),
+            ("B Dept", "3", "11/18/2026"),
+            ("C Dept", "4", "11/17/2026"),
+        ],
+    )
+    d = eprocure.parse_event_detail(_CALTRANS)
+    eprocure.write_event_detail(con, "A Dept", "1", "0001", d, "2026-11-10T00:00:00+00:00")
+    eprocure.write_event_detail(con, "B Dept", "3", "0002", d, "2026-11-01T00:00:00+00:00")
+    eprocure._record_detail_miss(con, "C Dept", "4", ["9999"], "2026-11-12")
+    queue = eprocure._detail_queue(con, "2026-11-15")
+    # never read first (2), then oldest read (3 before 1); 4 was missed 3 days ago
+    assert queue == [("A Dept", "2"), ("B Dept", "3"), ("A Dept", "1")]
+    assert ("C Dept", "4") in eprocure._detail_queue(con, "2026-11-20")  # 8 days later: retried
+
+
+def test_unit_candidates_try_aliases_then_every_matching_unit(tmp_path):
+    depts = tmp_path / "departments.csv"
+    depts.write_text(
+        "code,name\n1730,Franchise Tax Board\n7730,Franchise Tax Board\n8940,Military Department\n",
+        encoding="utf-8",
+    )
+    aliases = tmp_path / "aliases.csv"
+    aliases.write_text(
+        "eprocure_department_name,business_unit,note\nCalifornia Military Department,8940,x\n",
+        encoding="utf-8",
+    )
+    c = eprocure.load_unit_candidates(depts, aliases)
+    assert c["FRANCHISE TAX BOARD"] == ["1730", "7730"]  # ambiguous: the page decides
+    assert c["CALIFORNIA MILITARY DEPARTMENT"] == ["8940"]
+    real = eprocure.load_unit_candidates()  # the committed reference files load
+    assert "8940" in real["CALIFORNIA MILITARY DEPARTMENT"]
+    assert real["COVERED CALIFORNIA"] == ["4800"]
+
+
+def test_weekly_rebuild_carries_published_detail_reads(tmp_path):
+    """The weekly refresh rebuilds eprocure.db from empty; the daily job's detail
+    reads must survive it for every bid still Posted, and only those."""
+    prev_dir, new_dir = tmp_path / "prev", tmp_path / "new"
+    prev_dir.mkdir()
+    new_dir.mkdir()
+    prev, pcon = _posted_db(
+        prev_dir, [("A Dept", "1", "12/01/2026"), ("A Dept", "2", "11/20/2026")]
+    )
+    d = eprocure.parse_event_detail(_FLOORING)
+    for eid in ("1", "2"):
+        eprocure.write_event_detail(pcon, "A Dept", eid, "0001", d, "2026-11-14T00:00:00+00:00")
+    pcon.close()
+    # This week's Posted slice: bid 1 is still open, bid 2 closed, bid 3 is new.
+    new, ncon = _posted_db(new_dir, [("A Dept", "1", "12/01/2026"), ("A Dept", "3", "12/05/2026")])
+    ncon.close()
+    out = eprocure.carry_forward_event_details(new, prev, lambda _p: False)
+    assert out["carried"] == 1
+    con = sqlite3.connect(new)
+    assert con.execute("SELECT event_id FROM event_details").fetchall() == [("1",)]
+    assert con.execute("SELECT COUNT(*) FROM event_detail_unspsc").fetchone()[0] == 2
+    assert con.execute("SELECT COUNT(*) FROM event_detail_service_areas").fetchone()[0] == 3
+    con.close()
+    # Nothing published yet: a clean no-op, not an error.
+    fresh, fcon = _posted_db(tmp_path, [("A Dept", "9", "12/01/2026")])
+    fcon.close()
+    missing = eprocure.carry_forward_event_details(fresh, tmp_path / "absent.db", lambda _p: False)
+    assert missing["carried"] == 0
