@@ -288,7 +288,9 @@ def fetch_departments() -> list[tuple[str, str]]:
     from bs4 import BeautifulSoup
 
     s = requests.Session()
-    s.headers.update({"User-Agent": "scprs-analysis/0.1 (+muntherhasan1@gmail.com)"})
+    s.headers.update(
+        {"User-Agent": "scprs-analysis/0.1 (+https://github.com/muntherhasan1/scprs-analysis)"}
+    )
     # Open the Department lookup (prompt) once.
     data = _form_fields(BeautifulSoup(s.get(SEARCH_URL, timeout=45).text, "lxml"))
     data["ICAction"] = "ZZ_SCPRS_SP_WRK_BUSINESS_UNIT$prompt"

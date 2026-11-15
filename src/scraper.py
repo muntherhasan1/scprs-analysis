@@ -21,7 +21,7 @@ from urllib.parse import urljoin, urlparse
 import requests
 from bs4 import BeautifulSoup
 
-USER_AGENT = "scprs-analysis/0.1 (data analysis; contact: muntherhasan1@gmail.com)"
+USER_AGENT = "scprs-analysis/0.1 (data analysis; +https://github.com/muntherhasan1/scprs-analysis)"
 DEFAULT_TIMEOUT = 30  # seconds
 
 # Where downloads land. Git-ignored (see .gitignore), so data stays out of git.
