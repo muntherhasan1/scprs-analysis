@@ -35,6 +35,7 @@ import sqlite3
 from collections import defaultdict
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
+from urllib.parse import quote
 
 from . import scprs
 from .reconcile import load_fiscal_deferred
@@ -116,6 +117,19 @@ def _hhi(values: list[float]) -> tuple[int, float, float]:
     return len(vals), round(sum(s * s for s in shares) * 10000, 0), round(100 * max(shares), 1)
 
 
+def _eprocure_url(business_unit: str | None, event_id: str | None) -> str | None:
+    """Cal eProcure's public page for one event: /event/{business unit}/{event id}.
+
+    Confirmed in a browser on 2026-11-15 for 8 departments and every ID shape
+    posted then (0000040541, 11A4467, 26-165, C26004, 2CA08061, 3742). The event
+    grid carries no business unit, so the department-name match supplies it;
+    no match, no link (the front end falls back to the event search)."""
+    if not business_unit or not event_id or not event_id.strip():
+        return None
+    bu, eid = quote(business_unit.strip(), safe=""), quote(event_id.strip(), safe="")
+    return f"https://caleprocure.ca.gov/event/{bu}/{eid}"
+
+
 def _opportunities(con, today: str, loaded: set[str]) -> list[dict]:
     rows = _rows(
         con,
@@ -136,7 +150,7 @@ def _opportunities(con, today: str, loaded: set[str]) -> list[dict]:
             "dvbe_only": bool(r["dvbe_only"]),
             # Set aside for SB *or* DVBE bidders ("SB/DVBE ONLY") — neither flag above.
             "sb_or_dvbe": bool(r["sb_or_dvbe"]),
-            "eprocure_url": None,  # no stable per-event link known yet (contract open question)
+            "eprocure_url": _eprocure_url(r["business_unit"], r["event_id"]),
         }
         for r in rows
     ]
