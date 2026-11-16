@@ -50,7 +50,9 @@ RECENT_CONTRACTS = 10
 # within a year, too many to list unfiltered).
 RECOMPETE_DAYS = 365
 RECOMPETE_MIN_VALUE = 100_000.0
-FUNDING_RECORD = "Encumbrance Only"  # an acquisition type that is a funding record, not a purchase
+# Left out of recompetes.json for now. Caltrans records whole construction
+# contracts as Encumbrance Only, so whether they belong is open (Contract Lens B7).
+FUNDING_RECORD = "Encumbrance Only"
 SHARDS = 100
 
 
@@ -781,12 +783,15 @@ SIZE_BUCKETS = (
 # 2026-10 fix, gated by the acquisition_type_split DQ check); rolling up on the
 # part before "_" stays as a guard so the vector can never splinter again.
 ACQUISITION_LABELS = {
-    "NON-IT Goods": "Goods (non-IT)",
-    "NON-IT Services": "Services (non-IT)",
+    "NON-IT Goods": "Non-IT goods",
+    "NON-IT Services": "Non-IT services",
     "IT Goods": "IT goods",
     "IT Services": "IT services",
     "Telecom": "Telecom",
-    "Encumbrance Only": "Encumbrance only (funding record)",
+    # Not "funding record": Caltrans records whole construction contracts this way
+    # (Granite, Security Paving and Skanska lead it), so the label says only what
+    # SCPRS says (Contract Lens glossary, 2026-11-15).
+    "Encumbrance Only": "Recorded as Encumbrance Only",
     "Unknown": "Unknown",
 }
 
