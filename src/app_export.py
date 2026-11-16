@@ -159,6 +159,8 @@ _UNSPSC_ABBREVIATIONS = {
     "mgmt": "management",
     "equip": "equipment",
     "mfg": "manufacturing",
+    "condit.": "conditioning",
+    "orgs": "organizations",
 }
 BID_DESCRIPTION_MAX = 600  # characters of a bid's description shipped to the app
 
@@ -176,17 +178,32 @@ def _bid_type(event_name: str | None, is_information_request) -> str | None:
     return "RFI" if is_information_request else None
 
 
+def _unspsc_label(name: str | None) -> str | None:
+    """One UNSPSC name as shown: abbreviations spelled out, sentence case with
+    acronyms kept ("Building Facility Infrastructure maint srvcs" ->
+    "Building facility infrastructure maintenance services"; HVAC stays)."""
+    words = []
+    for i, w in enumerate((name or "").split()):
+        w = _UNSPSC_ABBREVIATIONS.get(w.lower(), w)
+        if i and w[:1].isupper() and not w.isupper():
+            w = w.lower()
+        words.append(w)
+    out = " ".join(words)
+    return (out[:1].upper() + out[1:]) or None
+
+
+def _unspsc_parts(description: str | None) -> list[str]:
+    """eProcure writes a UNSPSC description as "Family - Class[ - Commodity]"."""
+    return [x.strip() for x in (description or "").split(" - ") if x.strip()]
+
+
 def _work_type(description: str | None) -> str | None:
-    """A UNSPSC description's class-level name, spelled out: eProcure writes
-    "Family - Class[ - Commodity]", so the second part names the kind of work
-    ("Floor laying", "Pest control"); a family-level code falls back to the first."""
-    parts = [x.strip() for x in (description or "").split(" - ") if x.strip()]
+    """A UNSPSC description's class-level name, spelled out ("Floor laying",
+    "Pest control"); a family-level code falls back to the family name."""
+    parts = _unspsc_parts(description)
     if not parts:
         return None
-    name = parts[1] if len(parts) > 1 else parts[0]
-    words = [_UNSPSC_ABBREVIATIONS.get(w.lower(), w) for w in name.split()]
-    out = " ".join(words)
-    return out[:1].upper() + out[1:]
+    return _unspsc_label(parts[1] if len(parts) > 1 else parts[0])
 
 
 def _has_columns(con, table: str, cols: tuple[str, ...]) -> bool:
@@ -282,6 +299,18 @@ def _opportunities(
                     dict.fromkeys(w for u in unspsc if (w := _work_type(u["description"])))
                 ),
                 "unspsc": unspsc,
+                # UNSPSC family (4 digits) and class (6 digits) of each code, for
+                # the type-of-work tree (facets.type_of_work_tree).
+                "unspsc_families": list(
+                    dict.fromkeys(u["code"][:4] for u in unspsc if len(u["code"]) >= 4)
+                ),
+                "unspsc_classes": list(
+                    dict.fromkeys(
+                        u["code"][:6]
+                        for u in unspsc
+                        if len(u["code"]) >= 6 and len(_unspsc_parts(u["description"])) > 1
+                    )
+                ),
                 "licenses": [{"code": t, "description": d} for t, d in licenses.get(key, [])],
                 "service_area": [c for (c,) in areas.get(key, [])],
                 "prebid_conference": (
@@ -308,7 +337,54 @@ def _opportunity_facets(items: list[dict], categories: list[dict]) -> dict:
     def tally(values) -> list[tuple]:
         return sorted(Counter(values).items(), key=lambda kv: (-kv[1], str(kv[0])))
 
+    match = _category_matcher(categories)
+    fam_names, cls_names, fam_cats = (defaultdict(Counter) for _ in range(3))
+    for i in items:
+        for u in i["unspsc"]:
+            parts, code = _unspsc_parts(u["description"]), u["code"]
+            if len(code) < 4 or not parts:
+                continue
+            fam_names[code[:4]][_unspsc_label(parts[0])] += 1
+            fam_cats[code[:4]][match(code)] += 1
+            if len(code) >= 6 and len(parts) > 1:
+                cls_names[code[:6]][_unspsc_label(parts[1])] += 1
+    fam_bids = Counter(f for i in items for f in i["unspsc_families"])
+    cls_bids = Counter(c for i in items for c in i["unspsc_classes"])
+    cat_bids = Counter(c for i in items for c in i["categories"])
+    tree: dict[str, list] = defaultdict(list)
+    for fam, n in fam_bids.items():
+        classes = sorted(
+            (
+                {"key": c, "label": cls_names[c].most_common(1)[0][0], "bid_count": cls_bids[c]}
+                for c in cls_bids
+                if c[:4] == fam and cls_names[c]
+            ),
+            key=lambda x: (-x["bid_count"], x["label"]),
+        )
+        tree[fam_cats[fam].most_common(1)[0][0]].append(
+            {
+                "key": fam,
+                "label": fam_names[fam].most_common(1)[0][0],
+                "bid_count": n,
+                "classes": classes,
+            }
+        )
+    type_of_work_tree = sorted(
+        (
+            {
+                "key": cat,
+                "label": labels.get(cat, cat),
+                "bid_count": cat_bids[cat],
+                "families": sorted(fams, key=lambda x: (-x["bid_count"], x["label"])),
+            }
+            for cat, fams in tree.items()
+        ),
+        key=lambda x: (-x["bid_count"], x["label"]),
+    )
     return {
+        # Category -> UNSPSC family -> class, each with its open-bid count: the
+        # "type of work" filter tree (names spelled out, most common wording).
+        "type_of_work_tree": type_of_work_tree,
         "categories": [
             {"key": k, "label": labels.get(k, k), "bid_count": n}
             for k, n in tally(c for i in items for c in i["categories"])

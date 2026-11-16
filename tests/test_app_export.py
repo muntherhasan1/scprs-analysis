@@ -798,6 +798,23 @@ def test_open_bids_carry_detail_pages_and_filter_counts(tmp_path):
     ]
     assert f["counties"] == [{"county": "San Francisco", "bid_count": 1}]
     assert f["mandatory_prebid_count"] == 1
+    # Type-of-work tree: category -> UNSPSC family -> class, names spelled out.
+    assert puc["unspsc_families"] == ["8111", "7210"]
+    assert puc["unspsc_classes"] == ["811122", "721021"]
+    tree = {c["key"]: c for c in f["type_of_work_tree"]}
+    assert set(tree) == {"it-services", "construction"}
+    (fam,) = tree["construction"]["families"]
+    assert (fam["key"], fam["label"], fam["bid_count"]) == (
+        "7210",
+        "Building facility construction & maintenance services",
+        1,
+    )
+    assert fam["classes"] == [{"key": "721021", "label": "Pest control", "bid_count": 1}]
+    assert (
+        tree["it-services"]["families"][0]["classes"][0]["label"]
+        == "Software maintenance & support"
+    )
+    assert daa["unspsc_families"] == daa["unspsc_classes"] == []
 
 
 def test_bid_type_and_work_type_wording():
@@ -828,3 +845,20 @@ def test_bid_type_and_work_type_wording():
     assert app_export._work_type("Heavy equip maint srvcs - Repair") == "Repair"
     assert app_export._work_type("Facility maint srvcs") == "Facility maintenance services"
     assert app_export._work_type(None) is None
+
+
+def test_unspsc_labels_read_cleanly():
+    """eProcure's UNSPSC names come abbreviated and in mixed case (live, 2026-11-16)."""
+    lab = app_export._unspsc_label
+    assert (
+        lab("Special trade construction & maint srvcs")
+        == "Special trade construction & maintenance services"
+    )
+    assert lab("Heating cooling air condit. HVAC construction & maintenance") == (
+        "Heating cooling air conditioning HVAC construction & maintenance"
+    )
+    assert lab("Building Facility Infrastructure maintenance & repair services") == (
+        "Building facility infrastructure maintenance & repair services"
+    )
+    assert lab("Civic orgs") == "Civic organizations"
+    assert lab(None) is None
