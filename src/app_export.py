@@ -133,16 +133,22 @@ def _eprocure_url(business_unit: str | None, event_id: str | None) -> str | None
 
 
 # Bid type from the title's own token (departments put it there: "RFQ #2026061",
-# "IFB 2175", "RFP-IT-2026-214"); a detail page's Format/Type of "Request For
-# Information" wins. Anything else is left null rather than guessed.
+# "IFB 2175", "RFP-IT-2026-214"). "RFQ" is a Request for Quotation in most state
+# buying but a Request for *Qualifications* at UC and in construction: it reads
+# as qualifications when the title says so or eProcure posted it in its
+# "Request For Information" format (UC Davis "RFQ for Design Professional
+# Services", UC Santa Cruz "RFQ - 3742", 2026-11-16). With no token, that format
+# gives "RFI"; anything else is left null rather than guessed.
 _BID_TYPES = {
     "RFQ": "Request for Quotation",
+    "RFQUAL": "Request for Qualifications",
     "IFB": "Invitation for Bid",
     "RFP": "Request for Proposal",
     "RFO": "Request for Offer",
     "RFI": "Request for Information",
 }
 _BID_TYPE_TOKEN = re.compile(r"\b(RFQ|IFB|RFP|RFO|RFI)\b", re.I)
+_QUALIFICATIONS = re.compile(r"\bqualifications?\b|\bRFQual\b|\bSOQ\b", re.I)
 # eProcure's UNSPSC descriptions abbreviate ("Special trade construction & maint
 # srvcs - Floor laying"); spelled out for display.
 _UNSPSC_ABBREVIATIONS = {
@@ -158,10 +164,16 @@ BID_DESCRIPTION_MAX = 600  # characters of a bid's description shipped to the ap
 
 
 def _bid_type(event_name: str | None, is_information_request) -> str | None:
-    if is_information_request:
-        return "RFI"
-    m = _BID_TYPE_TOKEN.search(event_name or "")
-    return m.group(1).upper() if m else None
+    name = event_name or ""
+    m = _BID_TYPE_TOKEN.search(name)
+    code_in_title = m.group(1).upper() if m else None
+    if _QUALIFICATIONS.search(name) and code_in_title in (None, "RFQ"):
+        return "RFQUAL"
+    if code_in_title == "RFQ" and is_information_request:
+        return "RFQUAL"
+    if code_in_title:
+        return code_in_title
+    return "RFI" if is_information_request else None
 
 
 def _work_type(description: str | None) -> str | None:

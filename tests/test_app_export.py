@@ -806,6 +806,13 @@ def test_bid_type_and_work_type_wording():
     assert app_export._bid_type("RFP-IT-2026-214-RB-LAN WAN MSA", 0) == "RFP"
     assert app_export._bid_type("CSU Preferred Lender RFI", 0) == "RFI"
     assert app_export._bid_type("Renewable Diesel", 1) == "RFI"  # Format/Type said so
+    # RFQ means Qualifications when the title says so or eProcure's format is RFI
+    # (live UC titles, 2026-11-16); otherwise Quotation. The title's token wins.
+    assert app_export._bid_type("RFQ for Design Professional Services", 1) == "RFQUAL"
+    assert app_export._bid_type("RFQ - 3742 Oakes College Housing", 1) == "RFQUAL"
+    assert app_export._bid_type("Annual Request for Qualifications and Interest", 1) == "RFQUAL"
+    assert app_export._bid_type("RFI #2 - NASPO ValuePoint", 1) == "RFI"
+    assert app_export._bid_type("RFQ #2026114 - SB option - Acronis", 0) == "RFQ"
     assert app_export._bid_type("Janitorial Services", 0) is None  # never guessed
     assert app_export._bid_type("Sprifq sprinklers", 0) is None  # whole tokens only
     assert (
