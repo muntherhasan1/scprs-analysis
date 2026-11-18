@@ -87,6 +87,64 @@ def _rows(con: sqlite3.Connection, sql: str, params=()) -> list[dict]:
     return [dict(zip(cols, r, strict=True)) for r in cur]
 
 
+LOST_CHARACTER = "\u00bf"  # ¿
+_CONTRACTION = re.compile(r"(?:s|t|d|m|ll|re|ve)(?![A-Za-z])")
+_OPENERS = "([{\"'"
+_CLOSERS = ".,;:!?)]}"
+
+
+def restore_lost_punctuation(text: str | None) -> str | None:
+    """Put back the punctuation PeopleSoft lost.
+
+    Cal eProcure stores characters outside its charset (curly quotes,
+    apostrophes, dashes) as "¿", so bid text reads "DIR¿s", "(¿DGS¿)" or
+    "Services ¿ Southern California". Each "¿" becomes the obvious character
+    for where it sits (the owner's call, 2026-11-18):
+    between spaces a dash; before s/t/d/m/ll/re/ve, or after a word with no
+    quote open, an apostrophe; at the start of a word an opening quote, closed
+    by the next "¿" at the end of a word; inside a word a hyphen; otherwise an
+    em dash.
+
+    Used on bid text only. SCPRS contract item titles also use "¿" for symbols
+    (Core¿ i7 = ™, 14¿" = ½, ¿g/mL = µ), where no guess is obvious, so they
+    keep it. Department names keep it too: they join a bid to its department.
+    """
+    if not text or LOST_CHARACTER not in text:
+        return text
+    out: list[str] = []
+    quote_open = False
+    for i, ch in enumerate(text):
+        if ch != LOST_CHARACTER:
+            out.append(ch)
+            continue
+        prev = text[i - 1] if i > 0 else ""
+        nxt = text[i + 1] if i + 1 < len(text) else ""
+        space_before = prev == "" or prev.isspace()
+        space_after = nxt == "" or nxt.isspace()
+        if space_before and space_after:
+            out.append("–")
+        elif prev.isalpha() and _CONTRACTION.match(text, i + 1):
+            out.append("'")
+        elif (
+            prev.isalpha() and nxt.isupper() and (i < 2 or not text[i - 2].isalpha())
+        ):  # O¿Brien, D¿Angelo
+            out.append("'")
+        elif (space_before or prev in _OPENERS) and not space_after:
+            out.append('"')
+            quote_open = True
+        elif space_after or nxt in _CLOSERS:
+            if quote_open or not prev.isalpha():
+                out.append('"')
+                quote_open = False
+            else:
+                out.append("'")  # plural possessive: years¿ experience
+        elif prev.isalnum() and nxt.isalnum():
+            out.append("-")
+        else:
+            out.append("—")
+    return "".join(out)
+
+
 def _write(path: Path, payload: dict, generated_at: str) -> int:
     path.parent.mkdir(parents=True, exist_ok=True)
     body = {"schema_version": SCHEMA_VERSION, "generated_at": generated_at, **payload}
@@ -268,11 +326,11 @@ def _opportunities(
         read = bool(r.get("details_read_at"))
         unspsc = [{"code": c, "description": d} for c, d in codes.get(key, [])]
         mandatory = r.get("prebid_mandatory")
-        description = r.get("description")
+        description = restore_lost_punctuation(r.get("description"))
         items.append(
             {
                 "event_id": r["event_id"],
-                "event_name": r["event_name"],
+                "event_name": restore_lost_punctuation(r["event_name"]),
                 "department_name": r["department_name"],
                 "business_unit": r["business_unit"],
                 "department_loaded": r["business_unit"] in loaded,
@@ -318,8 +376,8 @@ def _opportunities(
                         "mandatory": bool(mandatory),
                         "date": r.get("prebid_date"),
                         "time": r.get("prebid_time"),
-                        "location": r.get("prebid_location"),
-                        "comments": r.get("prebid_comments"),
+                        "location": restore_lost_punctuation(r.get("prebid_location")),
+                        "comments": restore_lost_punctuation(r.get("prebid_comments")),
                     }
                     if mandatory is not None
                     else None

@@ -15,7 +15,9 @@ def _load(path):
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def _build(tmp_path, extra_purchases=(), cmas=None, titles=None, source_sql=(), details=()):
+def _build(
+    tmp_path, extra_purchases=(), cmas=None, titles=None, source_sql=(), details=(), eprocure_sql=()
+):
     src, wh = tmp_path / "scprs.db", tmp_path / "warehouse.db"
     serve, epr = tmp_path / "warehouse-serve.db", tmp_path / "eprocure.db"
     _seed_source(src)  # BU 8660: doc A (v1 100 -> v2 150, Acme/S1), doc B (5000, Beta/S2)
@@ -78,6 +80,8 @@ def _build(tmp_path, extra_purchases=(), cmas=None, titles=None, source_sql=(), 
             eprocure.write_event_detail(
                 con, dept, eid, bu, eprocure.parse_event_detail(raw), "2026-07-25T06:00:00+00:00"
             )
+    for sql, rows in eprocure_sql:  # [(sql, [params, ...])]: edits to the seeded eProcure store
+        con.executemany(sql, rows or [()])
     con.commit()
     con.close()
     warehouse.build_all(
@@ -862,3 +866,82 @@ def test_unspsc_labels_read_cleanly():
     )
     assert lab("Civic orgs") == "Civic organizations"
     assert lab(None) is None
+
+
+# Cal eProcure / SCPRS (PeopleSoft) store characters outside their charset as
+# "¿": curly quotes, apostrophes and dashes. Real cases from the published data.
+@pytest.mark.parametrize(
+    ("raw", "shown"),
+    [
+        (
+            "Dam Safety Engineering Services ¿ Southern California",
+            "Dam Safety Engineering Services – Southern California",
+        ),
+        (
+            "Program Management for DIR¿s approximately",
+            "Program Management for DIR's approximately",
+        ),
+        ("other California JBE¿s.", "other California JBE's."),
+        ("a minimum of five (5) years¿ experience", "a minimum of five (5) years' experience"),
+        (
+            "Department of General Services (¿DGS¿), must",
+            'Department of General Services ("DGS"), must',
+        ),
+        ("services on an ¿as-needed basis¿ and will", 'services on an "as-needed basis" and will'),
+        ("on an ¿as-needed basis.¿ The Contractor", 'on an "as-needed basis." The Contractor'),
+        (
+            "entitled, ¿CHP El Cajon Area Office ¿ Gate Maintenance Services.¿\xa0 When",
+            'entitled, "CHP El Cajon Area Office – Gate Maintenance Services."\xa0 When',
+        ),
+        (
+            "clean¿energy systems on State¿owned buildings",
+            "clean-energy systems on State-owned buildings",
+        ),
+        ("a long¿term, twenty-year", "a long-term, twenty-year"),
+        ("Contract with O¿Brien Electric", "Contract with O'Brien Electric"),
+        ("We don¿t accept", "We don't accept"),
+        ("Administration (TPA)¿and Utilization", "Administration (TPA)—and Utilization"),
+        ("¿ Bullet item", "– Bullet item"),
+        ("No lost characters here", "No lost characters here"),
+    ],
+)
+def test_restore_lost_punctuation(raw, shown):
+    assert app_export.restore_lost_punctuation(raw) == shown
+
+
+def test_bid_text_has_lost_punctuation_restored(tmp_path):
+    """Title, description and pre-bid place and comments of a bid, wherever the
+    bid is written (Bids, the department page). The department name is a join
+    key and stays as the source has it."""
+    raw = {
+        "format1": "Sell Event",
+        "format2": "RFx",
+        "published": "07/01/2026 9:00AM PDT",
+        "version": "1",
+        "conference": "Mandatory",
+        "conf_date": "07/20/2026",
+        "conf_time": "10:00AM",
+        "conf_location": "CAL FIRE \u00bf San Bernardino Unit",
+        "conf_comments": "Bring the \u00bfas-needed\u00bf list.",
+        "description": "Rate case support for DIR\u00bfs office.",
+    }
+    rename = (
+        "UPDATE events SET event_name = ? WHERE event_id = ?",
+        [("Rate Case \u00bf Support", "26-001")],
+    )
+    out, _ = _build(
+        tmp_path,
+        details=[("Public Utilities Commission", "26-001", "8660", raw)],
+        eprocure_sql=[rename],
+    )
+    bid = next(o for o in _load(out / "opportunities.json")["items"] if o["event_id"] == "26-001")
+    assert bid["event_name"] == "Rate Case \u2013 Support"
+    assert bid["description"] == "Rate case support for DIR's office."
+    assert bid["prebid_conference"]["location"] == "CAL FIRE \u2013 San Bernardino Unit"
+    assert bid["prebid_conference"]["comments"] == 'Bring the "as-needed" list.'
+    assert bid["department_name"] == "Public Utilities Commission"
+    page = _load(out / "departments" / "8660.json")["open_opportunities"]
+    assert (
+        next(o for o in page if o["event_id"] == "26-001")["event_name"]
+        == "Rate Case \u2013 Support"
+    )
