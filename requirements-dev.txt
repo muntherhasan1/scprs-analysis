@@ -1,7 +1,7 @@
 # Dev + security tooling. Install with: pip install -r requirements-dev.txt
 -r requirements.txt
 
-ruff>=0.17.4        # lint + format
+ruff>=0.17.5        # lint + format
 bandit>=1.9.4        # Python SAST (finds insecure code patterns)
 detect-secrets>=1.5  # secret scanner (local pre-commit; runs via python -m, WDAC-safe)
 pip-audit>=2.10.1    # scans dependencies for known CVEs
